@@ -1,0 +1,33 @@
+# Python caches and test state
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local operating-system files
+.DS_Store
+
+# Raw MAST products and streamed checkpoint data
+MAST/
+wfi_tile_log_statistics_512/
+*.parts/
+*.partial
+
+# Generated analysis products
+*.csv
+*.npz
+*.png
+*.log
+*.md
+*.html
+effective_*/
+joint_fit_plots/
+wfi01_*/
+
+# Keep the small reproducible fixtures used by the tests.
+!all_wfi_rcs_flat_index.csv
+!wfi01_tile_log_statistics_512.csv
+!README.md
+!docs/
+!docs/**
