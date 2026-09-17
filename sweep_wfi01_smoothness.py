@@ -26,11 +26,8 @@ from analyze_rcs_soc_ice_model import (
     soc_sqrt_thickness,
 )
 from analyze_wfi01_all_pixel_soc_model import (
-    DATA_DIR,
-    INDEX_PATH,
     ROOT,
     STATISTICS_PATH,
-    all_pixel_loss_components,
     fit_global_entropy_sqrt,
     fit_global_soc_sqrt,
     load_all_pixel_statistics,

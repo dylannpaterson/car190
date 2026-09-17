@@ -25,7 +25,6 @@ from sample_wfi01_single_pixel_tmm_emcee import (
     DEFAULT_STATISTICS,
     HGCDTE_MODEL_CHOICES,
     MODEL_PATH,
-    PARAMETER_NAMES,
     build_tmm_response,
     tmm_configuration,
     unpack_trajectory,

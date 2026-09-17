@@ -15,7 +15,6 @@ response table or the existing all-pixel fit outputs.
 
 import argparse
 import csv
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import matplotlib
@@ -27,21 +26,17 @@ import numpy as np
 from analyze_rcs_soc_ice_model import (
     DEFAULT_MODEL_PATH,
     fit_periodic_model,
-    mean_endpoint_rate,
     read_model_table,
     response_prediction,
     soc_sqrt_thickness,
     sed_output,
 )
 from analyze_wfi01_all_pixel_soc_model import (
-    DATA_DIR,
-    INDEX_PATH,
     ROOT,
     STATISTICS_PATH,
     all_pixel_loss_components,
     apply_step_offset,
     fit_global_entropy_sqrt,
-    fit_global_soc_sqrt,
     load_all_pixel_statistics,
     parse_mast_time,
     profile_step_offset,
