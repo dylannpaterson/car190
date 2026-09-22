@@ -137,8 +137,15 @@ def prepare_response_integration(
     qe_wavelengths,
     qe_values,
     sed_mode,
+    qe_column=0,
 ):
-    """Precompute each LED integral as weights on the model wavelength grid."""
+    """Precompute one QE-column's LED integrals on the model wavelength grid."""
+    qe_values = np.asarray(qe_values)
+    if qe_values.ndim != 2 or qe_values.shape[0] != len(qe_wavelengths):
+        raise ValueError("QE values must be a wavelength-aligned two-dimensional array")
+    qe_column = int(qe_column)
+    if qe_column < 0 or qe_column >= qe_values.shape[1]:
+        raise ValueError(f"QE column {qe_column} is outside the supplied QE table")
     model_weights = np.zeros((6, len(model_wavelengths)), dtype=float)
     outside_output = np.zeros(6, dtype=float)
     clean_output = np.zeros(6, dtype=float)
@@ -148,7 +155,7 @@ def prepare_response_integration(
         qe = np.interp(
             wavelengths,
             qe_wavelengths,
-            qe_values[:, 0],
+            qe_values[:, qe_column],
             left=0.0,
             right=0.0,
         )

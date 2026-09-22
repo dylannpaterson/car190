@@ -11,6 +11,7 @@ token_path = Path(
     os.environ.get("MAST_TOKEN_FILE", Path.home() / "Downloads/mast_api_token.txt")
 )
 DEFAULT_OUTPUT = ROOT / "wfi01_rcs_flat_index.csv"
+DEFAULT_PROGRAM = "1039"
 
 select_cols = [
     "fileSetName",
@@ -62,10 +63,15 @@ def parse_args():
         default=5000,
         help="MAST page size per detector (default: 5000)",
     )
+    parser.add_argument(
+        "--program",
+        default=DEFAULT_PROGRAM,
+        help=f"MAST program to query (default: {DEFAULT_PROGRAM})",
+    )
     return parser.parse_args()
 
 
-def query_detector(missions, detector, page_size):
+def query_detector(missions, detector, page_size, program):
     rows = []
     offset = 0
     while True:
@@ -73,6 +79,7 @@ def query_detector(missions, detector, page_size):
             exposure_type="WFI_FLAT",
             optical_element="DARK",
             detector=detector,
+            program=program,
             product_type="l2",
             select_cols=select_cols,
             limit=page_size,
@@ -106,7 +113,7 @@ def main():
 
     tables = []
     for detector in detectors:
-        table = query_detector(missions, detector, args.page_size)
+        table = query_detector(missions, detector, args.page_size, args.program)
         if table is not None:
             tables.append(table)
         print(f"Found {0 if table is None else len(table)} {detector} L2 flat candidates")

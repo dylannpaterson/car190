@@ -29,6 +29,7 @@ DEFAULT_INDEX = ROOT / "all_wfi_rcs_flat_index.csv"
 DEFAULT_OUTPUT_DIR = ROOT / "wfi_tile_log_statistics_512"
 DEFAULT_TOKEN = Path.home() / "Downloads" / "mast_api_token.txt"
 DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024
+RCS_PROGRAM = "1039"
 
 
 def read_index(path):
@@ -36,10 +37,23 @@ def read_index(path):
         rows = list(csv.DictReader(handle))
     if not rows:
         raise ValueError(f"No MAST index rows found in {path}")
-    required = {"fileSetName", "detector", "led", "exposure_start_time"}
+    required = {
+        "fileSetName",
+        "detector",
+        "led",
+        "exposure_start_time",
+        "visit_id",
+        "program",
+    }
     missing = required.difference(rows[0])
     if missing:
         raise ValueError(f"MAST index is missing columns: {sorted(missing)}")
+    programs = sorted({str(row["program"]).strip() for row in rows})
+    if programs != [RCS_PROGRAM]:
+        raise ValueError(
+            f"MAST index must contain only RCS program {RCS_PROGRAM}; "
+            f"found programs: {programs}"
+        )
     return rows
 
 
@@ -47,25 +61,65 @@ def detector_observations(rows, detector):
     selected = [row for row in rows if row["detector"] == detector]
     if not selected:
         raise ValueError(f"No MAST index rows found for {detector}")
+    programs = sorted(
+        {str(row.get("program", RCS_PROGRAM)).strip() for row in selected}
+    )
+    if programs != [RCS_PROGRAM]:
+        raise ValueError(
+            f"{detector} observations must use RCS program {RCS_PROGRAM}; "
+            f"found programs: {programs}"
+        )
     global_start = min(
         parse_mast_time(row["exposure_start_time"]) for row in rows
     )
-    observations = []
-    counts = []
-    for led in range(1, 7):
-        led_rows = sorted(
-            [row for row in selected if int(row["led"]) == led],
-            key=lambda row: parse_mast_time(row["exposure_start_time"]),
+
+    visit_groups = {}
+    for row in selected:
+        visit_id = str(row.get("visit_id", "")).strip()
+        if len(visit_id) <= 4:
+            raise ValueError(
+                f"{detector} has an invalid visit_id for {row['fileSetName']}: "
+                f"{visit_id!r}"
+            )
+        # The final four visit-id digits identify the LED/exposure product;
+        # the prefix is the shared temporal visit sequence.
+        sequence_key = visit_id[:-4]
+        visit_groups.setdefault(sequence_key, []).append(row)
+
+    sequence_groups = []
+    for sequence_key, sequence_rows in visit_groups.items():
+        sequence_rows.sort(
+            key=lambda row: (
+                parse_mast_time(row["exposure_start_time"]),
+                int(row["led"]),
+                row["fileSetName"],
+            )
         )
-        counts.append(len(led_rows))
-        if len(led_rows) < 3:
-            raise ValueError(f"{detector} LED {led} has too few repeats")
-        for repeat, row in enumerate(led_rows):
+        sequence_days = np.mean(
+            [
+                (
+                    parse_mast_time(row["exposure_start_time"]) - global_start
+                ).total_seconds()
+                / 86400.0
+                for row in sequence_rows
+            ]
+        )
+        sequence_groups.append((sequence_days, sequence_key, sequence_rows))
+    sequence_groups.sort(key=lambda item: (item[0], item[1]))
+
+    observations = []
+    led_counts = {led: 0 for led in range(1, 7)}
+    for repeat, (_, _, sequence_rows) in enumerate(sequence_groups):
+        for row in sequence_rows:
+            led = int(row["led"])
+            if led not in led_counts:
+                raise ValueError(f"{detector} has invalid LED number: {led}")
+            led_counts[led] += 1
             observations.append(
                 {
                     "led": led,
                     "repeat": repeat,
-                    "group": (led - 1) * len(led_rows) + repeat,
+                    "group": len(observations),
                     "file_set_name": row["fileSetName"],
                     "baseline_file_set_name": "",
                     "exposure_start_time": row["exposure_start_time"],
@@ -77,12 +131,14 @@ def detector_observations(rows, detector):
                     or f'{row["fileSetName"]}/{row["fileSetName"]}_cal.asdf',
                 }
             )
-    if len(set(counts)) != 1:
-        raise ValueError(f"{detector} LEDs have unequal repeat counts: {counts}")
-    repeats = counts[0]
+    for led, count in led_counts.items():
+        if count < 3:
+            raise ValueError(f"{detector} LED {led} has too few repeats")
+    baselines = {}
     for row in observations:
-        baseline = observations[(row["led"] - 1) * repeats]
-        row["baseline_file_set_name"] = baseline["file_set_name"]
+        baselines.setdefault(row["led"], row["file_set_name"])
+    for row in observations:
+        row["baseline_file_set_name"] = baselines[row["led"]]
     return observations
 
 
@@ -124,7 +180,10 @@ def stream_mast_image(
         missions._service_api_connection.MISSIONS_DOWNLOAD_URL
         + "roman/api/v0.1/retrieve_product"
     )
-    url = f"{base_url}?product_name={quote(uri, safe='')}"
+    # Roman's retrieve endpoint accepts the product filename, not its
+    # directory-qualified MAST URI.
+    product_name = Path(uri).name
+    url = f"{base_url}?product_name={quote(product_name, safe='')}"
     for attempt in range(retries + 1):
         try:
             with missions._session.get(
@@ -195,7 +254,7 @@ def write_detector_statistics(
         try:
             for row in pending_rows:
                 current_data = current_dq = None
-                if row["repeat"] == 0:
+                if row["file_set_name"] == row["baseline_file_set_name"]:
                     current_data, current_dq = baseline_data, baseline_dq
                 else:
                     current_data, current_dq = fetch_image(row["cal_uri"])
@@ -235,7 +294,10 @@ def write_detector_statistics(
                         os.fsync(handle.fileno())
                     temporary_part.replace(part_path)
                 finally:
-                    if row["repeat"] != 0 and current_data is not None:
+                    if (
+                        row["file_set_name"] != row["baseline_file_set_name"]
+                        and current_data is not None
+                    ):
                         del current_data, current_dq
                 print(
                     f"{row['file_set_name']}: wrote {last_tile['tile_id'] + 1} tiles"
@@ -265,6 +327,236 @@ def write_detector_statistics(
     return output_path
 
 
+def incremental_part_path(parts_dir, file_set_name):
+    """Return a safe resumable part path keyed by the MAST file-set name."""
+    if not file_set_name or Path(file_set_name).name != file_set_name:
+        raise ValueError(f"Unsafe MAST file-set name: {file_set_name!r}")
+    return parts_dir / f"{file_set_name}.csv"
+
+
+def read_statistics_rows(path):
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            raise ValueError(f"Statistics file has no header: {path}")
+        missing = set(FIELDS).difference(reader.fieldnames)
+        if missing:
+            raise ValueError(
+                f"Statistics file is missing fields {sorted(missing)}: {path}"
+            )
+        rows = list(reader)
+    if not rows:
+        raise ValueError(f"Statistics file has no rows: {path}")
+    return rows
+
+
+def update_statistics_metadata(row, observation):
+    updated = dict(row)
+    for field in (
+        "led",
+        "repeat",
+        "group",
+        "file_set_name",
+        "baseline_file_set_name",
+        "exposure_start_time",
+        "days",
+    ):
+        updated[field] = observation[field]
+    return updated
+
+
+def write_statistics_rows(output_path, rows):
+    """Atomically replace a statistics file with already-computed rows."""
+    temporary_path = output_path.with_name(output_path.name + ".partial")
+    try:
+        with temporary_path.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=FIELDS)
+            writer.writeheader()
+            writer.writerows(rows)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(output_path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+
+def write_incremental_observation(
+    observation,
+    fetch_image,
+    part_path,
+    tile_size,
+    baseline_data,
+    baseline_dq,
+):
+    """Write one newly observed exposure without touching old statistics."""
+    current_data = current_dq = None
+    if observation["file_set_name"] == observation["baseline_file_set_name"]:
+        current_data, current_dq = baseline_data, baseline_dq
+    else:
+        current_data, current_dq = fetch_image(observation["cal_uri"])
+
+    temporary_part = part_path.with_name(part_path.name + ".partial")
+    try:
+        with temporary_part.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=FIELDS)
+            writer.writeheader()
+            last_tile = None
+            tiles = tile_sufficient_statistics(
+                baseline_data,
+                baseline_dq,
+                current_data,
+                current_dq,
+                tile_size,
+            )
+            for tile in tiles:
+                last_tile = tile
+                writer.writerow(
+                    {
+                        "led": observation["led"],
+                        "repeat": observation["repeat"],
+                        "group": observation["group"],
+                        "file_set_name": observation["file_set_name"],
+                        "baseline_file_set_name": observation[
+                            "baseline_file_set_name"
+                        ],
+                        "exposure_start_time": observation["exposure_start_time"],
+                        "days": observation["days"],
+                        **tile,
+                    }
+                )
+            if last_tile is None:
+                raise RuntimeError("Tile statistic generator returned no tiles")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_part.replace(part_path)
+    finally:
+        if temporary_part.exists():
+            temporary_part.unlink()
+        if (
+            observation["file_set_name"] != observation["baseline_file_set_name"]
+            and current_data is not None
+        ):
+            del current_data, current_dq
+    return last_tile
+
+
+def update_detector_statistics_incremental(
+    observations,
+    fetch_image,
+    output_path,
+    tile_size,
+):
+    """Add only file sets absent from an existing detector statistics file.
+
+    Existing sufficient statistics are reused by file-set name.  This matters
+    when MAST inserts a newly discovered exposure into the middle of a LED's
+    time sequence and therefore changes every later numeric group label.
+    """
+    if not output_path.exists():
+        raise ValueError(
+            f"Incremental update requires an existing statistics file: {output_path}"
+        )
+    existing_rows = read_statistics_rows(output_path)
+    existing_by_file_set = {}
+    for row in existing_rows:
+        file_set_name = row["file_set_name"]
+        tile_id = row["tile_id"]
+        by_tile = existing_by_file_set.setdefault(file_set_name, {})
+        if tile_id in by_tile:
+            raise ValueError(
+                f"Duplicate tile {tile_id} for {file_set_name} in {output_path}"
+            )
+        by_tile[tile_id] = row
+
+    current_by_file_set = {row["file_set_name"]: row for row in observations}
+    if len(current_by_file_set) != len(observations):
+        raise ValueError("The MAST index contains duplicate file-set names")
+    removed = set(existing_by_file_set).difference(current_by_file_set)
+    if removed:
+        raise ValueError(
+            "Incremental update refuses to discard existing observations: "
+            + ", ".join(sorted(removed)[:3])
+        )
+
+    new_observations = [
+        row for row in observations if row["file_set_name"] not in existing_by_file_set
+    ]
+    if not new_observations:
+        output_rows = []
+        for observation in observations:
+            for row in existing_by_file_set[observation["file_set_name"]].values():
+                output_rows.append(update_statistics_metadata(row, observation))
+        write_statistics_rows(output_path, output_rows)
+        print(
+            f"No new observations for {output_path}; refreshed metadata for "
+            f"{len(observations)} existing observations"
+        )
+        return output_path
+
+    parts_dir = output_path.with_name(output_path.name + ".incremental.parts")
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    new_rows_by_file_set = {}
+    for observation in new_observations:
+        part_path = incremental_part_path(parts_dir, observation["file_set_name"])
+        if part_path.exists():
+            rows = read_statistics_rows(part_path)
+            new_rows_by_file_set[observation["file_set_name"]] = rows
+
+    for led in range(1, 7):
+        led_rows = [row for row in new_observations if row["led"] == led]
+        pending_rows = [
+            row
+            for row in led_rows
+            if row["file_set_name"] not in new_rows_by_file_set
+        ]
+        if not pending_rows:
+            continue
+
+        all_led_rows = [row for row in observations if row["led"] == led]
+        baseline_data, baseline_dq = fetch_image(all_led_rows[0]["cal_uri"])
+        try:
+            for observation in pending_rows:
+                part_path = incremental_part_path(parts_dir, observation["file_set_name"])
+                last_tile = write_incremental_observation(
+                    observation,
+                    fetch_image,
+                    part_path,
+                    tile_size,
+                    baseline_data,
+                    baseline_dq,
+                )
+                new_rows_by_file_set[observation["file_set_name"]] = read_statistics_rows(
+                    part_path
+                )
+                print(
+                    f"{observation['file_set_name']}: wrote {last_tile['tile_id'] + 1} tiles"
+                )
+        finally:
+            del baseline_data, baseline_dq
+
+    output_rows = []
+    for observation in observations:
+        file_set_name = observation["file_set_name"]
+        if file_set_name in existing_by_file_set:
+            rows = existing_by_file_set[file_set_name].values()
+        else:
+            rows = new_rows_by_file_set.get(file_set_name)
+            if rows is None:
+                raise RuntimeError(
+                    f"Missing incremental statistics for {file_set_name}"
+                )
+        for row in rows:
+            output_rows.append(update_statistics_metadata(row, observation))
+
+    write_statistics_rows(output_path, output_rows)
+    print(
+        f"Updated {output_path} with {len(new_observations)} new observations; "
+        f"reused {len(observations) - len(new_observations)} existing observations"
+    )
+    return output_path
+
+
 def output_path_for_detector(output_dir, detector, tile_size):
     return output_dir / f"{detector.lower()}_tile_log_statistics_{tile_size}.csv"
 
@@ -287,6 +579,11 @@ def parse_args():
         action="store_false",
         help="Recompute existing exposure parts instead of resuming them.",
     )
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Reuse existing detector statistics and download only new MAST file sets.",
+    )
     parser.set_defaults(resume=True)
     return parser.parse_args()
 
@@ -299,6 +596,8 @@ def main():
         raise ValueError("Retries must be non-negative and timeout must be positive")
     if args.all_detectors and args.output_path is not None:
         raise ValueError("--output-path cannot be combined with --all-detectors")
+    if args.incremental and not args.resume:
+        raise ValueError("--incremental cannot be combined with --no-resume")
     rows = read_index(args.index_path)
     available = sorted({row["detector"] for row in rows})
     if args.all_detectors:
@@ -318,7 +617,11 @@ def main():
             detector,
             args.tile_size,
         )
-        if args.resume and output_path.exists():
+        if args.incremental and not output_path.exists():
+            raise ValueError(
+                f"Incremental update requires an existing statistics file: {output_path}"
+            )
+        if args.resume and output_path.exists() and not args.incremental:
             print(f"Skipping completed detector output: {output_path}")
             continue
         jobs.append((detector, observations, output_path))
@@ -333,19 +636,28 @@ def main():
             f"Streaming {detector}: {len(observations)} exposures, "
             f"output={output_path}"
         )
-        write_detector_statistics(
-            observations,
-            lambda uri: stream_mast_image(
-                missions,
-                uri,
-                args.chunk_size,
-                args.retries,
-                args.request_timeout,
-            ),
-            output_path,
-            args.tile_size,
-            resume=args.resume,
+        fetch_image = lambda uri: stream_mast_image(
+            missions,
+            uri,
+            args.chunk_size,
+            args.retries,
+            args.request_timeout,
         )
+        if args.incremental:
+            update_detector_statistics_incremental(
+                observations,
+                fetch_image,
+                output_path,
+                args.tile_size,
+            )
+        else:
+            write_detector_statistics(
+                observations,
+                fetch_image,
+                output_path,
+                args.tile_size,
+                resume=args.resume,
+            )
         print(f"Wrote {output_path}")
 
 

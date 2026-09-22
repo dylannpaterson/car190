@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.venv/
 
 # Local operating-system files
 .DS_Store
@@ -13,12 +14,15 @@ MAST/
 wfi_tile_log_statistics_512/
 *.parts/
 *.partial
+mast_api_token.txt
 
 # Generated analysis products
 *.csv
 *.npz
 *.png
 *.log
+slurm-*.out
+slurm-*.err
 *.md
 *.html
 effective_*/

@@ -51,7 +51,8 @@ def multiply_matrix(left, right):
 def layer_matrix(index, thickness_nm, wavelengths_nm):
     phase = 2.0 * np.pi * index * thickness_nm / wavelengths_nm
     cosine = np.cos(phase)
-    sine = 1j * np.sin(phase)
+    # Positive k denotes absorption, so this convention must use -i*sin(phase).
+    sine = -1j * np.sin(phase)
     matrix = np.zeros((len(wavelengths_nm), 2, 2), dtype=complex)
     matrix[:, 0, 0] = cosine
     matrix[:, 1, 1] = cosine
