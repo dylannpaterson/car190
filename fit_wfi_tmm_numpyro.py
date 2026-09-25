@@ -4,6 +4,9 @@ import argparse
 import csv
 import hashlib
 import io
+import shlex
+import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -20,7 +23,9 @@ from fit_wfi01_joint_complex_q_soc import prepare_response_integration
 
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_SINGLE_SCA_TILE_STATISTICS = ROOT / "wfi01_tile_log_statistics_512.csv"
+DEFAULT_SINGLE_SCA_TILE_STATISTICS = (
+    ROOT / "wfi_tile_log_statistics_512" / "wfi01_tile_log_statistics_512.csv"
+)
 DEFAULT_ALL_SCA_STATISTICS_DIR = ROOT / "wfi_tile_log_statistics_512"
 DEFAULT_MODEL_PATH = Path(
     "/Users/paterson.35/Documents/"
@@ -34,17 +39,100 @@ ASW_OPTICAL_CONSTANTS_URL = (
     "https://sbnarchive.psi.edu/pds4/non_mission/"
     "gbo.ices.mastrapa.lab-spectra/data/nk/amorph_high.tab"
 )
+HGCDTE_OPTICAL_CONSTANTS_SOURCE = (
+    "Mouzali, tel-01281981, Table 2.1 and Eqs. (2.3)-(2.8)"
+)
 
 REFERENCE_THICKNESS_NM = 122.7
 REFERENCE_TIME_DAYS = 4.65
 RESET_DAY = 18.0
 INITIAL_THICKNESS_INIT_NM = 35.9
+INITIAL_THICKNESS_PRIOR_MEAN_NM = 35.0
+INITIAL_THICKNESS_PRIOR_SIGMA_NM = 15.0
+INITIAL_THICKNESS_PRIOR_LOW_NM = 0.0
+INITIAL_THICKNESS_PRIOR_HIGH_NM = 50.0
+NUTS_INITIAL_THICKNESS_INIT_NM = 0.1
+NUTS_INIT_JITTER = 0.01
 TRAJECTORY_SCALE_INIT = 1.14
 TRAJECTORY_SCALE_START = 2.0
 NOMINAL_HGCDTE = np.asarray([3.6, 0.7], dtype=float)
+HGCDTE_REFERENCE_COMPOSITION = 0.445
+HGCDTE_REFERENCE_TEMPERATURE_K = 80.0
 HGCDTE_LOWER = np.asarray([1.0, 0.0], dtype=float)
 HGCDTE_UPPER = np.asarray([6.0, 3.0], dtype=float)
 HGCDTE_PRIOR_SIGMA = np.asarray([1.0, 1.0], dtype=float)
+DETECTOR_THICKNESS_DEFAULT_NM = 2500.0
+DETECTOR_THICKNESS_PRIOR_SIGMA_LOG = 1.0
+DETECTOR_THICKNESS_NEIGHBOR_SIGMA_LOG = 0.5
+HGCDTE_N_TABLE_WAVELENGTHS_NM = np.arange(1600.0, 6600.1, 200.0)
+HGCDTE_N_TABLE_X0397 = np.asarray(
+    [
+        2.946,
+        2.978,
+        3.012,
+        3.049,
+        3.088,
+        3.128,
+        3.168,
+        3.206,
+        3.159,
+        3.126,
+        3.110,
+        3.100,
+        3.093,
+        3.087,
+        3.083,
+        3.079,
+        3.077,
+        3.074,
+        3.072,
+        3.071,
+        3.069,
+        3.068,
+        3.067,
+        3.066,
+        3.065,
+        3.064,
+    ],
+    dtype=float,
+)
+HGCDTE_N_TABLE_X0459 = np.asarray(
+    [
+        2.895,
+        2.940,
+        2.987,
+        3.036,
+        3.086,
+        3.030,
+        3.003,
+        2.989,
+        2.981,
+        2.975,
+        2.970,
+        2.967,
+        2.965,
+        2.962,
+        2.961,
+        2.959,
+        2.958,
+        2.957,
+        2.956,
+        2.955,
+        2.955,
+        2.954,
+        2.954,
+        2.953,
+        2.953,
+        2.952,
+    ],
+    dtype=float,
+)
+HGCDTE_MODULATION_NODE_WAVELENGTHS_NM = np.asarray(
+    [500.0, 850.0, 1200.0, 1550.0, 1900.0, 2250.0, 2600.0],
+    dtype=float,
+)
+HGCDTE_MODULATION_WIDTH_NM = 350.0
+HGCDTE_MODULATION_PRIOR_SIGMA_LOG = 1.0
 CONDUCTIVE_REFERENCE_WAVELENGTH_NM = 1600.0
 CONDUCTIVE_EPSILON_INF = 1.0
 CONDUCTIVE_LOG_THICKNESS_PRIOR_MEAN = np.log(5.0)
@@ -67,8 +155,14 @@ NP_SMOOTHNESS_WEIGHT = 4.64158883361
 NP_MAX_NODE_MULTIPLIER = 2.0
 PREDICTION_ROW_CHUNK_SIZE = 64
 GAUSS_LEGENDRE_NODES, GAUSS_LEGENDRE_WEIGHTS = np.polynomial.legendre.leggauss(8)
+INCIDENCE_CONE_NODES, INCIDENCE_CONE_WEIGHTS = np.polynomial.legendre.leggauss(8)
+PUPIL_RADIAL_NODES, PUPIL_RADIAL_WEIGHTS = np.polynomial.legendre.leggauss(4)
+PUPIL_AZIMUTH_COUNT = 8
 TRAJECTORY_TILE_RATE_PRIOR_SIGMA_LOG = 0.10
 TRAJECTORY_TILE_RATE_NEIGHBOR_SIGMA_LOG = 0.05
+ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG = 2.0
+EARLY_TIME_LOG_SCALE_PRIOR_MEAN = 0.0
+EARLY_TIME_SCALE_PRIOR_SIGMA = 0.05
 
 
 def qe_rbf_configuration(
@@ -96,6 +190,133 @@ def qe_rbf_configuration(
     return node_wavelengths_nm, float(width_nm), float(prior_sigma_log)
 
 
+def incidence_cone_quadrature(half_angle_deg):
+    """Return polar angles and normalized solid-angle weights for a cone."""
+    half_angle_deg = float(half_angle_deg)
+    if (
+        not np.isfinite(half_angle_deg)
+        or half_angle_deg < 0.0
+        or half_angle_deg >= 90.0
+    ):
+        raise ValueError("Incidence cone half-angle must be in [0, 90) degrees")
+    if half_angle_deg == 0.0:
+        return np.asarray([0.0]), np.asarray([1.0])
+    minimum_cosine = np.cos(np.deg2rad(half_angle_deg))
+    cosine_nodes = (
+        0.5 * (1.0 + minimum_cosine)
+        + 0.5 * (1.0 - minimum_cosine) * INCIDENCE_CONE_NODES
+    )
+    angles_deg = np.rad2deg(np.arccos(cosine_nodes))
+    weights = 0.5 * INCIDENCE_CONE_WEIGHTS
+    return angles_deg, weights
+
+
+def incidence_pupil_quadrature(half_angle_deg):
+    """Return chief-ray-local directions for a uniformly illuminated pupil."""
+    half_angle_deg = float(half_angle_deg)
+    if (
+        not np.isfinite(half_angle_deg)
+        or half_angle_deg < 0.0
+        or half_angle_deg >= 90.0
+    ):
+        raise ValueError("Incidence pupil half-angle must be in [0, 90) degrees")
+    if half_angle_deg == 0.0:
+        return np.asarray([[0.0, 0.0, 1.0]]), np.asarray([1.0])
+
+    # Uniform pupil area has a uniform distribution in normalized radius squared.
+    radius_squared = 0.5 * (1.0 + PUPIL_RADIAL_NODES)
+    radial_weights = 0.5 * PUPIL_RADIAL_WEIGHTS
+    radius = np.sqrt(radius_squared)
+    marginal_tangent = np.tan(np.deg2rad(half_angle_deg))
+    polar_angle = np.arctan(radius * marginal_tangent)
+    azimuth = 2.0 * np.pi * np.arange(PUPIL_AZIMUTH_COUNT) / PUPIL_AZIMUTH_COUNT
+    sin_polar = np.sin(polar_angle)[:, None]
+    directions = np.stack(
+        (
+            sin_polar * np.cos(azimuth)[None, :],
+            sin_polar * np.sin(azimuth)[None, :],
+            np.broadcast_to(np.cos(polar_angle)[:, None], sin_polar.shape[:-1] + (PUPIL_AZIMUTH_COUNT,)),
+        ),
+        axis=-1,
+    ).reshape((-1, 3))
+    weights = np.repeat(radial_weights / PUPIL_AZIMUTH_COUNT, PUPIL_AZIMUTH_COUNT)
+    return directions, weights
+
+
+def incidence_pupil_ray_sines(half_angle_deg, chief_ray_tilts_deg):
+    """Return per-row incidence sines for a chief-ray-centered pupil."""
+    local_directions, weights = incidence_pupil_quadrature(half_angle_deg)
+    chief_ray_tilts_deg = np.asarray(chief_ray_tilts_deg, dtype=float)
+    if chief_ray_tilts_deg.ndim == 1:
+        chief_ray_tilts_deg = chief_ray_tilts_deg.reshape((1, 2))
+    if (
+        chief_ray_tilts_deg.ndim != 2
+        or chief_ray_tilts_deg.shape[1] != 2
+        or np.any(~np.isfinite(chief_ray_tilts_deg))
+        or np.any(np.abs(chief_ray_tilts_deg) >= 89.0)
+    ):
+        raise ValueError("Chief-ray tilts must be a finite (row, 2) array within +/-89 degrees")
+
+    tangents = np.tan(np.deg2rad(chief_ray_tilts_deg))
+    chief = np.column_stack((tangents, np.ones(len(tangents))))
+    chief /= np.linalg.norm(chief, axis=1, keepdims=True)
+    basis_x = np.column_stack((chief[:, 2], np.zeros(len(chief)), -chief[:, 0]))
+    basis_x /= np.linalg.norm(basis_x, axis=1, keepdims=True)
+    basis_y = np.cross(chief, basis_x)
+    directions = (
+        local_directions[None, :, 0, None] * basis_x[:, None, :]
+        + local_directions[None, :, 1, None] * basis_y[:, None, :]
+        + local_directions[None, :, 2, None] * chief[:, None, :]
+    )
+    if np.any(directions[:, :, 2] <= 0.0):
+        raise ValueError("Pupil geometry contains rays directed away from the detector")
+    sine = np.linalg.norm(directions[:, :, :2], axis=-1)
+    return sine, weights
+
+
+def load_incidence_chief_ray_tilts(path, data, default_tilts_deg=(0.0, 0.0)):
+    """Load per-SCA/tile chief-ray x/y tilts from a CSV."""
+    default = np.asarray(default_tilts_deg, dtype=float).reshape(2)
+    n_rows = int(data["n_scas"] * data["n_tiles"])
+    tilts = np.broadcast_to(default, (n_rows, 2)).copy()
+    if path is None:
+        return tilts
+    path = Path(path)
+    with path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    required = {"detector", "tile_id", "chief_ray_x_deg", "chief_ray_y_deg"}
+    if not rows or not required.issubset(rows[0]):
+        raise ValueError(
+            "Incidence geometry CSV must contain detector, tile_id, "
+            "chief_ray_x_deg, and chief_ray_y_deg"
+        )
+    row_lookup = {
+        (str(detector), int(tile_id)): sca_index * int(data["n_tiles"]) + tile_index
+        for sca_index, detector in enumerate(data["sca_names"])
+        for tile_index, tile_id in enumerate(data["tile_ids"])
+    }
+    seen = set()
+    for row in rows:
+        key = (row["detector"], int(row["tile_id"]))
+        if key not in row_lookup:
+            continue
+        if key in seen:
+            raise ValueError(f"Duplicate incidence geometry row for {key[0]} tile {key[1]}")
+        tilts[row_lookup[key]] = [
+            float(row["chief_ray_x_deg"]),
+            float(row["chief_ray_y_deg"]),
+        ]
+        seen.add(key)
+    missing = set(row_lookup) - seen
+    if missing:
+        raise ValueError(
+            "Incidence geometry CSV is missing selected rows: "
+            + ", ".join(f"{detector}/{tile_id}" for detector, tile_id in sorted(missing))
+        )
+    incidence_pupil_ray_sines(0.0, tilts)
+    return tilts
+
+
 def load_asw_optical_constants(source=ASW_OPTICAL_CONSTANTS_URL):
     """Load the 100 K amorphous-water-ice n/k table in micrometers."""
     values = np.loadtxt(io.StringIO(read_source(source)), ndmin=2)
@@ -113,6 +334,148 @@ def load_asw_optical_constants(source=ASW_OPTICAL_CONSTANTS_URL):
     ):
         raise ValueError("ASW optical constants must be finite, ordered, and passive")
     return wavelengths_nm, real_index, imaginary_index
+
+
+def hgcdte_reference_optical_constants(wavelengths_nm):
+    """Return a fixed 80 K HgCdTe n/k sensitivity model.
+
+    The real-index values are linearly interpolated in composition between the
+    x=0.397 and x=0.459 columns of Mouzali's 80 K table, then held constant
+    below the tabulated 1.6 micron edge.  The imaginary index uses the
+    below-gap and above-gap absorption laws from the same source, joined with
+    a smooth transition between the gap and the source-defined transition
+    energy.  This is an opt-in sensitivity model, not a detector-specific
+    calibration.
+    """
+    wavelengths_nm = np.asarray(wavelengths_nm, dtype=float)
+    if (
+        wavelengths_nm.size == 0
+        or np.any(~np.isfinite(wavelengths_nm))
+        or np.any(wavelengths_nm <= 0.0)
+    ):
+        raise ValueError("HgCdTe wavelengths must be positive, finite, and non-empty")
+
+    x = HGCDTE_REFERENCE_COMPOSITION
+    temperature_k = HGCDTE_REFERENCE_TEMPERATURE_K
+    if not 0.397 <= x <= 0.459:
+        raise ValueError("Reference composition is outside the tabulated n range")
+    composition_weight = (x - 0.397) / (0.459 - 0.397)
+    real_index_table = HGCDTE_N_TABLE_X0397 + composition_weight * (
+        HGCDTE_N_TABLE_X0459 - HGCDTE_N_TABLE_X0397
+    )
+    real_index = np.interp(
+        wavelengths_nm,
+        HGCDTE_N_TABLE_WAVELENGTHS_NM,
+        real_index_table,
+        left=real_index_table[0],
+        right=real_index_table[-1],
+    )
+
+    wavelength_um = wavelengths_nm / 1000.0
+    photon_energy = 1.239841984 / wavelength_um
+    band_gap = (
+        -0.302
+        + 1.93 * x
+        - 0.810 * x**2
+        + 0.832 * x**3
+        + 5.35e-4
+        * (1.0 - 2.0 * x)
+        * (temperature_k**3 - 1822.0)
+        / (255.2 + temperature_k**2)
+    )
+    transition_temperature = 81.9
+    transition_energy_reference = -0.3424 + 1.838 * x
+    absorption_slope = 32670.0 * (1.0 + x)
+    absorption_reference = np.exp(-18.88 + 53.61 * x)
+    transition_absorption = (
+        3.9778 * temperature_k
+        - 566.4
+        + (
+            -0.020366 * temperature_k**2
+            - 0.46742 * temperature_k
+            + 3878.9
+        )
+        * x
+    )
+    transition_energy = transition_energy_reference + (
+        (temperature_k + transition_temperature)
+        / absorption_slope
+        * np.log(transition_absorption / absorption_reference)
+    )
+    if not band_gap < transition_energy:
+        raise ValueError("HgCdTe absorption transition must be above the band gap")
+
+    below_gap_absorption = np.zeros_like(photon_energy)
+    below_gap = photon_energy < transition_energy
+    below_gap_exponent = absorption_slope * (
+        photon_energy[below_gap] - transition_energy_reference
+    ) / (temperature_k + transition_temperature)
+    below_gap_absorption[below_gap] = absorption_reference * np.exp(
+        np.clip(below_gap_exponent, -745.0, 700.0)
+    )
+
+    above_gap_absorption = np.zeros_like(photon_energy)
+    above_gap = photon_energy > band_gap
+    absorption_amplitude = (
+        -20060.0
+        + 115750.0 * x
+        + 32.43 * temperature_k
+        - 64170.0 * x**2
+        + 0.43231 * temperature_k**2
+        - 101.92 * x * temperature_k
+    )
+    absorption_exponent = (
+        0.74487
+        - 0.44513 * x
+        + (0.000799 - 0.000757 * x) * temperature_k
+    )
+    above_gap_absorption[above_gap] = (
+        absorption_amplitude
+        * np.maximum(photon_energy[above_gap] - band_gap, 0.0) ** absorption_exponent
+        / photon_energy[above_gap]
+    )
+
+    transition_fraction = np.clip(
+        (photon_energy - band_gap) / (transition_energy - band_gap), 0.0, 1.0
+    )
+    transition_fraction = transition_fraction**2 * (
+        3.0 - 2.0 * transition_fraction
+    )
+    absorption = (
+        (1.0 - transition_fraction) * below_gap_absorption
+        + transition_fraction * above_gap_absorption
+    )
+    extinction_index = wavelengths_nm * 1.0e-7 * absorption / (4.0 * np.pi)
+    return real_index, extinction_index
+
+
+def hgcdte_modulation_basis(
+    wavelengths_nm,
+    node_wavelengths_nm=HGCDTE_MODULATION_NODE_WAVELENGTHS_NM,
+    width_nm=HGCDTE_MODULATION_WIDTH_NM,
+):
+    """Return normalized smooth basis functions for HgCdTe n/k modulation."""
+    wavelengths_nm = np.asarray(wavelengths_nm, dtype=float).reshape(-1)
+    node_wavelengths_nm = np.asarray(node_wavelengths_nm, dtype=float).reshape(-1)
+    if (
+        wavelengths_nm.size == 0
+        or np.any(~np.isfinite(wavelengths_nm))
+        or np.any(wavelengths_nm <= 0.0)
+    ):
+        raise ValueError("HgCdTe modulation wavelengths must be positive and finite")
+    if (
+        node_wavelengths_nm.size < 2
+        or np.any(~np.isfinite(node_wavelengths_nm))
+        or np.any(np.diff(node_wavelengths_nm) <= 0.0)
+        or not np.isfinite(width_nm)
+        or width_nm <= 0.0
+    ):
+        raise ValueError("HgCdTe modulation nodes and width must be finite and ordered")
+    basis = np.exp(
+        -0.5
+        * ((wavelengths_nm[:, None] - node_wavelengths_nm[None, :]) / width_nm) ** 2
+    )
+    return basis / np.sum(basis, axis=1, keepdims=True)
 
 
 def dielectric_ar_reference(
@@ -161,6 +524,30 @@ def ar_prior_arrays(ar_layers):
     )
 
 
+def ar_coordinate_rotation(active_parameter_indices, ar_parameter_count):
+    """Return an orthogonal thickness/index rotation for each AR layer."""
+    active_parameter_indices = np.asarray(active_parameter_indices, dtype=int)
+    rotation = np.eye(active_parameter_indices.size, dtype=float)
+    index_positions = {
+        int(parameter_index): position
+        for position, parameter_index in enumerate(active_parameter_indices)
+    }
+    layer_count = int(ar_parameter_count // 3)
+    inverse_sqrt_two = 1.0 / np.sqrt(2.0)
+    for layer in range(layer_count):
+        thickness_index = 3 * layer
+        refractive_index = thickness_index + 1
+        if thickness_index not in index_positions or refractive_index not in index_positions:
+            continue
+        thickness_position = index_positions[thickness_index]
+        refractive_position = index_positions[refractive_index]
+        rotation[np.ix_([thickness_position, refractive_position], [
+            thickness_position,
+            refractive_position,
+        ])] = inverse_sqrt_two * np.asarray([[1.0, 1.0], [1.0, -1.0]])
+    return rotation
+
+
 def default_likelihood_weight(counts):
     """Scale pixel SSE to approximately one effective datum per tile/group."""
     counts = np.asarray(counts, dtype=float)
@@ -183,6 +570,175 @@ def trajectory_rate_per_scale(days):
             * np.sqrt(RESET_DAY + first_day)
         )
     )
+
+
+def rate_curvature_matrix(node_days):
+    """Return the linear operator used by the time-aware rate curvature penalty."""
+    node_days = np.asarray(node_days, dtype=float).reshape(-1)
+    if node_days.size < 3 or not np.all(np.isfinite(node_days)):
+        raise ValueError("At least three finite rate-node days are required")
+    if np.any(np.diff(node_days) <= 0.0):
+        raise ValueError("Rate-node days must be strictly increasing")
+    scaled_node_days = (node_days - node_days[0]) / np.median(np.diff(node_days))
+    matrix = np.zeros((node_days.size - 2, node_days.size), dtype=float)
+    for column in range(node_days.size):
+        basis = np.zeros(node_days.size, dtype=float)
+        basis[column] = 1.0
+        node_slopes = np.diff(basis) / np.diff(scaled_node_days)
+        matrix[:, column] = 2.0 * np.diff(node_slopes) / (
+            scaled_node_days[2:] - scaled_node_days[:-2]
+        )
+    return matrix
+
+
+def trajectory_rate_whitener(
+    node_days, prior_sigma, likelihood_scale, smoothness_weight
+):
+    """Return a symmetric inverse square root of the exact rate prior precision."""
+    node_days = np.asarray(node_days, dtype=float).reshape(-1)
+    prior_sigma = float(prior_sigma)
+    likelihood_scale = float(likelihood_scale)
+    smoothness_weight = float(smoothness_weight)
+    if not np.isfinite(prior_sigma) or prior_sigma <= 0.0:
+        raise ValueError("Rate prior sigma must be positive and finite")
+    if not np.isfinite(likelihood_scale) or likelihood_scale < 0.0:
+        raise ValueError("Likelihood scale must be finite and non-negative")
+    if not np.isfinite(smoothness_weight) or smoothness_weight < 0.0:
+        raise ValueError("Rate smoothness weight must be finite and non-negative")
+    curvature = rate_curvature_matrix(node_days)
+    precision = np.eye(node_days.size, dtype=float) / prior_sigma**2
+    if smoothness_weight > 0.0:
+        precision += (
+            2.0
+            * likelihood_scale
+            * smoothness_weight
+            / curvature.shape[0]
+            * (curvature.T @ curvature)
+        )
+    eigenvalues, eigenvectors = np.linalg.eigh(precision)
+    if np.any(eigenvalues <= 0.0) or not np.all(np.isfinite(eigenvalues)):
+        raise ValueError("Rate prior precision is not positive definite")
+    return (eigenvectors * (1.0 / np.sqrt(eigenvalues))) @ eigenvectors.T
+
+
+def trajectory_rate_likelihood_scale(data, args):
+    """Return the fixed SSE scale used by the rate smoothness factor."""
+    likelihood_weight = getattr(args, "likelihood_weight", None)
+    if likelihood_weight is None:
+        likelihood_weight = default_likelihood_weight(data["counts"])
+    effective_weight = float(likelihood_weight) / int(data["n_tiles"])
+    return 0.5 * effective_weight * float(np.sum(data["sum_squared"])) / (
+        float(args.log_noise_sigma) ** 2
+    )
+
+
+def whiten_trajectory_rate_nodes(
+    log_rates, node_days, trajectory_prior_rate, prior_sigma, likelihood_scale,
+    smoothness_weight,
+):
+    """Convert constrained log-rate nodes to the exact whitened coordinates."""
+    log_rates = np.asarray(log_rates, dtype=float)
+    mean = np.full(log_rates.shape, float(np.log(trajectory_prior_rate)))
+    whitener = trajectory_rate_whitener(
+        node_days, prior_sigma, likelihood_scale, smoothness_weight
+    )
+    return np.linalg.solve(whitener, log_rates - mean)
+
+
+def trajectory_prior_rate_for_data(data, args):
+    """Return the fully non-parametric trajectory prior center for selected data."""
+    return (
+        getattr(args, "trajectory_rate_prior_mean_nm_day", None)
+        if getattr(args, "trajectory_rate_prior_mean_nm_day", None) is not None
+        else trajectory_rate_per_scale(data["days"]) * TRAJECTORY_SCALE_INIT
+    )
+
+
+def trajectory_pivot_configuration(data, trajectory_prior_rate, prior_mean):
+    """Return a central node pivot and its fixed initialization center."""
+    node_days = np.asarray(data["node_days"], dtype=float)
+    pivot_index = len(node_days) // 2
+    pivot_day = float(node_days[pivot_index])
+    start_day = float(np.min(np.asarray(data["days"], dtype=float)))
+    pivot_center = float(prior_mean) + max(pivot_day - start_day, 0.0) * float(
+        trajectory_prior_rate
+    )
+    return pivot_index, pivot_day, pivot_center
+
+
+def integrate_log_linear_rate_numpy(start_day, target_day, node_days, log_rates):
+    """Integrate a positive log-linearly interpolated rate for initialization."""
+    start_day = float(start_day)
+    target_day = float(target_day)
+    node_days = np.asarray(node_days, dtype=float).reshape(-1)
+    log_rates = np.asarray(log_rates, dtype=float).reshape(-1)
+    if node_days.size != log_rates.size:
+        raise ValueError("Rate nodes and rate-node days must have matching sizes")
+    if target_day <= start_day:
+        return 0.0
+    interior_nodes = node_days[(node_days > start_day) & (node_days < target_day)]
+    integration_days = np.concatenate(
+        ([start_day], interior_nodes, [target_day])
+    )
+    total = 0.0
+    for left, right in zip(integration_days[:-1], integration_days[1:]):
+        midpoint = 0.5 * (left + right)
+        half_width = 0.5 * (right - left)
+        quadrature_days = midpoint + half_width * GAUSS_LEGENDRE_NODES
+        total += half_width * np.sum(
+            GAUSS_LEGENDRE_WEIGHTS
+            * np.exp(np.interp(quadrature_days, node_days, log_rates))
+        )
+    return float(total)
+
+
+def trajectory_pivot_z_from_initial_thickness(d0, data, args, log_rates):
+    """Convert a constrained initial thickness to the exact pivot coordinate."""
+    trajectory_prior_rate = trajectory_prior_rate_for_data(data, args)
+    _, pivot_day, pivot_center = trajectory_pivot_configuration(
+        data, trajectory_prior_rate, args.initial_thickness_prior_mean_nm
+    )
+    pivot_integral = integrate_log_linear_rate_numpy(
+        np.min(data["days"]), pivot_day, data["node_days"], log_rates
+    )
+    return float(
+        (
+            float(np.asarray(d0))
+            + pivot_integral
+            - pivot_center
+        )
+        / args.initial_thickness_prior_sigma_nm
+    )
+
+
+def trajectory_log_rates_from_initial_values(data, args, initial_values):
+    """Recover full log-rate nodes from either direct or whitened starts."""
+    trajectory_prior_rate = trajectory_prior_rate_for_data(data, args)
+    if args.whiten_np_trajectory:
+        whitener = trajectory_rate_whitener(
+            data["node_days"],
+            args.trajectory_rate_prior_sigma_log,
+            trajectory_rate_likelihood_scale(data, args),
+            args.np_smoothness_weight,
+        )
+        return np.log(trajectory_prior_rate) + whitener @ np.asarray(
+            initial_values["np_log_rate_z"], dtype=float
+        )
+    return np.asarray(initial_values["np_log_rate_nodes"], dtype=float)
+
+
+def trajectory_pivot_d0_from_initial_values(data, args, initial_values):
+    """Recover d0 from pivot coordinates for boundary-aware NUTS initialization."""
+    trajectory_prior_rate = trajectory_prior_rate_for_data(data, args)
+    _, pivot_day, pivot_center = trajectory_pivot_configuration(
+        data, trajectory_prior_rate, args.initial_thickness_prior_mean_nm
+    )
+    log_rates = trajectory_log_rates_from_initial_values(data, args, initial_values)
+    pivot_integral = integrate_log_linear_rate_numpy(
+        np.min(data["days"]), pivot_day, data["node_days"], log_rates
+    )
+    pivot_z = float(np.asarray(initial_values["initial_thickness_pivot_z"]))
+    return pivot_center + args.initial_thickness_prior_sigma_nm * pivot_z - pivot_integral
 
 
 def integrate_rate_trajectory(
@@ -303,6 +859,27 @@ def tile_neighbor_edges(data):
     return np.asarray(edges, dtype=int).reshape((-1, 2))
 
 
+def aggregate_tile_sufficient_statistics(data):
+    """Combine tile count moments by SCA when every tile shares one prediction."""
+    counts = np.asarray(data["counts"])
+    sums = np.asarray(data["sums"])
+    sum_squared = np.asarray(data["sum_squared"])
+    n_scas = int(data["n_scas"])
+    n_tiles = int(data["n_tiles"])
+    if counts.shape[0] != n_scas * n_tiles:
+        raise ValueError("Tile sufficient statistics do not match the SCA/tile layout")
+    if sums.shape != counts.shape or sum_squared.shape != counts.shape:
+        raise ValueError("Tile count moments must have matching shapes")
+    aggregated = dict(data)
+    aggregated["counts"] = counts.reshape(n_scas, n_tiles, -1).sum(axis=1)
+    aggregated["sums"] = sums.reshape(n_scas, n_tiles, -1).sum(axis=1)
+    aggregated["sum_squared"] = sum_squared.reshape(
+        n_scas, n_tiles, -1
+    ).sum(axis=1)
+    aggregated["sca_index"] = np.arange(n_scas, dtype=int)
+    return aggregated
+
+
 def run_map_initialization(model, initial_values, jax, init_to_value, seed, steps, learning_rate):
     """Use Adam through AutoDelta as an optional NUTS initialization path."""
     from numpyro.infer import SVI, Trace_ELBO, autoguide
@@ -361,11 +938,7 @@ def run_map_initialization(model, initial_values, jax, init_to_value, seed, step
     )
 
 
-def run_map_optimization(model, initial_values, jax, maxiter, tolerance=1.0e-9):
-    """Optimize the exact NumPyro joint log density with bounded L-BFGS-B."""
-    from numpyro.infer.util import log_density
-    from scipy.optimize import minimize
-
+def map_parameter_bounds(initial_values, jax):
     initial_pytree = {
         name: jax.numpy.asarray(value) for name, value in initial_values.items()
     }
@@ -405,46 +978,298 @@ def run_map_optimization(model, initial_values, jax, maxiter, tolerance=1.0e-9):
             for name, value in initial_values.items()
         }
     )
+    return flat_initial, unravel, flat_lower, flat_upper
+
+
+def map_parameter_scale_values(initial_values, args):
+    """Return prior-width coordinate scales for MAP sample sites."""
+    site_scales = {
+        "ar_mu_raw": getattr(args, "ar_mean_prior_sigma", AR_MEAN_PRIOR_SIGMA),
+        "ar_mu_z": 1.0,
+        "ar_sigma_raw": 0.5,
+        "ar_sca_sigma": getattr(args, "ar_sca_sigma_prior", AR_SCA_SIGMA_PRIOR),
+        "ar_tile_sigma": getattr(args, "ar_tile_sigma_prior", AR_TILE_SIGMA_PRIOR),
+        "ar_z": 1.0,
+        "ar_sca_z": 1.0,
+        "ar_tile_z": 1.0,
+        "initial_thickness_nm": getattr(
+            args, "initial_thickness_prior_sigma_nm", INITIAL_THICKNESS_PRIOR_SIGMA_NM
+        ),
+        "initial_thickness_pivot_z": 1.0,
+        "early_time_log_scale": getattr(
+            args, "early_time_scale_prior_sigma", EARLY_TIME_SCALE_PRIOR_SIGMA
+        ),
+        "np_log_rate_nodes": getattr(
+            args, "trajectory_rate_prior_sigma_log", 0.75
+        ),
+        "np_log_rate_z": 1.0,
+        "log_trajectory_scale": getattr(
+            args, "trajectory_rate_prior_sigma_log", 0.75
+        ),
+        "trajectory_rate_tile_offsets": getattr(
+            args, "tile_rate_prior_sigma_log", TRAJECTORY_TILE_RATE_PRIOR_SIGMA_LOG
+        ),
+        "trajectory_rate_tile_node_offsets": getattr(
+            args, "tile_rate_prior_sigma_log", TRAJECTORY_TILE_RATE_PRIOR_SIGMA_LOG
+        ),
+        "detector_log_thickness_nm": getattr(
+            args,
+            "detector_thickness_prior_sigma_log",
+            DETECTOR_THICKNESS_PRIOR_SIGMA_LOG,
+        ),
+        "hgcdte_n": HGCDTE_PRIOR_SIGMA[0],
+        "hgcdte_k": HGCDTE_PRIOR_SIGMA[1],
+        "hgcdte_n_log_modulation": getattr(
+            args, "hgcdte_modulation_prior_sigma_log", HGCDTE_MODULATION_PRIOR_SIGMA_LOG
+        ),
+        "hgcdte_k_log_modulation": getattr(
+            args, "hgcdte_modulation_prior_sigma_log", HGCDTE_MODULATION_PRIOR_SIGMA_LOG
+        ),
+        "absolute_hgcdte_n_log_scale": getattr(
+            args,
+            "absolute_hgcdte_scale_prior_sigma_log",
+            ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG,
+        ),
+        "absolute_hgcdte_k_log_scale": getattr(
+            args,
+            "absolute_hgcdte_scale_prior_sigma_log",
+            ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG,
+        ),
+        "conductive_log_thickness_nm": CONDUCTIVE_LOG_PRIOR_SIGMA,
+        "conductive_log_plasma_strength": CONDUCTIVE_LOG_PRIOR_SIGMA,
+        "conductive_log_damping_ratio": CONDUCTIVE_LOG_PRIOR_SIGMA,
+        "qe_rbf_log_modulation": getattr(
+            args, "qe_rbf_prior_sigma_log", QE_RBF_PRIOR_SIGMA_LOG
+        ),
+        "acm_step_log_offset": getattr(args, "acm_step_prior_sigma", 0.05),
+        "late_acm_step_log_offset": getattr(
+            args, "late_acm_step_prior_sigma", 0.02
+        ),
+        "np_node_raw": 1.0,
+    }
+    return {
+        name: np.broadcast_to(
+            np.asarray(site_scales.get(name, 1.0), dtype=float),
+            np.asarray(value).shape,
+        ).copy()
+        for name, value in initial_values.items()
+    }
+
+
+def load_map_warm_start(path, initial_values, data, value_converters=None):
+    """Load compatible MAP sites, retaining fresh defaults for new sites."""
+    path = Path(path)
+    samples_path = path / "posterior_samples.npz" if path.is_dir() else path
+    if not samples_path.is_file():
+        raise FileNotFoundError(f"MAP warm-start file does not exist: {samples_path}")
+    with np.load(samples_path) as samples:
+        if "map_only" not in samples or not bool(np.asarray(samples["map_only"]).item()):
+            raise ValueError("MAP warm starts require a deterministic map-only fit")
+        if "statistics_fingerprint" not in samples:
+            raise ValueError("MAP warm start has no tile-statistics fingerprint")
+        archived_fingerprint = str(
+            np.asarray(samples["statistics_fingerprint"]).reshape(-1)[0]
+        )
+        if archived_fingerprint != statistics_fingerprint(data):
+            raise ValueError("MAP warm-start tile statistics do not match this fit")
+
+        warmed_values = {}
+        value_converters = value_converters or {}
+        for name, current_value in initial_values.items():
+            source_name = name
+            converter = None
+            if name not in samples and name in value_converters:
+                source_name, converter = value_converters[name]
+            if source_name not in samples:
+                warmed_values[name] = np.asarray(current_value).copy()
+                continue
+            value = np.asarray(samples[source_name], dtype=float)
+            if value.shape and value.shape[0] == 1:
+                value = value[0]
+            if converter is not None:
+                value = np.asarray(converter(value, samples), dtype=float)
+            target_shape = np.asarray(current_value).shape
+            if name == "acm_step_log_offset":
+                if target_shape == () and value.size == 6:
+                    value = np.asarray(np.mean(value))
+                elif target_shape == (6,) and value.size == 1:
+                    value = np.full(6, float(value.reshape(-1)[0]))
+            if value.shape != target_shape:
+                raise ValueError(
+                    f"MAP warm-start site {name} has shape {value.shape}; "
+                    f"expected {target_shape}"
+                )
+            if np.any(~np.isfinite(value)):
+                raise ValueError(f"MAP warm-start site {name} is non-finite")
+            warmed_values[name] = value.copy()
+    return warmed_values
+
+
+def jitter_unconstrained_initial_params(initial_params, jax, seed, chains, scale):
+    """Create per-chain starts in a small unconstrained neighborhood."""
+    if chains < 1:
+        raise ValueError("NUTS chain count must be positive")
+    if not np.isfinite(scale) or scale < 0.0:
+        raise ValueError("NUTS initialization jitter must be finite and non-negative")
+    base_key = jax.random.PRNGKey(seed)
+    jittered = {}
+    for index, (name, value) in enumerate(initial_params.items()):
+        value = jax.numpy.asarray(value)
+        batched_shape = (chains,) + value.shape
+        if scale == 0.0:
+            batched = jax.numpy.broadcast_to(value, batched_shape)
+        else:
+            noise = jax.random.normal(
+                jax.random.fold_in(base_key, index),
+                batched_shape,
+                dtype=value.dtype,
+            )
+            batched = value + scale * noise
+        jittered[name] = batched if chains > 1 else batched[0]
+    return jittered
+
+
+def build_nuts_initial_params(
+    model, initial_values, jax, init_to_value, seed, chains, jitter
+):
+    """Transform a complete constrained start and jitter it per chain."""
+    from numpyro.infer.util import initialize_model
+
+    model_info = initialize_model(
+        jax.random.PRNGKey(seed),
+        model,
+        init_strategy=init_to_value(values=initial_values),
+    )
+    return jitter_unconstrained_initial_params(
+        model_info.param_info.z,
+        jax,
+        seed + 1,
+        chains,
+        jitter,
+    )
+
+
+def run_map_optimization(
+    model,
+    initial_values,
+    jax,
+    maxiter,
+    tolerance=1.0e-9,
+    ftol=0.0,
+    parameter_scales=None,
+):
+    """Optimize the exact NumPyro joint log density in scaled L-BFGS-B coordinates."""
+    from numpyro.infer.util import log_density
+    from scipy.optimize import minimize
+
+    flat_initial, unravel, flat_lower, flat_upper = map_parameter_bounds(
+        initial_values, jax
+    )
+    if parameter_scales is None:
+        flat_scales = np.ones_like(np.asarray(flat_initial, dtype=float))
+    else:
+        if set(parameter_scales) != set(initial_values):
+            raise ValueError("MAP parameter scales must match the initial-value sites")
+        scale_pytree = {
+            name: jax.numpy.asarray(
+                np.broadcast_to(
+                    np.asarray(parameter_scales[name], dtype=float),
+                    np.asarray(value).shape,
+                )
+            )
+            for name, value in initial_values.items()
+        }
+        flat_scales, _ = jax.flatten_util.ravel_pytree(scale_pytree)
+        flat_scales = np.asarray(flat_scales, dtype=float)
+        if np.any(~np.isfinite(flat_scales)) or np.any(flat_scales <= 0.0):
+            raise ValueError("MAP parameter scales must be finite and positive")
+
+    flat_initial = np.asarray(flat_initial, dtype=float)
+    flat_lower = np.asarray(flat_lower, dtype=float)
+    flat_upper = np.asarray(flat_upper, dtype=float)
+    scaled_initial = np.zeros_like(flat_initial)
+    scaled_lower = (flat_lower - flat_initial) / flat_scales
+    scaled_upper = (flat_upper - flat_initial) / flat_scales
 
     def negative_log_joint(flat_values):
         log_joint, _ = log_density(model, (), {}, unravel(flat_values))
         return -log_joint
 
     value_and_gradient = jax.jit(jax.value_and_grad(negative_log_joint))
+    last_evaluation = {"values": None, "objective": None}
 
-    def scipy_objective(flat_values):
+    def scipy_objective(scaled_values):
+        scaled_values = np.asarray(scaled_values, dtype=float)
+        flat_values = flat_initial + flat_scales * scaled_values
         value, gradient = value_and_gradient(jax.numpy.asarray(flat_values))
-        return float(value), np.asarray(gradient, dtype=float)
+        value = float(value)
+        last_evaluation["values"] = scaled_values.copy()
+        last_evaluation["objective"] = value
+        return value, np.asarray(gradient, dtype=float) * flat_scales
 
-    initial_objective, _ = scipy_objective(np.asarray(flat_initial, dtype=float))
+    def projected_gradient(flat_values, gradient, lower=flat_lower, upper=flat_upper):
+        gradient = np.asarray(gradient, dtype=float).copy()
+        bound_tolerance = 1.0e-10 * (1.0 + np.abs(flat_values))
+        lower_active = np.isfinite(lower) & (
+            flat_values <= lower + bound_tolerance
+        )
+        upper_active = np.isfinite(upper) & (
+            flat_values >= upper - bound_tolerance
+        )
+        gradient[lower_active] = np.minimum(gradient[lower_active], 0.0)
+        gradient[upper_active] = np.maximum(gradient[upper_active], 0.0)
+        return gradient
+
+    start_time = time.perf_counter()
+    initial_objective, _ = scipy_objective(scaled_initial)
+    initial_evaluation_seconds = time.perf_counter() - start_time
     objective_history = [initial_objective]
 
     def record_objective(flat_values):
-        value, _ = scipy_objective(flat_values)
-        objective_history.append(value)
+        # SciPy has already evaluated the accepted point; avoid a duplicate
+        # value-and-gradient launch just to record diagnostic history.
+        if np.array_equal(flat_values, last_evaluation["values"]):
+            objective_history.append(last_evaluation["objective"])
 
+    optimization_start = time.perf_counter()
     result = minimize(
         scipy_objective,
-        np.asarray(flat_initial, dtype=float),
+        scaled_initial,
         jac=True,
         method="L-BFGS-B",
-        bounds=list(zip(np.asarray(flat_lower), np.asarray(flat_upper))),
+        bounds=list(zip(scaled_lower, scaled_upper)),
         callback=record_objective,
         options={
             "maxiter": int(maxiter),
-            "ftol": float(tolerance),
+            "ftol": float(ftol),
             "gtol": float(tolerance),
             "maxls": 50,
         },
     )
+    optimization_seconds = time.perf_counter() - optimization_start
     if not np.isfinite(result.fun) or not np.all(np.isfinite(result.x)):
         raise ValueError("L-BFGS-B MAP optimization produced a non-finite objective")
+    optimized_values = flat_initial + flat_scales * np.asarray(result.x, dtype=float)
     map_values = {
         name: np.asarray(value)
-        for name, value in unravel(jax.numpy.asarray(result.x)).items()
+        for name, value in unravel(jax.numpy.asarray(optimized_values)).items()
     }
-    gradient_norm = float(np.max(np.abs(np.asarray(result.jac, dtype=float))))
-    gradient_converged = gradient_norm <= max(1.0e-6, 100.0 * tolerance)
+    scaled_gradient = np.asarray(result.jac, dtype=float)
+    raw_gradient = scaled_gradient / flat_scales
+    gradient_norm = float(np.max(np.abs(raw_gradient)))
+    projected_gradient_norm = float(
+        np.max(np.abs(projected_gradient(optimized_values, raw_gradient)))
+    )
+    scaled_projected_gradient_norm = float(
+        np.max(
+            np.abs(
+                projected_gradient(
+                    result.x, scaled_gradient, scaled_lower, scaled_upper
+                )
+            )
+        )
+    )
+    gradient_converged = scaled_projected_gradient_norm <= tolerance
     diagnostics = {
         "optimizer": "L-BFGS-B",
         "converged": bool(result.success and gradient_converged),
@@ -454,17 +1279,119 @@ def run_map_optimization(model, initial_values, jax, maxiter, tolerance=1.0e-9):
         "iterations": int(result.nit),
         "function_evaluations": int(result.nfev),
         "gradient_norm": gradient_norm,
+        "projected_gradient_norm": projected_gradient_norm,
+        "scaled_gradient_norm": float(np.max(np.abs(scaled_gradient))),
+        "scaled_projected_gradient_norm": scaled_projected_gradient_norm,
+        "parameter_scale_min": float(np.min(flat_scales)),
+        "parameter_scale_max": float(np.max(flat_scales)),
+        "function_tolerance": float(ftol),
         "objective": float(result.fun),
         "initial_objective": float(initial_objective),
         "parameter_step_norm": float(
-            np.linalg.norm(result.x - np.asarray(flat_initial, dtype=float))
+            np.linalg.norm(optimized_values - flat_initial)
+        ),
+        "scaled_parameter_step_norm": float(
+            np.linalg.norm(result.x - scaled_initial)
         ),
         "objective_history": np.asarray(objective_history, dtype=float),
+        "initial_evaluation_seconds": float(initial_evaluation_seconds),
+        "optimization_seconds": float(optimization_seconds),
     }
     print(
         f"{diagnostics['optimizer']} MAP: iterations={diagnostics['iterations']}; "
         f"objective={diagnostics['objective']:.6g}; "
         f"gradient_inf_norm={diagnostics['gradient_norm']:.3g}; "
+        f"scaled_projected_gradient_inf_norm={diagnostics['scaled_projected_gradient_norm']:.3g}; "
+        f"converged={diagnostics['converged']}; "
+        f"first_evaluation_s={initial_evaluation_seconds:.2f}; "
+        f"optimization_s={optimization_seconds:.2f}"
+    )
+    return map_values, diagnostics
+
+
+def run_jax_map_optimization(
+    model, initial_values, jax, maxiter, tolerance=1.0e-9
+):
+    """Optimize the exact NumPyro joint log density with JAX-native L-BFGS-B."""
+    from numpyro.infer.util import log_density
+    import jaxopt
+
+    flat_initial, unravel, flat_lower, flat_upper = map_parameter_bounds(
+        initial_values, jax
+    )
+
+    def negative_log_joint(flat_values):
+        log_joint, _ = log_density(model, (), {}, unravel(flat_values))
+        return -log_joint
+
+    initial_objective = float(negative_log_joint(flat_initial))
+    solver = jaxopt.LBFGSB(
+        fun=negative_log_joint,
+        maxiter=int(maxiter),
+        tol=float(tolerance),
+        maxls=50,
+        history_size=10,
+        jit=True,
+        unroll=False,
+    )
+    result = solver.run(
+        flat_initial,
+        bounds=(flat_lower, flat_upper),
+    )
+    flat_values = np.asarray(jax.device_get(result.params), dtype=float)
+    state = result.state
+    raw_gradient = np.asarray(jax.device_get(state.grad), dtype=float)
+    lower = np.asarray(flat_lower, dtype=float)
+    upper = np.asarray(flat_upper, dtype=float)
+    projected = raw_gradient.copy()
+    bound_tolerance = 1.0e-10 * (1.0 + np.abs(flat_values))
+    lower_active = np.isfinite(lower) & (flat_values <= lower + bound_tolerance)
+    upper_active = np.isfinite(upper) & (flat_values >= upper - bound_tolerance)
+    projected[lower_active] = np.minimum(projected[lower_active], 0.0)
+    projected[upper_active] = np.maximum(projected[upper_active], 0.0)
+    gradient_norm = float(np.max(np.abs(raw_gradient)))
+    projected_gradient_norm = float(np.max(np.abs(projected)))
+    failed_linesearch = bool(jax.device_get(state.failed_linesearch))
+    gradient_converged = projected_gradient_norm <= tolerance
+    converged = gradient_converged and not failed_linesearch
+    iterations = int(jax.device_get(state.iter_num))
+    function_evaluations = int(jax.device_get(state.num_fun_eval))
+    objective = float(jax.device_get(state.value))
+    diagnostics = {
+        "optimizer": "JAX-LBFGS-B",
+        "converged": bool(converged),
+        "gradient_converged": bool(gradient_converged),
+        "status": 0 if converged else 1,
+        "message": (
+            "Projected-gradient tolerance reached."
+            if converged
+            else (
+                "JAXopt line search failed."
+                if failed_linesearch
+                else "Maximum iterations reached before projected-gradient convergence."
+            )
+        ),
+        "iterations": iterations,
+        "function_evaluations": function_evaluations,
+        "gradient_norm": gradient_norm,
+        "projected_gradient_norm": projected_gradient_norm,
+        "function_tolerance": np.nan,
+        "objective": objective,
+        "initial_objective": initial_objective,
+        "parameter_step_norm": float(
+            np.linalg.norm(flat_values - np.asarray(flat_initial, dtype=float))
+        ),
+        "objective_history": np.asarray([initial_objective, objective], dtype=float),
+    }
+    map_values = {
+        name: np.asarray(value)
+        for name, value in unravel(jax.numpy.asarray(flat_values)).items()
+    }
+    print(
+        f"{diagnostics['optimizer']} MAP: iterations={iterations}; "
+        f"objective={objective:.6g}; "
+        f"gradient_inf_norm={gradient_norm:.3g}; "
+        f"projected_gradient_inf_norm={projected_gradient_norm:.3g}; "
         f"converged={diagnostics['converged']}"
     )
     return map_values, diagnostics
@@ -545,9 +1472,18 @@ def qe_columns_for_scas(sca_names, qe_fieldnames):
     return columns
 
 
-def load_tile_statistics(path, max_tiles=None, max_groups=None):
+def load_tile_statistics(
+    path,
+    max_tiles=None,
+    max_groups=None,
+    min_observation_day=None,
+):
     if max_groups is not None and max_groups < 1:
         raise ValueError("max_groups must be positive")
+    if min_observation_day is not None and (
+        not np.isfinite(min_observation_day) or min_observation_day < 0.0
+    ):
+        raise ValueError("Minimum observation day must be finite and non-negative")
     paths = statistics_paths(path)
     sca_counts = []
     sca_sums = []
@@ -570,7 +1506,23 @@ def load_tile_statistics(path, max_tiles=None, max_groups=None):
             raise ValueError("SCA statistics do not have the same tile IDs")
         selected = set(tile_ids.tolist())
         rows = [row for row in rows if int(row["tile_id"]) in selected]
+        if min_observation_day is not None:
+            group_min_days = {}
+            for row in rows:
+                group = int(row["group"])
+                day = float(row["days"])
+                group_min_days[group] = min(group_min_days.get(group, day), day)
+            retained_groups = {
+                group
+                for group, day in group_min_days.items()
+                if day >= min_observation_day
+            }
+            rows = [row for row in rows if int(row["group"]) in retained_groups]
         current_groups = sorted({int(row["group"]) for row in rows})
+        if not current_groups:
+            raise ValueError(
+                "Observation-day cutoff removed every available observation group"
+            )
         if max_groups is not None:
             current_groups = current_groups[:max_groups]
             selected_groups = set(current_groups)
@@ -611,7 +1563,9 @@ def load_tile_statistics(path, max_tiles=None, max_groups=None):
                 "col_start": int(row["col_start"]),
                 "col_stop_exclusive": int(row["col_stop_exclusive"]),
             }
-        if not np.array_equal(current_groups, np.arange(n_groups)):
+        if min_observation_day is None and not np.array_equal(
+            current_groups, np.arange(n_groups)
+        ):
             raise ValueError(
                 "Tile statistics groups must span zero through the final group"
             )
@@ -625,7 +1579,7 @@ def load_tile_statistics(path, max_tiles=None, max_groups=None):
             if not np.array_equal(led, reference_led) or not np.array_equal(
                 repeat, reference_repeat
             ):
-                raise ValueError("SCA statistics have inconsistent LED/repeat metadata")
+                raise ValueError("SCA statistics have inconsistent LED/epoch metadata")
             if not np.allclose(days, reference_days) or exposure_times != reference_times:
                 raise ValueError("SCA statistics have inconsistent time metadata")
         sca_counts.append(counts)
@@ -641,16 +1595,25 @@ def load_tile_statistics(path, max_tiles=None, max_groups=None):
     n_tiles = len(tile_ids)
     n_groups = len(groups)
 
-    first_by_led = np.asarray(
-        [np.flatnonzero(led == led_value)[0] for led_value in range(1, 7)],
-        dtype=int,
-    )
+    first_by_led = []
+    for led_value in range(1, 7):
+        led_indices = np.flatnonzero(led == led_value)
+        if not led_indices.size:
+            raise ValueError(
+                f"Observation-day cutoff removed every observation for LED {led_value}"
+            )
+        first_by_led.append(led_indices[0])
+    first_by_led = np.asarray(first_by_led, dtype=int)
     after_event = np.asarray(
         [parse_mast_time(value) >= parse_mast_time(DEFAULT_STEP_TIME) for value in exposure_times],
         dtype=bool,
     )
     step_design = after_event.astype(float) - after_event[first_by_led[led - 1]]
     repeat_values = np.asarray(sorted(set(repeat.tolist())), dtype=int)
+    after_late_acm_step = (repeat == repeat_values[-1]).astype(float)
+    late_step_design = after_late_acm_step - after_late_acm_step[
+        first_by_led[led - 1]
+    ]
     repeat_to_index = {repeat_value: index for index, repeat_value in enumerate(repeat_values)}
     repeat_index = np.asarray(
         [repeat_to_index[repeat_value] for repeat_value in repeat],
@@ -668,11 +1631,13 @@ def load_tile_statistics(path, max_tiles=None, max_groups=None):
         "counts": counts,
         "sums": sums,
         "sum_squared": sum_squared,
+        "groups": np.asarray(groups, dtype=int),
         "led": led,
         "repeat": repeat,
         "days": days,
         "first_by_led": first_by_led,
         "step_design": step_design,
+        "late_step_design": late_step_design,
         "exposure_times": exposure_times,
         "repeat_values": repeat_values,
         "repeat_index": repeat_index,
@@ -684,6 +1649,110 @@ def load_tile_statistics(path, max_tiles=None, max_groups=None):
     }
 
 
+def apply_fixed_corrections(data, path):
+    """Apply fixed gain and shared ACM corrections to log-ratio statistics."""
+    required = {
+        "group",
+        "days",
+        "log_gain_correction",
+        "acm_step_log_offset",
+        "late_acm_step_log_offset",
+    }
+    with Path(path).open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    if not rows:
+        raise ValueError(f"No fixed-correction rows found in {path}")
+    missing = required.difference(rows[0])
+    if missing:
+        raise ValueError(
+            f"Fixed-correction file is missing columns: {sorted(missing)}"
+        )
+    by_group = {}
+    for row in rows:
+        group = int(row["group"])
+        if group in by_group:
+            raise ValueError(f"Duplicate fixed correction for group {group}")
+        by_group[group] = row
+    data_groups = np.asarray(
+        data.get("groups", np.arange(len(data["days"]), dtype=int)), dtype=int
+    ).reshape(-1)
+    if len(data_groups) != len(data["days"]):
+        raise ValueError("Tile statistics groups do not match observation days")
+    if len(np.unique(data_groups)) != len(data_groups):
+        raise ValueError("Tile statistics contain duplicate observation groups")
+    missing_groups = sorted(set(data_groups.tolist()).difference(by_group))
+    if missing_groups:
+        raise ValueError(
+            "Fixed corrections are missing selected groups: "
+            f"{missing_groups}"
+        )
+    correction_days = np.asarray(
+        [float(by_group[group]["days"]) for group in data_groups], dtype=float
+    )
+    if not np.allclose(correction_days, data["days"], rtol=0.0, atol=1.0e-9):
+        raise ValueError("Fixed-correction days do not match tile statistics")
+    log_gain_correction = np.asarray(
+        [float(by_group[group]["log_gain_correction"]) for group in data_groups],
+        dtype=float,
+    )
+    acm_steps = np.asarray(
+        [float(by_group[group]["acm_step_log_offset"]) for group in data_groups],
+        dtype=float,
+    )
+    late_acm_steps = np.asarray(
+        [
+            float(by_group[group]["late_acm_step_log_offset"])
+            for group in data_groups
+        ],
+        dtype=float,
+    )
+    if not np.allclose(acm_steps, acm_steps[0], rtol=0.0, atol=1.0e-12):
+        raise ValueError("Fixed ACM step must be shared across all groups")
+    if not np.allclose(late_acm_steps, late_acm_steps[0], rtol=0.0, atol=1.0e-12):
+        raise ValueError("Fixed late ACM step must be shared across all groups")
+    total_log_correction = (
+        log_gain_correction
+        - acm_steps[0] * np.asarray(data["step_design"], dtype=float)
+        - late_acm_steps[0] * np.asarray(data["late_step_design"], dtype=float)
+    )
+    corrected = dict(data)
+    counts = np.asarray(data["counts"], dtype=float)
+    sums = np.asarray(data["sums"], dtype=float)
+    corrected["sums"] = sums + counts * total_log_correction[None, :]
+    corrected["sum_squared"] = np.asarray(data["sum_squared"], dtype=float) + (
+        2.0 * total_log_correction[None, :] * sums
+        + counts * total_log_correction[None, :] ** 2
+    )
+    corrected["fixed_corrections_applied"] = True
+    corrected["fixed_corrections_path"] = str(Path(path).expanduser().resolve())
+    corrected["fixed_log_gain_correction"] = log_gain_correction
+    corrected["fixed_acm_step_log_offset"] = float(acm_steps[0])
+    corrected["fixed_late_acm_step_log_offset"] = float(late_acm_steps[0])
+    corrected["fixed_total_log_correction"] = total_log_correction
+    return corrected
+
+
+def early_time_scale_configuration(data, cutoff_day):
+    """Map early repeat nodes to shared scale-parameter indices."""
+    if cutoff_day is None:
+        return None
+    node_days = np.asarray(data["node_days"], dtype=float)
+    early_node_indices = np.flatnonzero(node_days <= float(cutoff_day))
+    if not early_node_indices.size:
+        raise ValueError("Early-time cutoff does not include an observation epoch")
+    node_scale_index = np.full(len(node_days), -1, dtype=int)
+    node_scale_index[early_node_indices] = np.arange(len(early_node_indices))
+    observation_scale_index = node_scale_index[
+        np.asarray(data["repeat_index"], dtype=int)
+    ]
+    return {
+        "observation_scale_index": observation_scale_index,
+        "node_indices": early_node_indices,
+        "repeat": np.asarray(data["repeat_values"], dtype=int)[early_node_indices],
+        "days": node_days[early_node_indices],
+    }
+
+
 def load_response_context(
     model_path,
     sed_mode,
@@ -691,6 +1760,9 @@ def load_response_context(
     sca_names,
     wavelength_step_nm=None,
     ice_optical_constants_source=None,
+    use_hgcdte_optical_constants=False,
+    sed_weighting="photon",
+    absolute_substrate_power=False,
 ):
     if wavelength_stride < 1:
         raise ValueError("wavelength_stride must be positive")
@@ -702,31 +1774,50 @@ def load_response_context(
     qe_wavelengths, qe_values, qe_fieldnames = load_qe(QE_URL)
     del model_path  # Retained for compatibility; production TMM does not use its values.
     if wavelength_step_nm is None:
-        wavelength_nodes = [np.asarray([qe_wavelengths[0], qe_wavelengths[-1]])]
+        wavelength_nodes = [] if absolute_substrate_power else [
+            np.asarray([qe_wavelengths[0], qe_wavelengths[-1]])
+        ]
         for spectrum in spectra.values():
             spectrum_wavelengths = np.asarray(spectrum["wavelength"])
             wavelength_nodes.append(
-                spectrum_wavelengths[
+                spectrum_wavelengths
+                if absolute_substrate_power
+                else spectrum_wavelengths[
                     (spectrum_wavelengths >= qe_wavelengths[0])
                     & (spectrum_wavelengths <= qe_wavelengths[-1])
                 ]
             )
         model_wavelengths = np.unique(np.concatenate(wavelength_nodes))
     else:
+        wavelength_min = (
+            min(np.min(spectrum["wavelength"]) for spectrum in spectra.values())
+            if absolute_substrate_power
+            else qe_wavelengths[0]
+        )
+        wavelength_max = (
+            max(np.max(spectrum["wavelength"]) for spectrum in spectra.values())
+            if absolute_substrate_power
+            else qe_wavelengths[-1]
+        )
         model_wavelengths = np.arange(
-            qe_wavelengths[0],
-            qe_wavelengths[-1] + 0.5 * wavelength_step_nm,
+            wavelength_min,
+            wavelength_max + 0.5 * wavelength_step_nm,
             wavelength_step_nm,
             dtype=float,
         )
         model_wavelengths = model_wavelengths[
-            model_wavelengths <= qe_wavelengths[-1]
+            model_wavelengths <= wavelength_max
         ]
-        if model_wavelengths.size == 0 or model_wavelengths[-1] < qe_wavelengths[-1]:
-            model_wavelengths = np.append(model_wavelengths, qe_wavelengths[-1])
+        if model_wavelengths.size == 0 or model_wavelengths[-1] < wavelength_max:
+            model_wavelengths = np.append(model_wavelengths, wavelength_max)
     model_wavelengths = model_wavelengths[::wavelength_stride]
-    if model_wavelengths[-1] < qe_wavelengths[-1]:
-        model_wavelengths = np.append(model_wavelengths, qe_wavelengths[-1])
+    wavelength_max = (
+        max(np.max(spectrum["wavelength"]) for spectrum in spectra.values())
+        if absolute_substrate_power
+        else qe_wavelengths[-1]
+    )
+    if model_wavelengths[-1] < wavelength_max:
+        model_wavelengths = np.append(model_wavelengths, wavelength_max)
     qe_columns = qe_columns_for_scas(sca_names, qe_fieldnames)
     integrations = [
         prepare_response_integration(
@@ -736,6 +1827,8 @@ def load_response_context(
             qe_values,
             sed_mode,
             qe_column=int(qe_column),
+            sed_weighting=sed_weighting,
+            include_qe=not absolute_substrate_power,
         )
         for qe_column in qe_columns
     ]
@@ -746,6 +1839,8 @@ def load_response_context(
         "clean_output": np.stack([integration[2] for integration in integrations]),
         "qe_columns": qe_columns,
         "qe_fieldnames": np.asarray(qe_fieldnames),
+        "sed_weighting": np.asarray(sed_weighting),
+        "absolute_substrate_power": bool(absolute_substrate_power),
     }
     if ice_optical_constants_source is not None:
         ice_wavelengths, ice_n, ice_k = load_asw_optical_constants(
@@ -760,6 +1855,16 @@ def load_response_context(
         context["ice_optical_constants_source"] = np.asarray(
             str(ice_optical_constants_source)
         )
+    if use_hgcdte_optical_constants:
+        context["hgcdte_n"], context["hgcdte_k"] = (
+            hgcdte_reference_optical_constants(model_wavelengths)
+        )
+        context["hgcdte_modulation_basis"] = hgcdte_modulation_basis(
+            model_wavelengths
+        )
+        context["hgcdte_optical_constants_source"] = np.asarray(
+            HGCDTE_OPTICAL_CONSTANTS_SOURCE
+        )
     return context
 
 
@@ -768,13 +1873,61 @@ def build_prediction_function(
     context,
     row_indices=None,
     fit_hgcdte=False,
+    fit_hgcdte_modulation=False,
     fit_conductive_layer=False,
+    finite_hgcdte_detector=False,
+    detector_backside_index=1.0,
     fit_qe_rbf=False,
     qe_rbf_node_wavelengths_nm=None,
     qe_rbf_width_nm=QE_RBF_WIDTH_NM,
     use_asw_optical_constants=False,
+    use_hgcdte_optical_constants=False,
+    incidence_cone_half_angle_deg=0.0,
+    incidence_pupil_half_angle_deg=0.0,
+    incidence_chief_ray_tilts_deg=None,
+    early_time_cutoff_day=None,
+    share_ar_across_rows=False,
+    fit_late_acm_step=False,
+    absolute_substrate_power=None,
 ):
     jax, jnp, _, _, _, _, _ = require_numpyro()
+    if absolute_substrate_power is None:
+        absolute_substrate_power = bool(context.get("absolute_substrate_power", False))
+    absolute_substrate_power = bool(absolute_substrate_power)
+    if incidence_cone_half_angle_deg and incidence_pupil_half_angle_deg:
+        raise ValueError("Legacy incidence cone and 2D pupil modes are mutually exclusive")
+    if fit_hgcdte and (fit_hgcdte_modulation or use_hgcdte_optical_constants):
+        raise ValueError(
+            "Fitted constant HgCdTe and wavelength-dependent HgCdTe constants "
+            "are mutually exclusive"
+        )
+    if fit_hgcdte_modulation and not use_hgcdte_optical_constants:
+        raise ValueError(
+            "HgCdTe modulation requires wavelength-dependent HgCdTe constants"
+        )
+    if finite_hgcdte_detector and fit_hgcdte_modulation:
+        raise ValueError(
+            "Finite HgCdTe detectors do not support free wavelength modulation"
+        )
+    if absolute_substrate_power and finite_hgcdte_detector:
+        raise ValueError(
+            "Absolute substrate power requires a semi-infinite terminal HgCdTe boundary"
+        )
+    if absolute_substrate_power and fit_qe_rbf:
+        raise ValueError("Absolute substrate power cannot use a fitted QE modulation")
+    if absolute_substrate_power and use_hgcdte_optical_constants is False:
+        raise ValueError(
+            "Absolute substrate power requires wavelength-dependent HgCdTe constants"
+        )
+    if (
+        not np.isfinite(detector_backside_index)
+        or detector_backside_index <= 0.0
+    ):
+        raise ValueError("Detector backside index must be positive and finite")
+    if early_time_cutoff_day is not None and (
+        not np.isfinite(early_time_cutoff_day) or early_time_cutoff_day <= 0.0
+    ):
+        raise ValueError("Early-time scale cutoff must be positive and finite")
     wavelengths = jnp.asarray(context["wavelengths"])
     model_weights = jnp.asarray(context["model_weights"])
     outside_output = jnp.asarray(context["outside_output"])
@@ -790,6 +1943,38 @@ def build_prediction_function(
         ):
             raise ValueError("Prediction row indices are outside the tile data")
     sca_index = jnp.asarray(all_sca_index[row_indices], dtype=jnp.int32)
+    if incidence_chief_ray_tilts_deg is None:
+        incidence_chief_ray_tilts_deg = np.zeros((len(all_sca_index), 2), dtype=float)
+    incidence_chief_ray_tilts_deg = np.asarray(
+        incidence_chief_ray_tilts_deg, dtype=float
+    )
+    if incidence_chief_ray_tilts_deg.shape != (len(all_sca_index), 2):
+        raise ValueError("Chief-ray tilts must have one x/y pair per optical row")
+    selected_chief_ray_tilts = incidence_chief_ray_tilts_deg[row_indices]
+    use_pupil_incidence = bool(
+        float(incidence_pupil_half_angle_deg) > 0.0
+        or np.any(selected_chief_ray_tilts != 0.0)
+    )
+    use_incidence_cone = bool(
+        float(incidence_cone_half_angle_deg) > 0.0 or use_pupil_incidence
+    )
+    if use_pupil_incidence:
+        selected_incidence_sine, incidence_weights = incidence_pupil_ray_sines(
+            incidence_pupil_half_angle_deg, selected_chief_ray_tilts
+        )
+    else:
+        incidence_angles_deg, incidence_weights = incidence_cone_quadrature(
+            incidence_cone_half_angle_deg
+        )
+        selected_incidence_sine = np.broadcast_to(
+            np.sin(np.deg2rad(incidence_angles_deg))[None, :],
+            (len(row_indices), len(incidence_angles_deg)),
+        ).copy()
+    incidence_weights = jnp.asarray(incidence_weights, dtype=float)
+    incidence_geometry_varies_by_row = not np.allclose(
+        selected_incidence_sine, selected_incidence_sine[:1], rtol=0.0, atol=1.0e-14
+    )
+    selected_incidence_sine = jnp.asarray(selected_incidence_sine, dtype=float)
     if model_weights.ndim == 2:
         model_weights = jnp.broadcast_to(model_weights[None, :], (n_scas,) + model_weights.shape)
     if outside_output.ndim == 1:
@@ -808,9 +1993,28 @@ def build_prediction_function(
     led_index = jnp.asarray(data["led"] - 1, dtype=jnp.int32)
     first_by_led = jnp.asarray(data["first_by_led"], dtype=jnp.int32)
     step_design = jnp.asarray(data["step_design"])
+    late_step_design = jnp.asarray(
+        data["late_step_design"]
+        if "late_step_design" in data
+        else np.zeros(len(data["led"]))
+    )
+    early_time_scale_index = None
+    if early_time_cutoff_day is not None:
+        early_time_scale_index = jnp.asarray(
+            early_time_scale_configuration(
+                data, early_time_cutoff_day
+            )["observation_scale_index"],
+            dtype=jnp.int32,
+        )
     row_model_weights = model_weights[sca_index]
     row_outside_output = outside_output[sca_index]
     row_clean_output = clean_output[sca_index]
+    if absolute_substrate_power and not np.allclose(
+        np.asarray(row_outside_output), 0.0, rtol=0.0, atol=1.0e-12
+    ):
+        raise ValueError(
+            "Absolute substrate power cannot normalize unsupported source wavelengths"
+        )
     if use_asw_optical_constants:
         if "ice_n" not in context or "ice_k" not in context:
             raise ValueError("ASW optical constants are missing from the response context")
@@ -819,9 +2023,54 @@ def build_prediction_function(
         )
     else:
         ice_index = 1.25 + 0.0j
+    if use_hgcdte_optical_constants:
+        if (
+            "hgcdte_n" not in context
+            or "hgcdte_k" not in context
+            or (
+                fit_hgcdte_modulation
+                and "hgcdte_modulation_basis" not in context
+            )
+        ):
+            raise ValueError(
+                "HgCdTe optical constants are missing from the response context"
+            )
+        wavelength_dependent_substrate_index = jnp.asarray(
+            context["hgcdte_n"]
+        ) + 1j * jnp.asarray(context["hgcdte_k"])
+        if fit_hgcdte_modulation:
+            hgcdte_modulation_basis_value = jnp.asarray(
+                context["hgcdte_modulation_basis"]
+            )
+            hgcdte_modulation_node_count = int(
+                hgcdte_modulation_basis_value.shape[1]
+            )
+    else:
+        wavelength_dependent_substrate_index = None
     selected_model_weights = row_model_weights[:, led_index, :]
     selected_outside_output = row_outside_output[:, led_index]
     selected_clean_output = row_clean_output[:, led_index]
+    if absolute_substrate_power:
+        if "counts" not in data or "sums" not in data:
+            raise ValueError(
+                "Absolute substrate power requires observed sufficient statistics "
+                "for per-LED baseline offsets"
+            )
+        selected_counts = np.asarray(data["counts"])[row_indices]
+        selected_sums = np.asarray(data["sums"])[row_indices]
+        baseline_offsets = np.asarray(
+            [
+                np.average(
+                    selected_sums[:, group] / selected_counts[:, group],
+                    weights=selected_counts[:, group],
+                )
+                for group in np.asarray(data["first_by_led"], dtype=int)
+            ],
+            dtype=float,
+        )
+        baseline_offsets = jnp.asarray(baseline_offsets)
+    else:
+        baseline_offsets = jnp.zeros(6)
     all_group_indices = jnp.arange(led_index.shape[0], dtype=jnp.int32)
     if fit_qe_rbf:
         qe_rbf_nodes, qe_rbf_width_nm, _ = qe_rbf_configuration(
@@ -841,52 +2090,124 @@ def build_prediction_function(
             qe_rbf_basis, axis=1, keepdims=True
         )
 
-    def layer_matrix(index, thickness):
+    inverse_wavelengths = 1.0 / wavelengths
+    phase_factor = 2.0 * jnp.pi * inverse_wavelengths
+
+    def oblique_layer_elements(index, thickness, polarization, angle_sine):
         index, thickness = jnp.broadcast_arrays(
             jnp.atleast_1d(index), jnp.atleast_1d(thickness)
         )
-        phase = (
-            2.0
-            * jnp.pi
-            * index[..., None]
-            * thickness[..., None]
-            / wavelengths
+        index = index[..., None]
+        thickness = thickness[..., None]
+        angle_sine = angle_sine[:, :, None]
+        cosine = jnp.sqrt(1.0 - (angle_sine / index[None, :, :]) ** 2)
+        admittance = (
+            index * cosine
+            if polarization == "s"
+            else index / cosine
         )
+        phase = phase_factor * index * thickness * cosine
+        cosine_phase = jnp.cos(phase)
+        sine_phase = -1j * jnp.sin(phase)
+        return (
+            cosine_phase,
+            sine_phase / admittance,
+            sine_phase * admittance,
+            cosine_phase,
+        )
+
+    def wavelength_dependent_oblique_layer_elements(
+        index, thickness, polarization, angle_sine, row_dependent_thickness=False
+    ):
+        index = jnp.asarray(index)
+        if index.ndim == 0:
+            index = jnp.broadcast_to(index, wavelengths.shape)
+        thickness = jnp.asarray(thickness)
+        if thickness.ndim == 0:
+            thickness = thickness[None]
+        cosine = jnp.sqrt(
+            1.0 - (angle_sine[:, :, None] / index[None, None, :]) ** 2
+        )
+        admittance = (
+            index[None, None, :] * cosine
+            if polarization == "s"
+            else index[None, None, :] / cosine
+        )
+        if row_dependent_thickness:
+            phase = (
+                phase_factor[None, None, :]
+                * index[None, None, :]
+                * thickness[None, :, None]
+                * cosine
+            )
+        else:
+            phase = (
+                phase_factor[None, None, None, :]
+                * index[None, None, None, :]
+                * thickness[None, None, :, None]
+                * cosine[:, :, None, :]
+            )
+            admittance = admittance[:, :, None, :]
+        cosine_phase = jnp.cos(phase)
+        sine_phase = -1j * jnp.sin(phase)
+        return (
+            cosine_phase,
+            sine_phase / admittance,
+            sine_phase * admittance,
+            cosine_phase,
+        )
+
+    def layer_elements(index, thickness):
+        index, thickness = jnp.broadcast_arrays(
+            jnp.atleast_1d(index), jnp.atleast_1d(thickness)
+        )
+        phase = phase_factor * index[..., None] * thickness[..., None]
         cosine = jnp.cos(phase)
         # With n_complex = n + i*k, forward propagation decays as exp(i*phase).
         # The corresponding characteristic matrix therefore uses -i*sin(phase).
         sine = -1j * jnp.sin(phase)
-        matrix = jnp.zeros(
-            index.shape + (wavelengths.shape[0], 2, 2), dtype=jnp.complex128
+        return (
+            cosine,
+            sine / index[..., None],
+            sine * index[..., None],
+            cosine,
         )
-        matrix = matrix.at[..., 0, 0].set(cosine)
-        matrix = matrix.at[..., 1, 1].set(cosine)
-        matrix = matrix.at[..., 0, 1].set(sine / index[..., None])
-        matrix = matrix.at[..., 1, 0].set(sine * index[..., None])
-        return matrix
 
-    def wavelength_dependent_layer_matrix(index, thickness):
+    def wavelength_dependent_layer_elements(index, thickness):
         thickness = jnp.atleast_1d(thickness)
-        phase = (
-            2.0
-            * jnp.pi
-            * thickness[..., None]
-            * index[None, :]
-            / wavelengths[None, :]
-        )
+        phase = phase_factor * thickness[..., None] * index[None, :]
         cosine = jnp.cos(phase)
         sine = -1j * jnp.sin(phase)
-        matrix = jnp.zeros(
-            thickness.shape + (wavelengths.shape[0], 2, 2),
-            dtype=jnp.complex128,
+        return (
+            cosine,
+            sine / index[None, :],
+            sine * index[None, :],
+            cosine,
         )
-        matrix = matrix.at[..., 0, 0].set(cosine)
-        matrix = matrix.at[..., 1, 1].set(cosine)
-        matrix = matrix.at[..., 0, 1].set(sine / index[None, :])
-        matrix = matrix.at[..., 1, 0].set(sine * index[None, :])
-        return matrix
 
     def substrate_index_for_parameters(hgcdte_parameters):
+        if absolute_substrate_power:
+            if hgcdte_parameters is None:
+                raise ValueError(
+                    "Absolute substrate power requires fitted HgCdTe scale parameters"
+                )
+            return jnp.real(wavelength_dependent_substrate_index) * jnp.exp(
+                hgcdte_parameters[0]
+            ) + 1j * jnp.imag(wavelength_dependent_substrate_index) * jnp.exp(
+                hgcdte_parameters[1]
+            )
+        if fit_hgcdte_modulation:
+            n_log_modulation = hgcdte_parameters[:hgcdte_modulation_node_count]
+            k_log_modulation = hgcdte_parameters[hgcdte_modulation_node_count:]
+            reference_n = jnp.real(wavelength_dependent_substrate_index)
+            reference_k = jnp.imag(wavelength_dependent_substrate_index)
+            return reference_n * jnp.exp(
+                hgcdte_modulation_basis_value @ n_log_modulation
+            ) + 1j * reference_k * jnp.exp(
+                hgcdte_modulation_basis_value @ k_log_modulation
+            )
+        if use_hgcdte_optical_constants:
+            return wavelength_dependent_substrate_index
         if not fit_hgcdte:
             return NOMINAL_HGCDTE[0] + 1j * NOMINAL_HGCDTE[1]
         return hgcdte_parameters[0] + 1j * hgcdte_parameters[1]
@@ -904,76 +2225,276 @@ def build_prediction_function(
         )
         return jnp.sqrt(epsilon), thickness
 
-    def conductive_layer_matrix(conductive_parameters, n_rows):
+    def conductive_layer_elements(conductive_parameters):
         index, thickness = conductive_index_for_parameters(conductive_parameters)
-        phase = (
-            2.0
-            * jnp.pi
-            * index[None, :]
-            * thickness
-            / wavelengths[None, :]
-        )
+        phase = phase_factor * index * thickness
         cosine = jnp.cos(phase)
         sine = -1j * jnp.sin(phase)
-        matrix = jnp.zeros(
-            (1, wavelengths.shape[0], 2, 2), dtype=jnp.complex128
-        )
-        matrix = matrix.at[..., 0, 0].set(cosine)
-        matrix = matrix.at[..., 1, 1].set(cosine)
-        matrix = matrix.at[..., 0, 1].set(sine / index[None, :])
-        matrix = matrix.at[..., 1, 0].set(sine * index[None, :])
-        return jnp.broadcast_to(
-            matrix, (n_rows, wavelengths.shape[0], 2, 2)
+        return (
+            cosine,
+            sine / index,
+            sine * index,
+            cosine,
         )
 
-    def transmission(matrix, substrate_index):
-        denominator = (
-            matrix[..., 0, 0]
-            + substrate_index * matrix[..., 0, 1]
-            + matrix[..., 1, 0]
-            + substrate_index * matrix[..., 1, 1]
+    def apply_layer_elements(
+        boundary_first, boundary_second, elements
+    ):
+        m00, m01, m10, m11 = elements
+        return (
+            m00 * boundary_first + m01 * boundary_second,
+            m10 * boundary_first + m11 * boundary_second,
         )
-        amplitude = 2.0 / denominator
-        return jnp.real(substrate_index) * jnp.abs(amplitude) ** 2
 
-    def multilayer_matrix(indices, thicknesses):
-        n_rows, n_layers = indices.shape
-        matrices = layer_matrix(
-            indices.reshape((-1,)), thicknesses.reshape((-1,))
-        )
-        matrices = matrices.reshape(
-            (n_rows, n_layers, wavelengths.shape[0], 2, 2)
-        )
-        result = matrices[:, 0]
-        for layer_index in range(1, n_layers):
-            result = jnp.einsum(
-                "rwab,rwbc->rwac", result, matrices[:, layer_index]
+    def detector_thickness_for_rows(thickness, n_rows):
+        if thickness is None:
+            raise ValueError(
+                "Finite HgCdTe response requires detector thickness values"
             )
-        return result
+        thickness = jnp.asarray(thickness)
+        if thickness.ndim == 0:
+            return jnp.broadcast_to(thickness, (n_rows,))
+        thickness = thickness.reshape(-1)
+        if thickness.shape[0] == 1:
+            return jnp.broadcast_to(thickness, (n_rows,))
+        if thickness.shape[0] != n_rows:
+            raise ValueError("Detector thickness rows do not match AR rows")
+        return thickness
+
+    def ar_boundary_terms(
+        indices,
+        thicknesses,
+        substrate_index,
+        conductive_parameters=None,
+        detector_thickness_nm=None,
+    ):
+        """Propagate the substrate boundary vector through the stack."""
+        n_rows, n_layers = indices.shape
+        substrate_index = jnp.asarray(substrate_index)
+        if finite_hgcdte_detector:
+            if substrate_index.ndim == 0:
+                substrate_index = jnp.broadcast_to(substrate_index, wavelengths.shape)
+            substrate_index = substrate_index.reshape(-1)
+            boundary_shape = (n_rows, wavelengths.shape[0])
+            backside_index = jnp.asarray(
+                detector_backside_index, dtype=jnp.complex128
+            )
+            boundary_first = jnp.ones(boundary_shape, dtype=jnp.complex128)
+            boundary_second = jnp.broadcast_to(backside_index, boundary_shape)
+            detector_elements = wavelength_dependent_layer_elements(
+                substrate_index,
+                detector_thickness_for_rows(detector_thickness_nm, n_rows),
+            )
+            boundary_first, boundary_second = apply_layer_elements(
+                boundary_first, boundary_second, detector_elements
+            )
+            detector_front_first = boundary_first
+            detector_front_second = boundary_second
+        else:
+            if substrate_index.ndim == 0:
+                boundary_shape = (n_rows, 1)
+            else:
+                boundary_shape = (n_rows, substrate_index.shape[-1])
+            boundary_first = jnp.ones(boundary_shape, dtype=jnp.complex128)
+            boundary_second = jnp.broadcast_to(substrate_index, boundary_shape)
+            detector_front_first = boundary_first
+            detector_front_second = boundary_second
+        if fit_conductive_layer:
+            boundary_first, boundary_second = apply_layer_elements(
+                boundary_first,
+                boundary_second,
+                conductive_layer_elements(conductive_parameters),
+            )
+        # The matrix product is applied from the substrate side backwards.
+        for layer_index in range(n_layers - 1, -1, -1):
+            boundary_first, boundary_second = apply_layer_elements(
+                boundary_first,
+                boundary_second,
+                layer_elements(
+                    indices[:, layer_index], thicknesses[:, layer_index]
+                ),
+            )
+        denominator = boundary_first + boundary_second
+        if finite_hgcdte_detector:
+            normalization = 2.0 / denominator
+            clean = jnp.clip(
+                jnp.real(
+                    detector_front_first * jnp.conj(detector_front_second)
+                )
+                * jnp.abs(normalization) ** 2
+                - jnp.real(backside_index) * jnp.abs(normalization) ** 2,
+                1.0e-12,
+                1.0,
+            )
+        else:
+            clean = jnp.real(substrate_index) * jnp.abs(2.0 / denominator) ** 2
+        return (
+            clean,
+            boundary_first,
+            boundary_second,
+            detector_front_first,
+            detector_front_second,
+        )
+
+    def oblique_ar_boundary_terms(
+        indices,
+        thicknesses,
+        substrate_index,
+        polarization,
+        angle_sine,
+        conductive_parameters=None,
+        detector_thickness_nm=None,
+    ):
+        """Propagate one polarization through the stack at the cone angles."""
+        n_rows, n_layers = indices.shape
+        substrate_index = jnp.asarray(substrate_index)
+        if substrate_index.ndim == 0:
+            substrate_index = jnp.broadcast_to(substrate_index, wavelengths.shape)
+        substrate_index = substrate_index.reshape((-1,))
+        substrate_cosine = jnp.sqrt(
+            1.0 - (angle_sine[:, :, None] / substrate_index[None, None, :]) ** 2
+        )
+        substrate_admittance = (
+            substrate_index[None, None, :] * substrate_cosine
+            if polarization == "s"
+            else substrate_index[None, None, :] / substrate_cosine
+        )
+        incident_cosine = jnp.sqrt(1.0 - angle_sine**2)
+        incident_admittance = (
+            incident_cosine
+            if polarization == "s"
+            else 1.0 / incident_cosine
+        )
+        if finite_hgcdte_detector:
+            backside_index = jnp.broadcast_to(
+                jnp.asarray(detector_backside_index, dtype=jnp.complex128),
+                wavelengths.shape,
+            )
+            backside_cosine = jnp.sqrt(
+                1.0 - (angle_sine[:, :, None] / backside_index[None, None, :]) ** 2
+            )
+            backside_admittance = (
+                backside_index[None, None, :] * backside_cosine
+                if polarization == "s"
+                else backside_index[None, None, :] / backside_cosine
+            )
+            terminal_admittance = backside_admittance
+        else:
+            terminal_admittance = substrate_admittance
+        boundary_first = jnp.ones(
+            (angle_sine.shape[0], n_rows, wavelengths.shape[0]),
+            dtype=jnp.complex128,
+        )
+        boundary_second = jnp.broadcast_to(terminal_admittance, boundary_first.shape)
+        if finite_hgcdte_detector:
+            detector_elements = wavelength_dependent_oblique_layer_elements(
+                substrate_index,
+                detector_thickness_for_rows(detector_thickness_nm, n_rows),
+                polarization,
+                angle_sine,
+                row_dependent_thickness=True,
+            )
+            boundary_first, boundary_second = apply_layer_elements(
+                boundary_first, boundary_second, detector_elements
+            )
+            detector_front_first = boundary_first
+            detector_front_second = boundary_second
+        else:
+            detector_front_first = boundary_first
+            detector_front_second = boundary_second
+        if fit_conductive_layer:
+            boundary_first, boundary_second = apply_layer_elements(
+                boundary_first,
+                boundary_second,
+                wavelength_dependent_oblique_layer_elements(
+                    *conductive_index_for_parameters(conductive_parameters),
+                    polarization,
+                    angle_sine,
+                    row_dependent_thickness=True,
+                ),
+            )
+        # The matrix product is applied from the substrate side backwards.
+        for layer_index in range(n_layers - 1, -1, -1):
+            boundary_first, boundary_second = apply_layer_elements(
+                boundary_first,
+                boundary_second,
+                oblique_layer_elements(
+                    indices[:, layer_index],
+                    thicknesses[:, layer_index],
+                    polarization,
+                    angle_sine,
+                ),
+            )
+        denominator = (
+            incident_admittance[:, :, None] * boundary_first + boundary_second
+        )
+        if finite_hgcdte_detector:
+            normalization = 2.0 * incident_admittance[:, :, None] / denominator
+            clean = jnp.clip(
+                (
+                    jnp.real(
+                        detector_front_first * jnp.conj(detector_front_second)
+                    )
+                    - jnp.real(backside_admittance)
+                )
+                * jnp.abs(normalization) ** 2
+                / incident_admittance[:, :, None],
+                1.0e-12,
+                1.0,
+            )
+        else:
+            clean = (
+                jnp.real(terminal_admittance)
+                / incident_admittance[:, :, None]
+                * jnp.abs(
+                    2.0 * incident_admittance[:, :, None] / denominator
+                )
+                ** 2
+            )
+        return (
+            clean,
+            boundary_first,
+            boundary_second,
+            incident_admittance,
+            terminal_admittance,
+            detector_front_first,
+            detector_front_second,
+        )
 
     def response_terms(
-        ar_parameters, substrate_index, conductive_parameters=None
+        ar_parameters,
+        substrate_index,
+        angle_sine,
+        conductive_parameters=None,
+        detector_thickness_nm=None,
     ):
         ar_parameters = ar_parameters.reshape((ar_parameters.shape[0], -1, 3))
         ar_index = ar_parameters[:, :, 1] + 1j * ar_parameters[:, :, 2]
-        ar_matrix = multilayer_matrix(
-            ar_index, 100.0 * ar_parameters[:, :, 0]
+        if use_incidence_cone:
+            return tuple(
+                oblique_ar_boundary_terms(
+                    ar_index,
+                    100.0 * ar_parameters[:, :, 0],
+                    substrate_index,
+                    polarization,
+                    angle_sine,
+                    conductive_parameters,
+                    detector_thickness_nm,
+                )
+                for polarization in ("s", "p")
+            )
+        return ar_boundary_terms(
+            ar_index,
+            100.0 * ar_parameters[:, :, 0],
+            substrate_index,
+            conductive_parameters,
+            detector_thickness_nm,
         )
-        if fit_conductive_layer:
-            conductive_matrix = conductive_layer_matrix(
-                conductive_parameters, ar_parameters.shape[0]
-            )
-            ar_matrix = jnp.einsum(
-                "rwab,rwbc->rwac", ar_matrix, conductive_matrix
-            )
-        clean = transmission(ar_matrix, substrate_index)
-        ar_first = ar_matrix[:, :, 0, 0] + substrate_index * ar_matrix[:, :, 0, 1]
-        ar_second = ar_matrix[:, :, 1, 0] + substrate_index * ar_matrix[:, :, 1, 1]
-        return clean, ar_first, ar_second
 
     def response_curves(
         ice_thickness,
         response_terms_value,
+        angle_sine,
         group_indices,
         model_weights_value,
         outside_output_value,
@@ -982,24 +2503,129 @@ def build_prediction_function(
         qe_rbf_parameters=None,
     ):
         substrate_index = substrate_index_for_parameters(hgcdte_parameters)
-        clean, ar_first, ar_second = response_terms_value
-        ice_matrix = (
-            wavelength_dependent_layer_matrix(ice_index, ice_thickness)
-            if use_asw_optical_constants
-            else layer_matrix(ice_index, ice_thickness)
-        )
-        # Evaluate the denominator of ice @ AR directly instead of materializing
-        # the full (tile, group, wavelength, 2, 2) product tensor.
-        ice_first = ice_matrix[..., 0, 0] + ice_matrix[..., 1, 0]
-        ice_second = ice_matrix[..., 0, 1] + ice_matrix[..., 1, 1]
-        if ice_first.ndim == 2:
-            ice_first = ice_first[None, :, :]
-            ice_second = ice_second[None, :, :]
-        denominator = (
-            ar_first[:, None, :] * ice_first
-            + ar_second[:, None, :] * ice_second
-        )
-        coated = jnp.real(substrate_index) * jnp.abs(2.0 / denominator) ** 2
+        if use_incidence_cone:
+            clean_values = []
+            coated_values = []
+            for polarization, response_terms_for_polarization in zip(
+                ("s", "p"), response_terms_value
+            ):
+                (
+                    clean_angle,
+                    ar_first,
+                    ar_second,
+                    incident_admittance,
+                    terminal_admittance,
+                    detector_front_first,
+                    detector_front_second,
+                ) = response_terms_for_polarization
+                ice_elements = (
+                    wavelength_dependent_oblique_layer_elements(
+                        ice_index,
+                        ice_thickness,
+                        polarization,
+                        angle_sine,
+                        row_dependent_thickness=False,
+                    )
+                    if use_asw_optical_constants
+                    else wavelength_dependent_oblique_layer_elements(
+                        jnp.broadcast_to(ice_index, wavelengths.shape),
+                        ice_thickness,
+                        polarization,
+                        angle_sine,
+                        row_dependent_thickness=False,
+                    )
+                )
+                # Evaluate ice @ AR without materializing the full stack matrix.
+                ice_first = (
+                    incident_admittance[:, :, None, None] * ice_elements[0]
+                    + ice_elements[2]
+                )
+                ice_second = (
+                    incident_admittance[:, :, None, None] * ice_elements[1]
+                    + ice_elements[3]
+                )
+                denominator = (
+                    ar_first[:, :, None, :] * ice_first
+                    + ar_second[:, :, None, :] * ice_second
+                )
+                normalization = (
+                    2.0
+                    * incident_admittance[:, :, None, None]
+                    / denominator
+                )
+                if finite_hgcdte_detector:
+                    coated_angle = jnp.clip(
+                        (
+                            jnp.real(
+                                detector_front_first[:, :, None, :]
+                                * jnp.conj(detector_front_second[:, :, None, :])
+                            )
+                            - jnp.real(terminal_admittance)[:, :, None, :]
+                        )
+                        * jnp.abs(normalization) ** 2
+                        / incident_admittance[:, :, None, None],
+                        1.0e-12,
+                        1.0,
+                    )
+                else:
+                    coated_angle = (
+                        jnp.real(terminal_admittance)[:, :, None, :]
+                        / incident_admittance[:, :, None, None]
+                        * jnp.abs(normalization) ** 2
+                    )
+                clean_values.append(
+                    jnp.sum(
+                        clean_angle * incidence_weights[:, None, None], axis=0
+                    )
+                )
+                coated_values.append(
+                    jnp.sum(
+                        coated_angle * incidence_weights[:, None, None, None],
+                        axis=0,
+                    )
+                )
+            clean = 0.5 * (clean_values[0] + clean_values[1])
+            coated = 0.5 * (coated_values[0] + coated_values[1])
+        else:
+            (
+                clean,
+                ar_first,
+                ar_second,
+                detector_front_first,
+                detector_front_second,
+            ) = response_terms_value
+            ice_elements = (
+                wavelength_dependent_layer_elements(ice_index, ice_thickness)
+                if use_asw_optical_constants
+                else layer_elements(ice_index, ice_thickness)
+            )
+            # Evaluate the denominator of ice @ AR directly instead of materializing
+            # the full (tile, group, wavelength, 2, 2) product tensor.
+            ice_first = ice_elements[0] + ice_elements[2]
+            ice_second = ice_elements[1] + ice_elements[3]
+            if ice_first.ndim == 2:
+                ice_first = ice_first[None, :, :]
+                ice_second = ice_second[None, :, :]
+            denominator = (
+                ar_first[:, None, :] * ice_first
+                + ar_second[:, None, :] * ice_second
+            )
+            normalization = 2.0 / denominator
+            if finite_hgcdte_detector:
+                coated = jnp.clip(
+                    (
+                        jnp.real(
+                            detector_front_first[:, None, :]
+                            * jnp.conj(detector_front_second[:, None, :])
+                        )
+                        - detector_backside_index
+                    )
+                    * jnp.abs(normalization) ** 2,
+                    1.0e-12,
+                    1.0,
+                )
+            else:
+                coated = jnp.real(substrate_index) * jnp.abs(normalization) ** 2
         if fit_qe_rbf:
             qe_multiplier = jnp.exp(qe_rbf_basis @ qe_rbf_parameters)
             model_weights_value = (
@@ -1008,10 +2634,14 @@ def build_prediction_function(
             clean_output_value = (
                 jnp.sum(model_weights_value, axis=-1) + outside_output_value
             )
-        ratios = coated / clean[:, None, :]
         model_weights = model_weights_value[:, group_indices, :]
         outside_output = outside_output_value[:, group_indices]
         clean_output = clean_output_value[:, group_indices]
+        if absolute_substrate_power:
+            clean_integrated = jnp.sum(clean[:, None, :] * model_weights, axis=-1)
+            integrated = jnp.sum(coated * model_weights, axis=-1)
+            return integrated / clean_integrated
+        ratios = coated / clean[:, None, :]
         integrated = jnp.sum(ratios * model_weights, axis=-1)
         integrated = integrated + outside_output
         return integrated / clean_output
@@ -1023,17 +2653,65 @@ def build_prediction_function(
         model_weights_value,
         outside_output_value,
         clean_output_value,
+        incidence_sine_rows,
         hgcdte_parameters=None,
         conductive_parameters=None,
         qe_rbf_parameters=None,
+        early_time_scale=None,
+        late_acm_step=None,
+        detector_thickness_nm=None,
     ):
         substrate_index = substrate_index_for_parameters(hgcdte_parameters)
-        terms = response_terms(
-            ar_parameters, substrate_index, conductive_parameters
+        angle_sine = jnp.asarray(incidence_sine_rows).T
+        share_response_terms = (
+            share_ar_across_rows
+            and ar_parameters.shape[0] > 1
+            and not incidence_geometry_varies_by_row
         )
+        if finite_hgcdte_detector and detector_thickness_nm is not None:
+            detector_thickness_shape = jnp.asarray(detector_thickness_nm).shape
+            share_response_terms = share_response_terms and (
+                len(detector_thickness_shape) == 0
+                or int(np.prod(detector_thickness_shape)) == 1
+            )
+        if share_response_terms:
+            terms_one_row = response_terms(
+                ar_parameters[:1],
+                substrate_index,
+                angle_sine[:, :1],
+                conductive_parameters,
+                detector_thickness_nm,
+            )
+            if use_incidence_cone:
+                terms = tuple(
+                    tuple(
+                        jnp.broadcast_to(
+                            term,
+                            (term.shape[0], ar_parameters.shape[0]) + term.shape[2:],
+                        )
+                        for term_index, term in enumerate(polarization_terms)
+                    )
+                    for polarization_terms in terms_one_row
+                )
+            else:
+                terms = tuple(
+                    jnp.broadcast_to(
+                        term, (ar_parameters.shape[0],) + term.shape[1:]
+                    )
+                    for term in terms_one_row
+                )
+        else:
+            terms = response_terms(
+                ar_parameters,
+                substrate_index,
+                angle_sine,
+                conductive_parameters,
+                detector_thickness_nm,
+            )
         response = response_curves(
             ice_thickness,
             terms,
+            angle_sine,
             all_group_indices,
             model_weights_value,
             outside_output_value,
@@ -1050,6 +2728,7 @@ def build_prediction_function(
         baseline_response = response_curves(
             baseline_ice_thickness,
             terms,
+            angle_sine,
             first_by_led,
             model_weights_value,
             outside_output_value,
@@ -1063,7 +2742,31 @@ def build_prediction_function(
         observation_acm_step = (
             acm_step[led_index] if acm_step.ndim == 1 else acm_step
         )
-        return jnp.log(current / baseline) + observation_acm_step * step_design[None, :]
+        fitted = jnp.log(current / baseline) + observation_acm_step * step_design[None, :]
+        if absolute_substrate_power:
+            fitted = fitted + baseline_offsets[led_index][None, :]
+        if fit_late_acm_step:
+            if late_acm_step is None:
+                raise ValueError("Late ACM step is required when that step is active")
+            fitted = fitted + jnp.asarray(late_acm_step) * late_step_design[None, :]
+        if early_time_cutoff_day is not None:
+            if early_time_scale is None:
+                raise ValueError("Early-time scale is required when the cutoff is active")
+            early_time_scale = jnp.asarray(early_time_scale)
+            safe_scale_index = jnp.maximum(early_time_scale_index, 0)
+            scale_by_observation = jnp.where(
+                early_time_scale_index >= 0,
+                early_time_scale[safe_scale_index],
+                1.0,
+            )
+            # The fitted factor multiplies observed counts. Express that
+            # data-side correction as the equivalent raw-space model offset.
+            fitted = fitted - jnp.where(
+                (early_time_scale_index >= 0)[None, :],
+                jnp.log(scale_by_observation)[None, :],
+                0.0,
+            )
+        return fitted
 
     def prediction(
         ice_thickness,
@@ -1072,6 +2775,9 @@ def build_prediction_function(
         hgcdte_parameters=None,
         conductive_parameters=None,
         qe_rbf_parameters=None,
+        early_time_scale=None,
+        late_acm_step=None,
+        detector_thickness_nm=None,
     ):
         return prediction_for_rows(
             ice_thickness,
@@ -1080,9 +2786,13 @@ def build_prediction_function(
             selected_model_weights,
             selected_outside_output,
             selected_clean_output,
+            selected_incidence_sine,
             hgcdte_parameters,
             conductive_parameters,
             qe_rbf_parameters,
+            early_time_scale,
+            late_acm_step,
+            detector_thickness_nm,
         )
 
     if all(key in data for key in ("counts", "sums", "sum_squared")):
@@ -1109,6 +2819,7 @@ def build_prediction_function(
         padded_model_weights = pad_rows(selected_model_weights)
         padded_outside_output = pad_rows(selected_outside_output)
         padded_clean_output = pad_rows(selected_clean_output)
+        padded_incidence_sine = pad_rows(selected_incidence_sine)
 
         def residual_sum_squares(
             ice_thickness,
@@ -1117,9 +2828,22 @@ def build_prediction_function(
             hgcdte_parameters=None,
             conductive_parameters=None,
             qe_rbf_parameters=None,
+            early_time_scale=None,
+            late_acm_step=None,
+            detector_thickness_nm=None,
         ):
             ar_rows = ar_parameters.reshape((n_rows, -1))
             padded_ar_rows = pad_rows(ar_rows)
+            detector_thickness_is_rowwise = (
+                finite_hgcdte_detector
+                and detector_thickness_nm is not None
+                and jnp.asarray(detector_thickness_nm).ndim == 1
+            )
+            padded_detector_thickness = (
+                pad_rows(jnp.asarray(detector_thickness_nm))
+                if detector_thickness_is_rowwise
+                else None
+            )
             scan_values = [
                 padded_ar_rows.reshape((n_chunks, row_chunk_size, -1)),
                 padded_counts.reshape((n_chunks, row_chunk_size, -1)),
@@ -1134,6 +2858,9 @@ def build_prediction_function(
                 padded_clean_output.reshape(
                     (n_chunks, row_chunk_size) + padded_clean_output.shape[1:]
                 ),
+                padded_incidence_sine.reshape(
+                    (n_chunks, row_chunk_size) + padded_incidence_sine.shape[1:]
+                ),
             ]
             if ice_thickness.ndim == 2:
                 padded_ice_thickness = pad_rows(ice_thickness)
@@ -1143,31 +2870,37 @@ def build_prediction_function(
                         (n_chunks, row_chunk_size, -1)
                     ),
                 )
+            if detector_thickness_is_rowwise:
+                scan_values.insert(
+                    1 if ice_thickness.ndim == 2 else 0,
+                    padded_detector_thickness.reshape(
+                        (n_chunks, row_chunk_size)
+                    ),
+                )
             scan_values = tuple(scan_values)
 
             def scan_chunk(total_sse, values):
+                value_index = 0
                 if ice_thickness.ndim == 2:
-                    (
-                        ice_chunk,
-                        ar_chunk,
-                        counts_chunk,
-                        sums_chunk,
-                        sum_squared_chunk,
-                        model_weights_chunk,
-                        outside_output_chunk,
-                        clean_output_chunk,
-                    ) = values
+                    ice_chunk = values[value_index]
+                    value_index += 1
                 else:
-                    (
-                        ar_chunk,
-                        counts_chunk,
-                        sums_chunk,
-                        sum_squared_chunk,
-                        model_weights_chunk,
-                        outside_output_chunk,
-                        clean_output_chunk,
-                    ) = values
                     ice_chunk = ice_thickness
+                if detector_thickness_is_rowwise:
+                    detector_thickness_chunk = values[value_index]
+                    value_index += 1
+                else:
+                    detector_thickness_chunk = detector_thickness_nm
+                (
+                    ar_chunk,
+                    counts_chunk,
+                    sums_chunk,
+                    sum_squared_chunk,
+                    model_weights_chunk,
+                    outside_output_chunk,
+                    clean_output_chunk,
+                    incidence_sine_chunk,
+                ) = values[value_index:]
                 fitted = prediction_for_rows(
                     ice_chunk,
                     ar_chunk,
@@ -1175,22 +2908,35 @@ def build_prediction_function(
                     model_weights_chunk,
                     outside_output_chunk,
                     clean_output_chunk,
+                    incidence_sine_chunk,
                     hgcdte_parameters,
                     conductive_parameters,
                     qe_rbf_parameters,
+                    early_time_scale,
+                    late_acm_step,
+                    detector_thickness_chunk,
                 )
-                residual_sse = (
-                    sum_squared_chunk
-                    - 2.0 * fitted * sums_chunk
-                    + counts_chunk * fitted * fitted
+                safe_counts = jnp.maximum(counts_chunk, 1.0)
+                observed_chunk = sums_chunk / safe_counts
+                within_group_sse = (
+                    sum_squared_chunk - sums_chunk * sums_chunk / safe_counts
                 )
+                residual_sse = within_group_sse + counts_chunk * (
+                    fitted - observed_chunk
+                ) ** 2
                 return total_sse + jnp.sum(residual_sse), None
 
-            total_sse, _ = jax.lax.scan(
-                scan_chunk,
-                jnp.asarray(0.0, dtype=padded_counts.dtype),
-                scan_values,
-            )
+            initial_sse = jnp.asarray(0.0, dtype=padded_counts.dtype)
+            if n_chunks == 1:
+                # Avoid a loop and its reverse-mode scan machinery when the
+                # selected tiles already fit in a single prediction chunk.
+                total_sse, _ = scan_chunk(
+                    initial_sse, tuple(values[0] for values in scan_values)
+                )
+            else:
+                total_sse, _ = jax.lax.scan(
+                    scan_chunk, initial_sse, scan_values
+                )
             return total_sse
 
         prediction.residual_sum_squares = residual_sum_squares
@@ -1207,30 +2953,64 @@ def build_model(
     ar_prior_reference=None,
     ar_layers=1,
     np_modulation=False,
+    constant_rate_modulation=False,
+    constant_rate_smoothness_weight=0.0,
     fully_np_trajectory=False,
+    standardize_ar_mean=False,
+    rotate_ar_coordinates=False,
+    whiten_np_trajectory=False,
+    pivot_initial_thickness=False,
     np_entropy_weight=NP_ENTROPY_WEIGHT,
     np_smoothness_weight=NP_SMOOTHNESS_WEIGHT,
     np_max_node_multiplier=NP_MAX_NODE_MULTIPLIER,
     ar_sca_sigma_prior=AR_SCA_SIGMA_PRIOR,
     ar_tile_sigma_prior=AR_TILE_SIGMA_PRIOR,
     shared_ar_optical_properties=False,
+    shared_ar_parameters_across_tiles=False,
     fit_ar_absorption=False,
     fit_hgcdte=False,
+    fit_hgcdte_modulation=False,
+    hgcdte_modulation_prior_sigma_log=HGCDTE_MODULATION_PRIOR_SIGMA_LOG,
     fit_conductive_layer=False,
+    finite_hgcdte_detector=False,
+    detector_thickness_nm=DETECTOR_THICKNESS_DEFAULT_NM,
+    fit_detector_thickness=False,
+    detector_thickness_prior_sigma_log=DETECTOR_THICKNESS_PRIOR_SIGMA_LOG,
+    detector_thickness_neighbor_sigma_log=DETECTOR_THICKNESS_NEIGHBOR_SIGMA_LOG,
+    detector_backside_index=1.0,
     fit_qe_rbf=False,
     qe_rbf_node_wavelengths_nm=None,
     qe_rbf_width_nm=QE_RBF_WIDTH_NM,
     qe_rbf_prior_sigma_log=QE_RBF_PRIOR_SIGMA_LOG,
     use_asw_optical_constants=False,
+    use_hgcdte_optical_constants=False,
+    incidence_cone_half_angle_deg=0.0,
+    incidence_pupil_half_angle_deg=0.0,
+    incidence_chief_ray_tilts_deg=None,
     led_dependent_acm_step=False,
+    fit_acm_step=True,
+    acm_step_prior_sigma=0.05,
+    fit_late_acm_step=False,
+    late_acm_step_prior_sigma=0.02,
     trajectory_rate_prior_mean_nm_day=None,
     trajectory_rate_prior_sigma_log=0.75,
     tile_rate_variation=False,
+    tile_rate_trajectory_variation=False,
+    tile_rate_trajectory_smoothness_weight=0.01,
     tile_rate_prior_sigma_log=TRAJECTORY_TILE_RATE_PRIOR_SIGMA_LOG,
     tile_rate_neighbor_sigma_log=TRAJECTORY_TILE_RATE_NEIGHBOR_SIGMA_LOG,
     fixed_initial_thickness_nm=None,
+    initial_thickness_prior_mean_nm=INITIAL_THICKNESS_PRIOR_MEAN_NM,
+    initial_thickness_prior_sigma_nm=INITIAL_THICKNESS_PRIOR_SIGMA_NM,
+    early_time_cutoff_day=None,
+    early_time_scale_prior_sigma=EARLY_TIME_SCALE_PRIOR_SIGMA,
+    absolute_substrate_power=None,
+    absolute_hgcdte_scale_prior_sigma_log=ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG,
 ):
     jax, jnp, numpyro, dist, _, _, _ = require_numpyro()
+    if absolute_substrate_power is None:
+        absolute_substrate_power = bool(context.get("absolute_substrate_power", False))
+    absolute_substrate_power = bool(absolute_substrate_power)
     qe_rbf_nodes, qe_rbf_width_nm, qe_rbf_prior_sigma_log = qe_rbf_configuration(
         qe_rbf_node_wavelengths_nm,
         qe_rbf_width_nm,
@@ -1246,16 +3026,93 @@ def build_model(
     active_parameter_count = len(active_parameter_indices)
     active_lower = jnp.asarray(ar_lower[active_parameter_indices])
     active_upper = jnp.asarray(ar_upper[active_parameter_indices])
-    if np_modulation and fully_np_trajectory:
+    if sum(
+        bool(mode)
+        for mode in (np_modulation, constant_rate_modulation, fully_np_trajectory)
+    ) > 1:
         raise ValueError(
-            "np_modulation and fully_np_trajectory are mutually exclusive"
+            "Trajectory model modes are mutually exclusive"
         )
-    if np_modulation and np_max_node_multiplier <= 1.0:
+    if (np_modulation or constant_rate_modulation) and np_max_node_multiplier <= 1.0:
         raise ValueError("np_max_node_multiplier must be greater than one")
+    if pivot_initial_thickness and not fully_np_trajectory:
+        raise ValueError("Pivoted initial thickness currently requires a fully non-parametric trajectory")
+    if rotate_ar_coordinates and not standardize_ar_mean:
+        raise ValueError("AR coordinate rotation requires standardized AR mean coordinates")
+    if (
+        not np.isfinite(constant_rate_smoothness_weight)
+        or constant_rate_smoothness_weight < 0.0
+    ):
+        raise ValueError("Constant-rate smoothness weight must be finite and non-negative")
+    if (
+        not np.isfinite(tile_rate_trajectory_smoothness_weight)
+        or tile_rate_trajectory_smoothness_weight < 0.0
+    ):
+        raise ValueError(
+            "Tile-rate trajectory smoothness weight must be finite and non-negative"
+        )
     if ar_mean_prior_sigma <= 0.0:
         raise ValueError("AR mean prior sigma must be positive")
     if ar_sca_sigma_prior <= 0.0 or ar_tile_sigma_prior <= 0.0:
         raise ValueError("AR hierarchy sigma priors must be positive")
+    if (
+        not np.isfinite(hgcdte_modulation_prior_sigma_log)
+        or hgcdte_modulation_prior_sigma_log <= 0.0
+    ):
+        raise ValueError("HgCdTe modulation prior sigma must be positive and finite")
+    if (
+        not np.isfinite(absolute_hgcdte_scale_prior_sigma_log)
+        or absolute_hgcdte_scale_prior_sigma_log <= 0.0
+    ):
+        raise ValueError(
+            "Absolute HgCdTe scale prior sigma must be positive and finite"
+        )
+    if absolute_substrate_power:
+        if not bool(context.get("absolute_substrate_power", False)):
+            raise ValueError(
+                "Absolute substrate power requires an absolute-power response context"
+            )
+        if (
+            fit_hgcdte
+            or fit_hgcdte_modulation
+            or not use_hgcdte_optical_constants
+        ):
+            raise ValueError(
+                "Absolute substrate power owns the wavelength-dependent HgCdTe scales"
+            )
+    if not np.isfinite(detector_thickness_nm) or detector_thickness_nm <= 0.0:
+        raise ValueError("Detector thickness must be positive and finite")
+    if (
+        not np.isfinite(detector_thickness_prior_sigma_log)
+        or detector_thickness_prior_sigma_log <= 0.0
+    ):
+        raise ValueError(
+            "Detector thickness prior sigma must be positive and finite"
+        )
+    if (
+        not np.isfinite(detector_thickness_neighbor_sigma_log)
+        or detector_thickness_neighbor_sigma_log <= 0.0
+    ):
+        raise ValueError(
+            "Detector thickness neighbor sigma must be positive and finite"
+        )
+    if (
+        not np.isfinite(detector_backside_index)
+        or detector_backside_index <= 0.0
+    ):
+        raise ValueError("Detector backside index must be positive and finite")
+    finite_detector_active = bool(finite_hgcdte_detector or fit_detector_thickness)
+    if finite_detector_active and fit_hgcdte_modulation:
+        raise ValueError(
+            "Finite HgCdTe detectors do not support free wavelength modulation"
+        )
+    if not np.isfinite(acm_step_prior_sigma) or acm_step_prior_sigma <= 0.0:
+        raise ValueError("ACM step prior sigma must be positive and finite")
+    if (
+        not np.isfinite(late_acm_step_prior_sigma)
+        or late_acm_step_prior_sigma <= 0.0
+    ):
+        raise ValueError("Late ACM step prior sigma must be positive and finite")
     if trajectory_rate_prior_mean_nm_day is not None and (
         not np.isfinite(trajectory_rate_prior_mean_nm_day)
         or trajectory_rate_prior_mean_nm_day <= 0.0
@@ -1265,6 +3122,17 @@ def build_model(
         trajectory_rate_prior_sigma_log
     ):
         raise ValueError("Trajectory rate prior sigma must be positive and finite")
+    if (
+        not np.isfinite(initial_thickness_prior_mean_nm)
+        or initial_thickness_prior_mean_nm < INITIAL_THICKNESS_PRIOR_LOW_NM
+        or initial_thickness_prior_mean_nm > INITIAL_THICKNESS_PRIOR_HIGH_NM
+    ):
+        raise ValueError("Initial thickness prior mean must be between 0 and 50 nm")
+    if (
+        not np.isfinite(initial_thickness_prior_sigma_nm)
+        or initial_thickness_prior_sigma_nm <= 0.0
+    ):
+        raise ValueError("Initial thickness prior sigma must be positive and finite")
     if tile_rate_prior_sigma_log <= 0.0 or not np.isfinite(
         tile_rate_prior_sigma_log
     ):
@@ -1281,6 +3149,12 @@ def build_model(
         or fixed_initial_thickness_nm > 50.0
     ):
         raise ValueError("Fixed initial thickness must be between 0 and 50 nm")
+    if early_time_cutoff_day is not None and (
+        not np.isfinite(early_time_cutoff_day) or early_time_cutoff_day <= 0.0
+    ):
+        raise ValueError("Early-time scale cutoff must be positive and finite")
+    if not np.isfinite(early_time_scale_prior_sigma) or early_time_scale_prior_sigma <= 0.0:
+        raise ValueError("Early-time scale prior sigma must be positive and finite")
     counts = jnp.asarray(data["counts"])
     sums = jnp.asarray(data["sums"])
     sum_squared = jnp.asarray(data["sum_squared"])
@@ -1297,7 +3171,13 @@ def build_model(
     )
     n_scas = int(data["n_scas"])
     n_tiles = int(data["n_tiles"])
-    tile_rate_variation_active = bool(tile_rate_variation and (n_scas * n_tiles > 1))
+    tile_rate_trajectory_variation_active = bool(
+        tile_rate_trajectory_variation and n_scas * n_tiles > 1
+    )
+    tile_rate_variation_active = bool(
+        (tile_rate_variation or tile_rate_trajectory_variation)
+        and (n_scas * n_tiles > 1)
+    )
     neighbor_edges = tile_neighbor_edges(data)
     single_tile = is_single_tile_data(data)
     if n_tiles < 1:
@@ -1324,20 +3204,59 @@ def build_model(
         )
     )
     reference_raw = jnp.log(reference_probability / (1.0 - reference_probability))
+    active_index_positions = {
+        int(parameter_index): position
+        for position, parameter_index in enumerate(active_parameter_indices)
+    }
+    ar_rotation_pairs = tuple(
+        (
+            active_index_positions[3 * layer],
+            active_index_positions[3 * layer + 1],
+        )
+        for layer in range(ar_parameter_count // 3)
+        if 3 * layer in active_index_positions
+        and 3 * layer + 1 in active_index_positions
+    )
     prediction_data = dict(data)
-    if tile_rate_variation_active:
+    aggregate_shared_ar_likelihood = bool(
+        shared_ar_parameters_across_tiles
+        and not tile_rate_variation_active
+        and not finite_detector_active
+        and float(incidence_pupil_half_angle_deg) == 0.0
+        and (
+            incidence_chief_ray_tilts_deg is None
+            or not np.any(np.asarray(incidence_chief_ray_tilts_deg) != 0.0)
+        )
+    )
+    if aggregate_shared_ar_likelihood:
+        prediction_data = aggregate_tile_sufficient_statistics(data)
+    if tile_rate_variation_active or finite_detector_active:
         prediction_data["prediction_row_chunk_size"] = 8
     prediction = build_prediction_function(
         prediction_data,
         context,
         fit_hgcdte=fit_hgcdte,
+        fit_hgcdte_modulation=fit_hgcdte_modulation,
         fit_conductive_layer=fit_conductive_layer,
+        finite_hgcdte_detector=finite_detector_active,
+        detector_backside_index=detector_backside_index,
         fit_qe_rbf=fit_qe_rbf,
         qe_rbf_node_wavelengths_nm=qe_rbf_nodes,
         qe_rbf_width_nm=qe_rbf_width_nm,
         use_asw_optical_constants=use_asw_optical_constants,
+        use_hgcdte_optical_constants=use_hgcdte_optical_constants,
+        incidence_cone_half_angle_deg=incidence_cone_half_angle_deg,
+        incidence_pupil_half_angle_deg=incidence_pupil_half_angle_deg,
+        incidence_chief_ray_tilts_deg=incidence_chief_ray_tilts_deg,
+        early_time_cutoff_day=early_time_cutoff_day,
+        share_ar_across_rows=shared_ar_parameters_across_tiles,
+        fit_late_acm_step=fit_late_acm_step,
+        absolute_substrate_power=absolute_substrate_power,
     )
     residual_sum_squares = prediction.residual_sum_squares
+    early_time_configuration = early_time_scale_configuration(
+        data, early_time_cutoff_day
+    )
     thickness_indices = np.flatnonzero(active_parameter_indices % 3 == 0)
     hierarchy_parameter_count = (
         ar_layers if shared_ar_optical_properties else active_parameter_count
@@ -1350,6 +3269,19 @@ def build_model(
     trajectory_prior_scale = trajectory_prior_rate / trajectory_rate_per_scale(
         data["days"]
     )
+    pivot_node_index, _, pivot_initial_center = trajectory_pivot_configuration(
+        data, trajectory_prior_rate, initial_thickness_prior_mean_nm
+    )
+    rate_whitener = None
+    if whiten_np_trajectory and fully_np_trajectory:
+        rate_whitener = jnp.asarray(
+            trajectory_rate_whitener(
+                data["node_days"],
+                trajectory_rate_prior_sigma_log,
+                float(np.asarray(likelihood_scale)),
+                np_smoothness_weight,
+            )
+        )
 
     def physical_ar_parameters(ar_raw):
         active_parameters = active_lower + (
@@ -1359,6 +3291,20 @@ def build_model(
             ar_raw.shape[:-1] + (ar_parameter_count,), dtype=active_parameters.dtype
         )
         return parameters.at[..., active_parameter_indices].set(active_parameters)
+
+    def rotate_ar_latents(values):
+        rotated = jnp.asarray(values)
+        inverse_sqrt_two = 1.0 / jnp.sqrt(2.0)
+        for thickness_position, refractive_position in ar_rotation_pairs:
+            thickness = values[..., thickness_position]
+            refractive_index = values[..., refractive_position]
+            rotated = rotated.at[..., thickness_position].set(
+                (thickness + refractive_index) * inverse_sqrt_two
+            )
+            rotated = rotated.at[..., refractive_position].set(
+                (thickness - refractive_index) * inverse_sqrt_two
+            )
+        return rotated
 
     def log_rate_smoothness(log_rates):
         scaled_node_days = (node_days - node_days[0]) / jnp.median(
@@ -1371,21 +3317,59 @@ def build_model(
         return jnp.mean(node_curvature * node_curvature)
 
     def model():
-        ar_mu_raw = numpyro.sample(
-            "ar_mu_raw",
-            dist.Normal(
-                reference_raw,
-                ar_mean_prior_sigma * jnp.ones(active_parameter_count),
-            ).to_event(1),
-        )
-        if shared_ar_optical_properties:
+        if standardize_ar_mean:
+            ar_mu_z = numpyro.sample(
+                "ar_mu_z",
+                dist.Normal(0.0, 1.0)
+                .expand((active_parameter_count,))
+                .to_event(1),
+            )
+            ar_mu_standardized = (
+                rotate_ar_latents(ar_mu_z) if rotate_ar_coordinates else ar_mu_z
+            )
+            ar_mu_raw = numpyro.deterministic(
+                "ar_mu_raw",
+                reference_raw + ar_mean_prior_sigma * ar_mu_standardized,
+            )
+        else:
+            ar_mu_raw = numpyro.sample(
+                "ar_mu_raw",
+                dist.Normal(
+                    reference_raw,
+                    ar_mean_prior_sigma * jnp.ones(active_parameter_count),
+                ).to_event(1),
+            )
+        if shared_ar_parameters_across_tiles:
+            ar_raw_all = jnp.broadcast_to(
+                ar_mu_raw[None, None, :],
+                (n_scas, n_tiles, active_parameter_count),
+            )
+            ar_parameters_all = physical_ar_parameters(ar_raw_all)
+            ar_sca_raw = jnp.broadcast_to(
+                ar_mu_raw[None, :], (n_scas, active_parameter_count)
+            )
+            ar_parameters = (
+                ar_parameters_all[0] if n_scas == 1 else ar_parameters_all
+            )
+            if tile_rate_variation_active or finite_detector_active:
+                ar_parameters_for_prediction = ar_parameters.reshape(
+                    (-1, ar_parameter_count)
+                )
+            else:
+                ar_parameters_for_prediction = jnp.broadcast_to(
+                    physical_ar_parameters(ar_mu_raw)[None, :],
+                    (n_scas, ar_parameter_count),
+                )
+        elif shared_ar_optical_properties:
             if n_scas == 1:
                 if single_tile:
                     ar_raw = ar_mu_raw[None, :]
                 else:
                     ar_sigma = numpyro.sample(
                         "ar_sigma_raw",
-                        dist.HalfNormal(0.5 * jnp.ones(hierarchy_parameter_count)).to_event(1),
+                        dist.HalfNormal(
+                            ar_tile_sigma_prior * jnp.ones(hierarchy_parameter_count)
+                        ).to_event(1),
                     )
                     ar_z = numpyro.sample(
                         "ar_z",
@@ -1460,7 +3444,7 @@ def build_model(
                 ar_sigma = numpyro.sample(
                     "ar_sigma_raw",
                     dist.HalfNormal(
-                        0.5 * jnp.ones(active_parameter_count)
+                        ar_tile_sigma_prior * jnp.ones(active_parameter_count)
                     ).to_event(1),
                 )
                 ar_z = numpyro.sample(
@@ -1469,7 +3453,10 @@ def build_model(
                     .expand((n_tiles, active_parameter_count))
                     .to_event(2),
                 )
-                ar_raw = ar_mu_raw[None, :] + ar_sigma[None, :] * ar_z
+                ar_z_standardized = (
+                    rotate_ar_latents(ar_z) if rotate_ar_coordinates else ar_z
+                )
+                ar_raw = ar_mu_raw[None, :] + ar_sigma[None, :] * ar_z_standardized
             ar_parameters = physical_ar_parameters(ar_raw)
             ar_parameters_for_prediction = ar_parameters
         else:
@@ -1485,7 +3472,12 @@ def build_model(
                 .expand((n_scas, active_parameter_count))
                 .to_event(2),
             )
-            ar_sca_raw = ar_mu_raw[None, :] + ar_sca_sigma[None, :] * ar_sca_z
+            ar_sca_z_standardized = (
+                rotate_ar_latents(ar_sca_z) if rotate_ar_coordinates else ar_sca_z
+            )
+            ar_sca_raw = (
+                ar_mu_raw[None, :] + ar_sca_sigma[None, :] * ar_sca_z_standardized
+            )
             ar_tile_sigma = numpyro.sample(
                 "ar_tile_sigma",
                 dist.HalfNormal(
@@ -1498,31 +3490,91 @@ def build_model(
                 .expand((n_scas, n_tiles, active_parameter_count))
                 .to_event(3),
             )
-            ar_raw = ar_sca_raw[:, None, :] + ar_tile_sigma[None, None, :] * ar_tile_z
+            ar_tile_z_standardized = (
+                rotate_ar_latents(ar_tile_z) if rotate_ar_coordinates else ar_tile_z
+            )
+            ar_raw = (
+                ar_sca_raw[:, None, :]
+                + ar_tile_sigma[None, None, :] * ar_tile_z_standardized
+            )
             ar_parameters = physical_ar_parameters(ar_raw)
             ar_parameters_for_prediction = ar_parameters.reshape(
                 (-1, ar_parameter_count)
             )
         if fixed_initial_thickness_nm is None:
-            d0 = numpyro.sample(
-                "initial_thickness_nm",
-                dist.TruncatedNormal(35.0, 15.0, low=0.0, high=50.0),
-            )
+            if pivot_initial_thickness:
+                initial_thickness_pivot_z = numpyro.sample(
+                    "initial_thickness_pivot_z", dist.Normal(0.0, 1.0)
+                )
+                d0 = None
+            else:
+                d0 = numpyro.sample(
+                    "initial_thickness_nm",
+                    dist.TruncatedNormal(
+                        initial_thickness_prior_mean_nm,
+                        initial_thickness_prior_sigma_nm,
+                        low=INITIAL_THICKNESS_PRIOR_LOW_NM,
+                        high=INITIAL_THICKNESS_PRIOR_HIGH_NM,
+                    ),
+                )
         else:
             d0 = numpyro.deterministic(
                 "initial_thickness_nm",
                 jnp.asarray(fixed_initial_thickness_nm),
             )
+        if early_time_cutoff_day is not None:
+            early_time_node_count = len(early_time_configuration["repeat"])
+            if early_time_node_count > 1:
+                early_time_log_scale = numpyro.sample(
+                    "early_time_log_scale",
+                    dist.Normal(
+                        EARLY_TIME_LOG_SCALE_PRIOR_MEAN,
+                        early_time_scale_prior_sigma,
+                    )
+                    .expand((early_time_node_count - 1,))
+                    .to_event(1),
+                )
+            else:
+                early_time_log_scale = jnp.zeros(0)
+            early_time_scale = numpyro.deterministic(
+                "early_time_scale",
+                jnp.exp(
+                    jnp.concatenate((jnp.zeros(1), early_time_log_scale))
+                ),
+            )
+        else:
+            early_time_scale = None
         if fully_np_trajectory:
             log_scale = jnp.asarray(0.0)
-            np_log_rate_nodes = numpyro.sample(
-                "np_log_rate_nodes",
+            if whiten_np_trajectory:
+                np_log_rate_z = numpyro.sample(
+                    "np_log_rate_z",
+                    dist.Normal(0.0, 1.0)
+                    .expand((len(data["node_days"]),))
+                    .to_event(1),
+                )
+                np_log_rate_nodes = numpyro.deterministic(
+                    "np_log_rate_nodes",
+                    jnp.log(trajectory_prior_rate)
+                    + jnp.matmul(np_log_rate_z, rate_whitener.T),
+                )
+            else:
+                np_log_rate_nodes = numpyro.sample(
+                    "np_log_rate_nodes",
+                    dist.Normal(
+                        jnp.log(trajectory_prior_rate), trajectory_rate_prior_sigma_log
+                    )
+                    .expand((len(data["node_days"]),))
+                    .to_event(1),
+                )
+        elif constant_rate_modulation:
+            log_scale = numpyro.sample(
+                "log_trajectory_scale",
                 dist.Normal(
                     jnp.log(trajectory_prior_rate), trajectory_rate_prior_sigma_log
-                )
-                .expand((len(data["node_days"]),))
-                .to_event(1),
+                ),
             )
+            np_log_rate_nodes = None
         else:
             log_scale = numpyro.sample(
                 "log_trajectory_scale",
@@ -1538,11 +3590,22 @@ def build_model(
                 .expand((n_scas, n_tiles))
                 .to_event(2),
             )
+            # Keep the global trajectory scale equal to the selected-tile
+            # geometric-mean rate. Without this centering, a common shift
+            # between the global scale and every tile offset leaves the
+            # likelihood unchanged.
+            tile_log_rate_offsets = tile_log_rate_offsets - jnp.mean(
+                tile_log_rate_offsets, axis=1, keepdims=True
+            )
+            numpyro.deterministic(
+                "centered_trajectory_rate_tile_offsets",
+                tile_log_rate_offsets,
+            )
             if neighbor_edges.size:
                 edge_indices = jnp.asarray(neighbor_edges, dtype=jnp.int32)
                 neighbor_difference = (
-                    tile_log_rate_offsets[:, edge_indices[:, 0]]
-                    - tile_log_rate_offsets[:, edge_indices[:, 1]]
+                    jnp.take(tile_log_rate_offsets, edge_indices[:, 0], axis=1)
+                    - jnp.take(tile_log_rate_offsets, edge_indices[:, 1], axis=1)
                 )
                 numpyro.factor(
                     "trajectory_rate_neighbor_smoothness",
@@ -1553,7 +3616,19 @@ def build_model(
                 )
         else:
             tile_log_rate_offsets = jnp.zeros((n_scas, n_tiles))
-        if fit_hgcdte:
+        if absolute_substrate_power:
+            absolute_hgcdte_n_log_scale = numpyro.sample(
+                "absolute_hgcdte_n_log_scale",
+                dist.Normal(0.0, absolute_hgcdte_scale_prior_sigma_log),
+            )
+            absolute_hgcdte_k_log_scale = numpyro.sample(
+                "absolute_hgcdte_k_log_scale",
+                dist.Normal(0.0, absolute_hgcdte_scale_prior_sigma_log),
+            )
+            hgcdte_parameters = jnp.stack(
+                (absolute_hgcdte_n_log_scale, absolute_hgcdte_k_log_scale)
+            )
+        elif fit_hgcdte:
             hgcdte_n = numpyro.sample(
                 "hgcdte_n",
                 dist.TruncatedNormal(
@@ -1573,8 +3648,78 @@ def build_model(
                 ),
             )
             hgcdte_parameters = jnp.stack((hgcdte_n, hgcdte_k))
+        elif fit_hgcdte_modulation:
+            hgcdte_n_log_modulation = numpyro.sample(
+                "hgcdte_n_log_modulation",
+                dist.Normal(
+                    0.0,
+                    hgcdte_modulation_prior_sigma_log,
+                )
+                .expand((len(HGCDTE_MODULATION_NODE_WAVELENGTHS_NM),))
+                .to_event(1),
+            )
+            hgcdte_k_log_modulation = numpyro.sample(
+                "hgcdte_k_log_modulation",
+                dist.Normal(
+                    0.0,
+                    hgcdte_modulation_prior_sigma_log,
+                )
+                .expand((len(HGCDTE_MODULATION_NODE_WAVELENGTHS_NM),))
+                .to_event(1),
+            )
+            numpyro.deterministic(
+                "hgcdte_n_modulation", jnp.exp(hgcdte_n_log_modulation)
+            )
+            numpyro.deterministic(
+                "hgcdte_k_modulation", jnp.exp(hgcdte_k_log_modulation)
+            )
+            hgcdte_parameters = jnp.concatenate(
+                (hgcdte_n_log_modulation, hgcdte_k_log_modulation)
+            )
         else:
             hgcdte_parameters = None
+        detector_thickness_for_prediction = None
+        if finite_detector_active:
+            if fit_detector_thickness:
+                detector_log_thickness_nm = numpyro.sample(
+                    "detector_log_thickness_nm",
+                    dist.Normal(
+                        jnp.log(detector_thickness_nm),
+                        detector_thickness_prior_sigma_log,
+                    )
+                    .expand((n_scas, n_tiles))
+                    .to_event(2),
+                )
+                if neighbor_edges.size:
+                    edge_indices = jnp.asarray(neighbor_edges, dtype=jnp.int32)
+                    neighbor_difference = (
+                        jnp.take(
+                            detector_log_thickness_nm, edge_indices[:, 0], axis=1
+                        )
+                        - jnp.take(
+                            detector_log_thickness_nm, edge_indices[:, 1], axis=1
+                        )
+                    )
+                    numpyro.factor(
+                        "detector_thickness_neighbor_smoothness",
+                        -0.5
+                        * jnp.sum(
+                            (
+                                neighbor_difference
+                                / detector_thickness_neighbor_sigma_log
+                            )
+                            ** 2
+                        ),
+                    )
+                detector_thickness_values = jnp.exp(detector_log_thickness_nm)
+            else:
+                detector_thickness_values = jnp.full(
+                    (n_scas, n_tiles), detector_thickness_nm
+                )
+            numpyro.deterministic(
+                "detector_thickness_nm", detector_thickness_values
+            )
+            detector_thickness_for_prediction = detector_thickness_values.reshape(-1)
         if fit_conductive_layer:
             conductive_log_thickness_nm = numpyro.sample(
                 "conductive_log_thickness_nm",
@@ -1632,26 +3777,39 @@ def build_model(
             )
         else:
             qe_rbf_parameters = None
-        if led_dependent_acm_step:
+        if not fit_acm_step:
+            acm_step = numpyro.deterministic(
+                "acm_step_log_offset",
+                jnp.zeros(6) if led_dependent_acm_step else jnp.asarray(0.0),
+            )
+        elif led_dependent_acm_step:
             acm_step = numpyro.sample(
                 "acm_step_log_offset",
-                dist.Normal(0.0, 0.05).expand((6,)).to_event(1),
+                dist.Normal(0.0, acm_step_prior_sigma).expand((6,)).to_event(1),
             )
         else:
             acm_step = numpyro.sample(
-                "acm_step_log_offset", dist.Normal(0.0, 0.05)
+                "acm_step_log_offset", dist.Normal(0.0, acm_step_prior_sigma)
             )
+        if fit_late_acm_step:
+            late_acm_step = numpyro.sample(
+                "late_acm_step_log_offset",
+                dist.Normal(0.0, late_acm_step_prior_sigma),
+            )
+        else:
+            late_acm_step = jnp.asarray(0.0)
         if fully_np_trajectory:
             log_node_multipliers = np_log_rate_nodes - jnp.log(
                 trajectory_prior_rate
             )
             node_multipliers = jnp.exp(log_node_multipliers)
             np_smoothness = log_rate_smoothness(np_log_rate_nodes)
-            numpyro.factor(
-                "np_smoothness_regularization",
-                -likelihood_scale * np_smoothness_weight * np_smoothness,
-            )
-        elif np_modulation:
+            if not whiten_np_trajectory:
+                numpyro.factor(
+                    "np_smoothness_regularization",
+                    -likelihood_scale * np_smoothness_weight * np_smoothness,
+                )
+        elif np_modulation or constant_rate_modulation:
             np_node_raw = numpyro.sample(
                 "np_node_raw",
                 dist.Normal(0.0, 1.0)
@@ -1669,25 +3827,122 @@ def build_model(
                 - node_multipliers
                 + 1.0
             )
-            np_smoothness = log_rate_smoothness(log_node_multipliers)
             numpyro.factor(
                 "np_entropy_regularization",
                 -likelihood_scale * np_entropy_weight * np_entropy,
             )
-            numpyro.factor(
-                "np_smoothness_regularization",
-                -likelihood_scale * np_smoothness_weight * np_smoothness,
+            if np_modulation:
+                np_smoothness = log_rate_smoothness(log_node_multipliers)
+            else:
+                np_smoothness = log_rate_smoothness(log_node_multipliers)
+            smoothness_weight = (
+                np_smoothness_weight
+                if np_modulation
+                else constant_rate_smoothness_weight
             )
+            if smoothness_weight > 0.0:
+                numpyro.factor(
+                    "np_smoothness_regularization",
+                    -likelihood_scale * smoothness_weight * np_smoothness,
+                )
         else:
             log_node_multipliers = jnp.zeros(len(data["repeat_values"]))
             node_multipliers = jnp.ones(len(data["repeat_values"]))
-        (
-            integrated_thickness,
-            base_instantaneous_rate,
-            node_integrated_thickness,
-            base_node_instantaneous_rate,
-        ) = (
-            integrate_rate_trajectory(
+        tile_log_rate_node_profiles = None
+        if tile_rate_trajectory_variation_active:
+            raw_tile_node_offsets = numpyro.sample(
+                "trajectory_rate_tile_node_offsets",
+                dist.Normal(0.0, tile_rate_prior_sigma_log)
+                .expand(
+                    (
+                        n_scas,
+                        n_tiles,
+                        len(data["node_days"]) - 1,
+                    )
+                )
+                .to_event(3),
+            )
+            centered_tile_node_offsets = raw_tile_node_offsets - jnp.mean(
+                raw_tile_node_offsets, axis=1, keepdims=True
+            )
+            tile_log_rate_node_offsets = jnp.concatenate(
+                (
+                    jnp.zeros((n_scas, n_tiles, 1)),
+                    centered_tile_node_offsets,
+                ),
+                axis=-1,
+            )
+            tile_log_rate_node_profiles = (
+                (np_log_rate_nodes if fully_np_trajectory else log_node_multipliers)[
+                    None, None, :
+                ]
+                + tile_log_rate_node_offsets
+            )
+            if neighbor_edges.size:
+                edge_indices = jnp.asarray(neighbor_edges, dtype=jnp.int32)
+                node_neighbor_difference = (
+                    jnp.take(tile_log_rate_node_offsets, edge_indices[:, 0], axis=1)
+                    - jnp.take(tile_log_rate_node_offsets, edge_indices[:, 1], axis=1)
+                )
+                numpyro.factor(
+                    "trajectory_rate_tile_node_neighbor_smoothness",
+                    -0.5
+                    * jnp.sum(
+                        (
+                            node_neighbor_difference
+                            / tile_rate_neighbor_sigma_log
+                        )
+                        ** 2
+                    ),
+                )
+            flat_tile_log_rate_profiles = tile_log_rate_node_profiles.reshape(
+                (-1, tile_log_rate_node_profiles.shape[-1])
+            )
+            tile_node_curvature = jax.vmap(log_rate_smoothness)(
+                flat_tile_log_rate_profiles
+            )
+            numpyro.factor(
+                "trajectory_rate_tile_node_smoothness",
+                -likelihood_scale
+                * tile_rate_trajectory_smoothness_weight
+                * jnp.mean(tile_node_curvature),
+            )
+            numpyro.deterministic(
+                "centered_trajectory_rate_tile_node_offsets",
+                tile_log_rate_node_offsets,
+            )
+        if tile_rate_trajectory_variation_active:
+            flat_tile_profiles = tile_log_rate_node_profiles.reshape(
+                (-1, tile_log_rate_node_profiles.shape[-1])
+            )
+            integrated_values = jax.vmap(
+                lambda profile: integrate_rate_trajectory(
+                    jax,
+                    jnp,
+                    days,
+                    node_days,
+                    integration_times,
+                    0.0,
+                    profile,
+                    use_square_root=not (fully_np_trajectory or constant_rate_modulation),
+                )
+            )(flat_tile_profiles)
+            (
+                integrated_thickness,
+                base_instantaneous_rate,
+                node_integrated_thickness,
+                base_node_instantaneous_rate,
+            ) = tuple(
+                values.reshape((n_scas * n_tiles, -1))
+                for values in integrated_values
+            )
+        else:
+            (
+                integrated_thickness,
+                base_instantaneous_rate,
+                node_integrated_thickness,
+                base_node_instantaneous_rate,
+            ) = integrate_rate_trajectory(
                 jax,
                 jnp,
                 days,
@@ -1697,20 +3952,63 @@ def build_model(
                 np_log_rate_nodes
                 if fully_np_trajectory
                 else log_node_multipliers,
-                use_square_root=not fully_np_trajectory,
+                use_square_root=not (fully_np_trajectory or constant_rate_modulation),
             )
-        )
+        if pivot_initial_thickness and fixed_initial_thickness_nm is None:
+            pivot_integrated_thickness = (
+                node_integrated_thickness[0, pivot_node_index]
+                if tile_rate_trajectory_variation_active
+                else node_integrated_thickness[pivot_node_index]
+            )
+            pivot_thickness = (
+                pivot_initial_center
+                + initial_thickness_prior_sigma_nm * initial_thickness_pivot_z
+            )
+            d0 = pivot_thickness - pivot_integrated_thickness
+            initial_thickness_prior = dist.TruncatedNormal(
+                initial_thickness_prior_mean_nm,
+                initial_thickness_prior_sigma_nm,
+                low=INITIAL_THICKNESS_PRIOR_LOW_NM,
+                high=INITIAL_THICKNESS_PRIOR_HIGH_NM,
+            )
+            numpyro.factor(
+                "initial_thickness_prior",
+                initial_thickness_prior.log_prob(d0)
+                + jnp.log(initial_thickness_prior_sigma_nm)
+                - dist.Normal(0.0, 1.0).log_prob(initial_thickness_pivot_z),
+            )
+            numpyro.deterministic("initial_thickness_nm", d0)
         row_log_rate_scales = log_scale + tile_log_rate_offsets.reshape(-1)
         row_rate_scales = jnp.exp(row_log_rate_scales)
-        tile_ice_thickness = d0 + row_rate_scales[:, None] * integrated_thickness[None, :]
+        tile_ice_thickness = d0 + row_rate_scales[:, None] * (
+            integrated_thickness
+            if tile_rate_trajectory_variation_active
+            else integrated_thickness[None, :]
+        )
         tile_instantaneous_rate = (
-            row_rate_scales[:, None] * base_instantaneous_rate[None, :]
+            row_rate_scales[:, None]
+            * (
+                base_instantaneous_rate
+                if tile_rate_trajectory_variation_active
+                else base_instantaneous_rate[None, :]
+            )
         )
         tile_node_ice_thickness = (
-            d0 + row_rate_scales[:, None] * node_integrated_thickness[None, :]
+            d0
+            + row_rate_scales[:, None]
+            * (
+                node_integrated_thickness
+                if tile_rate_trajectory_variation_active
+                else node_integrated_thickness[None, :]
+            )
         )
         tile_node_instantaneous_rate = (
-            row_rate_scales[:, None] * base_node_instantaneous_rate[None, :]
+            row_rate_scales[:, None]
+            * (
+                base_node_instantaneous_rate
+                if tile_rate_trajectory_variation_active
+                else base_node_instantaneous_rate[None, :]
+            )
         )
         if tile_rate_variation_active:
             ice_thickness = tile_ice_thickness
@@ -1729,6 +4027,9 @@ def build_model(
             hgcdte_parameters,
             conductive_parameters,
             qe_rbf_parameters,
+            early_time_scale,
+            late_acm_step,
+            detector_thickness_for_prediction,
         )
         numpyro.factor(
             "tile_gaussian_log_likelihood",
@@ -1783,7 +4084,7 @@ def build_model(
             "initial_rate_nm_day", instantaneous_rate[first_group]
         )
         numpyro.deterministic("final_rate_nm_day", instantaneous_rate[last_group])
-        if np_modulation or fully_np_trajectory:
+        if np_modulation or constant_rate_modulation or fully_np_trajectory:
             numpyro.deterministic("np_log_node_multipliers", log_node_multipliers)
             numpyro.deterministic("np_node_multipliers", node_multipliers)
             numpyro.deterministic(
@@ -1801,9 +4102,9 @@ def build_model(
             "mean_rate_nm_day",
             rate_numerator / (jnp.max(days) - jnp.min(days)),
         )
-        if np_modulation:
+        if np_modulation or constant_rate_modulation:
             numpyro.deterministic("np_entropy", np_entropy)
-        if np_modulation or fully_np_trajectory:
+        if np_modulation or constant_rate_modulation or fully_np_trajectory:
             numpyro.deterministic("np_smoothness", np_smoothness)
 
     return model
@@ -1838,18 +4139,48 @@ def initial_values_for_data(data, args, ar_reference, ar_lower, ar_upper):
         (start_reference[active_parameter_indices] - ar_lower[active_parameter_indices])
         / (ar_upper[active_parameter_indices] - start_reference[active_parameter_indices])
     )
-    initial_values = {"ar_mu_raw": reference_raw}
+    if getattr(args, "standardize_ar_mean", False):
+        initial_values = {"ar_mu_z": np.zeros(len(active_parameter_indices))}
+    else:
+        initial_values = {"ar_mu_raw": reference_raw}
     if getattr(args, "fixed_initial_thickness_nm", None) is None:
-        initial_values["initial_thickness_nm"] = INITIAL_THICKNESS_INIT_NM
+        if getattr(args, "pivot_initial_thickness", False):
+            initial_values["initial_thickness_pivot_z"] = 0.0
+        else:
+            initial_values["initial_thickness_nm"] = getattr(
+                args, "initial_thickness_init_nm", INITIAL_THICKNESS_INIT_NM
+            )
+    if getattr(args, "early_time_scale_cutoff_day", None) is not None:
+        early_time_configuration = early_time_scale_configuration(
+            data, args.early_time_scale_cutoff_day
+        )
+        early_time_node_count = len(early_time_configuration["repeat"])
+        if early_time_node_count > 1:
+            initial_values["early_time_log_scale"] = np.full(
+                early_time_node_count - 1,
+                EARLY_TIME_LOG_SCALE_PRIOR_MEAN,
+            )
     if getattr(args, "fully_np_trajectory", False):
+        trajectory_prior_rate = trajectory_prior_rate_for_data(data, args)
+        initial_log_rates = np.full(len(data["node_days"]), np.log(trajectory_prior_rate))
+        if getattr(args, "whiten_np_trajectory", False):
+            initial_values["np_log_rate_z"] = whiten_trajectory_rate_nodes(
+                initial_log_rates,
+                data["node_days"],
+                trajectory_prior_rate,
+                args.trajectory_rate_prior_sigma_log,
+                trajectory_rate_likelihood_scale(data, args),
+                args.np_smoothness_weight,
+            )
+        else:
+            initial_values["np_log_rate_nodes"] = initial_log_rates
+    elif getattr(args, "constant_rate_modulation", False):
         trajectory_prior_rate = (
             getattr(args, "trajectory_rate_prior_mean_nm_day", None)
             if getattr(args, "trajectory_rate_prior_mean_nm_day", None) is not None
             else trajectory_rate_per_scale(data["days"]) * TRAJECTORY_SCALE_INIT
         )
-        initial_values["np_log_rate_nodes"] = np.full(
-            len(data["node_days"]), np.log(trajectory_prior_rate)
-        )
+        initial_values["log_trajectory_scale"] = np.log(trajectory_prior_rate)
     else:
         initial_values["log_trajectory_scale"] = np.log(TRAJECTORY_SCALE_START)
     if getattr(args, "fit_hgcdte", False):
@@ -1858,6 +4189,35 @@ def initial_values_for_data(data, args, ar_reference, ar_lower, ar_upper):
                 "hgcdte_n": float(NOMINAL_HGCDTE[0]),
                 "hgcdte_k": float(NOMINAL_HGCDTE[1]),
             }
+        )
+    elif getattr(args, "fit_hgcdte_modulation", False):
+        initial_values.update(
+            {
+                "hgcdte_n_log_modulation": np.zeros(
+                    len(HGCDTE_MODULATION_NODE_WAVELENGTHS_NM)
+                ),
+                "hgcdte_k_log_modulation": np.zeros(
+                    len(HGCDTE_MODULATION_NODE_WAVELENGTHS_NM)
+                ),
+            }
+        )
+    elif getattr(args, "absolute_substrate_power", False):
+        initial_values.update(
+            {
+                "absolute_hgcdte_n_log_scale": 0.0,
+                "absolute_hgcdte_k_log_scale": 0.0,
+            }
+        )
+    if getattr(args, "fit_detector_thickness", False):
+        initial_values["detector_log_thickness_nm"] = np.full(
+            (data["n_scas"], data["n_tiles"]),
+            np.log(
+                getattr(
+                    args,
+                    "detector_thickness_nm",
+                    DETECTOR_THICKNESS_DEFAULT_NM,
+                )
+            ),
         )
     if getattr(args, "fit_conductive_layer", False):
         initial_values.update(
@@ -1876,14 +4236,32 @@ def initial_values_for_data(data, args, ar_reference, ar_lower, ar_upper):
         initial_values["qe_rbf_log_modulation"] = np.zeros(
             len(qe_rbf_nodes)
         )
-    initial_values["acm_step_log_offset"] = (
-        np.zeros(6) if getattr(args, "led_dependent_acm_step", False) else 0.0
-    )
+    if not getattr(args, "fixed_corrections", None):
+        initial_values["acm_step_log_offset"] = (
+            np.zeros(6) if getattr(args, "led_dependent_acm_step", False) else 0.0
+        )
+    if getattr(args, "fit_late_acm_step", False):
+        initial_values["late_acm_step_log_offset"] = np.log(0.992)
     map_trajectory_rate_nm_day = getattr(args, "map_trajectory_rate_nm_day", None)
     if map_trajectory_rate_nm_day is not None:
         if getattr(args, "fully_np_trajectory", False):
-            initial_values["np_log_rate_nodes"] = np.full(
+            map_log_rates = np.full(
                 len(data["node_days"]), np.log(map_trajectory_rate_nm_day)
+            )
+            if getattr(args, "whiten_np_trajectory", False):
+                initial_values["np_log_rate_z"] = whiten_trajectory_rate_nodes(
+                    map_log_rates,
+                    data["node_days"],
+                    trajectory_prior_rate,
+                    args.trajectory_rate_prior_sigma_log,
+                    trajectory_rate_likelihood_scale(data, args),
+                    args.np_smoothness_weight,
+                )
+            else:
+                initial_values["np_log_rate_nodes"] = map_log_rates
+        elif getattr(args, "constant_rate_modulation", False):
+            initial_values["log_trajectory_scale"] = np.log(
+                map_trajectory_rate_nm_day
             )
         else:
             initial_values["log_trajectory_scale"] = np.log(
@@ -1894,12 +4272,16 @@ def initial_values_for_data(data, args, ar_reference, ar_lower, ar_upper):
         if args.shared_ar_optical_properties
         else len(active_parameter_indices)
     )
-    if is_single_tile_data(data):
+    if is_single_tile_data(data) or getattr(
+        args, "shared_ar_parameters_across_tiles", False
+    ):
         pass
     elif data["n_scas"] == 1:
         initial_values.update(
             {
-                "ar_sigma_raw": np.full(hierarchy_parameter_count, 0.2),
+                "ar_sigma_raw": np.full(
+                    hierarchy_parameter_count, args.ar_tile_sigma_prior * 0.5
+                ),
                 "ar_z": np.zeros((len(data["tile_ids"]), hierarchy_parameter_count)),
             }
         )
@@ -1922,13 +4304,26 @@ def initial_values_for_data(data, args, ar_reference, ar_lower, ar_upper):
                 ),
             }
         )
-    if args.np_modulation:
+    if args.np_modulation or getattr(args, "constant_rate_modulation", False):
         initial_values["np_node_raw"] = np.zeros(len(data["repeat_values"]) - 1)
-    if getattr(args, "tile_rate_variation", False) and (
+    if (
+        getattr(args, "tile_rate_variation", False)
+        or getattr(args, "tile_rate_trajectory_variation", False)
+    ) and (
         data["n_scas"] * data["n_tiles"] > 1
     ):
         initial_values["trajectory_rate_tile_offsets"] = np.zeros(
             (data["n_scas"], data["n_tiles"])
+        )
+    if getattr(args, "tile_rate_trajectory_variation", False) and (
+        data["n_scas"] * data["n_tiles"] > 1
+    ):
+        initial_values["trajectory_rate_tile_node_offsets"] = np.zeros(
+            (
+                data["n_scas"],
+                data["n_tiles"],
+                len(data["node_days"]) - 1,
+            )
         )
     return initial_values
 
@@ -1945,6 +4340,69 @@ def transfer_map_initial_values(map_values, full_initial_values):
     return transferred
 
 
+def reparameterized_map_value_converters(
+    data, args, ar_reference, ar_lower, ar_upper
+):
+    """Convert legacy constrained MAP sites into opt-in latent coordinates."""
+    converters = {}
+    if getattr(args, "standardize_ar_mean", False):
+        start_reference = map_start_reference(args, ar_reference, ar_lower, ar_upper)
+        active_parameter_indices = np.arange(len(ar_reference), dtype=int)
+        if not getattr(args, "fit_ar_absorption", False):
+            active_parameter_indices = active_parameter_indices[
+                active_parameter_indices % 3 != 2
+            ]
+        reference_probability = (
+            start_reference[active_parameter_indices] - ar_lower[active_parameter_indices]
+        ) / (ar_upper[active_parameter_indices] - ar_lower[active_parameter_indices])
+        reference_raw = np.log(reference_probability / (1.0 - reference_probability))
+        ar_mean_prior_sigma = float(args.ar_mean_prior_sigma)
+        ar_rotation = ar_coordinate_rotation(
+            active_parameter_indices, len(ar_reference)
+        )
+
+        def ar_mu_converter(value, _):
+            standardized_raw = (
+                np.asarray(value, dtype=float) - reference_raw
+            ) / ar_mean_prior_sigma
+            if getattr(args, "rotate_ar_coordinates", False):
+                return standardized_raw @ ar_rotation
+            return standardized_raw
+
+        converters["ar_mu_z"] = (
+            "ar_mu_raw",
+            ar_mu_converter,
+        )
+    if getattr(args, "whiten_np_trajectory", False):
+        trajectory_prior_rate = (
+            getattr(args, "trajectory_rate_prior_mean_nm_day", None)
+            if getattr(args, "trajectory_rate_prior_mean_nm_day", None) is not None
+            else trajectory_rate_per_scale(data["days"]) * TRAJECTORY_SCALE_INIT
+        )
+        converters["np_log_rate_z"] = (
+            "np_log_rate_nodes",
+            lambda value, _: whiten_trajectory_rate_nodes(
+                value,
+                data["node_days"],
+                trajectory_prior_rate,
+                args.trajectory_rate_prior_sigma_log,
+                trajectory_rate_likelihood_scale(data, args),
+                args.np_smoothness_weight,
+            ),
+        )
+    if getattr(args, "pivot_initial_thickness", False):
+        converters["initial_thickness_pivot_z"] = (
+            "initial_thickness_nm",
+            lambda value, samples: trajectory_pivot_z_from_initial_thickness(
+                value,
+                data,
+                args,
+                np.asarray(samples["np_log_rate_nodes"], dtype=float).reshape(-1),
+            ),
+        )
+    return converters
+
+
 def quantile(values):
     return np.percentile(np.asarray(values), [16, 50, 84])
 
@@ -1954,14 +4412,26 @@ def posterior_median_fit_diagnostics(
     context,
     samples,
     fit_hgcdte=False,
+    fit_hgcdte_modulation=False,
     fit_conductive_layer=False,
+    finite_hgcdte_detector=False,
+    detector_backside_index=1.0,
     fit_qe_rbf=False,
     qe_rbf_node_wavelengths_nm=None,
     qe_rbf_width_nm=QE_RBF_WIDTH_NM,
     use_asw_optical_constants=False,
+    use_hgcdte_optical_constants=False,
+    incidence_cone_half_angle_deg=0.0,
+    incidence_pupil_half_angle_deg=0.0,
+    incidence_chief_ray_tilts_deg=None,
+    early_time_cutoff_day=None,
+    fit_late_acm_step=False,
+    absolute_substrate_power=None,
 ):
     """Evaluate the posterior-median parameters against the tile means."""
     _, jnp, _, _, _, _, _ = require_numpyro()
+    if absolute_substrate_power is None:
+        absolute_substrate_power = bool(context.get("absolute_substrate_power", False))
     ice_thickness = np.median(np.asarray(samples["ice_thickness"]), axis=0)
     ar_parameters = np.median(np.asarray(samples["ar_parameters"]), axis=0)
     if ar_parameters.ndim == 3:
@@ -1971,16 +4441,47 @@ def posterior_median_fit_diagnostics(
     n_rows = int(data["counts"].shape[0])
     if ar_parameters.shape[0] != n_rows:
         raise ValueError("Posterior AR rows do not match the selected tile data")
+    detector_thickness_nm = None
+    if finite_hgcdte_detector:
+        if "detector_thickness_nm" not in samples:
+            raise ValueError("Finite detector posterior has no thickness values")
+        detector_thickness_nm = np.median(
+            np.asarray(samples["detector_thickness_nm"]), axis=0
+        ).reshape(-1)
+        if detector_thickness_nm.size != n_rows:
+            raise ValueError("Posterior detector thickness rows do not match the data")
     acm_step = np.median(
         np.asarray(samples["acm_step_log_offset"]), axis=0
     )
     hgcdte_parameters = None
-    if fit_hgcdte:
+    if absolute_substrate_power:
+        hgcdte_parameters = jnp.asarray(
+            [
+                np.median(np.asarray(samples["absolute_hgcdte_n_log_scale"])),
+                np.median(np.asarray(samples["absolute_hgcdte_k_log_scale"])),
+            ]
+        )
+    elif fit_hgcdte:
         hgcdte_parameters = jnp.asarray(
             [
                 np.median(np.asarray(samples["hgcdte_n"])),
                 np.median(np.asarray(samples["hgcdte_k"])),
             ]
+        )
+    elif fit_hgcdte_modulation:
+        hgcdte_parameters = jnp.concatenate(
+            (
+                jnp.asarray(
+                    np.median(
+                        np.asarray(samples["hgcdte_n_log_modulation"]), axis=0
+                    )
+                ),
+                jnp.asarray(
+                    np.median(
+                        np.asarray(samples["hgcdte_k_log_modulation"]), axis=0
+                    )
+                ),
+            )
         )
     conductive_parameters = None
     if fit_conductive_layer:
@@ -1996,6 +4497,16 @@ def posterior_median_fit_diagnostics(
         qe_rbf_parameters = jnp.asarray(
             np.median(np.asarray(samples["qe_rbf_log_modulation"]), axis=0)
         )
+    early_time_scale = None
+    if early_time_cutoff_day is not None:
+        early_time_scale = jnp.asarray(
+            np.median(np.asarray(samples["early_time_scale"]), axis=0)
+        )
+    late_acm_step = (
+        jnp.asarray(np.median(np.asarray(samples["late_acm_step_log_offset"])))
+        if fit_late_acm_step
+        else jnp.asarray(0.0)
+    )
     prediction_chunks = []
     for start in range(0, n_rows, PREDICTION_ROW_CHUNK_SIZE):
         stop = min(start + PREDICTION_ROW_CHUNK_SIZE, n_rows)
@@ -2007,11 +4518,21 @@ def posterior_median_fit_diagnostics(
                     context,
                     row_indices=row_indices,
                     fit_hgcdte=fit_hgcdte,
+                    fit_hgcdte_modulation=fit_hgcdte_modulation,
                     fit_conductive_layer=fit_conductive_layer,
+                    finite_hgcdte_detector=finite_hgcdte_detector,
+                    detector_backside_index=detector_backside_index,
                     fit_qe_rbf=fit_qe_rbf,
                     qe_rbf_node_wavelengths_nm=qe_rbf_node_wavelengths_nm,
                     qe_rbf_width_nm=qe_rbf_width_nm,
                     use_asw_optical_constants=use_asw_optical_constants,
+                    use_hgcdte_optical_constants=use_hgcdte_optical_constants,
+                    incidence_cone_half_angle_deg=incidence_cone_half_angle_deg,
+                    incidence_pupil_half_angle_deg=incidence_pupil_half_angle_deg,
+                    incidence_chief_ray_tilts_deg=incidence_chief_ray_tilts_deg,
+                    early_time_cutoff_day=early_time_cutoff_day,
+                    fit_late_acm_step=fit_late_acm_step,
+                    absolute_substrate_power=absolute_substrate_power,
                 )(
                     jnp.asarray(
                         ice_thickness
@@ -2023,6 +4544,11 @@ def posterior_median_fit_diagnostics(
                     hgcdte_parameters,
                     conductive_parameters,
                     qe_rbf_parameters,
+                    early_time_scale,
+                    late_acm_step,
+                    jnp.asarray(detector_thickness_nm[row_indices])
+                    if detector_thickness_nm is not None
+                    else None,
                 )
             )
         )
@@ -2090,6 +4616,15 @@ def add_sca_ar_quantiles(row, quantiles, sca_index, ar_layers):
                 ]
 
 
+def format_command_line(argv=None, executable=None):
+    """Return a shell-quoted command that reproduces the current invocation."""
+    if argv is None:
+        argv = sys.argv
+    if executable is None:
+        executable = sys.executable
+    return shlex.join([executable, *argv])
+
+
 def write_outputs(
     output_dir,
     data,
@@ -2106,6 +4641,7 @@ def write_outputs(
         getattr(args, "qe_rbf_width_nm", QE_RBF_WIDTH_NM),
         getattr(args, "qe_rbf_prior_sigma_log", QE_RBF_PRIOR_SIGMA_LOG),
     )
+    command_line = format_command_line()
     metadata = {
         "tile_ids": data["tile_ids"],
         "sca_names": data["sca_names"],
@@ -2115,23 +4651,189 @@ def write_outputs(
             np.nan if args.wavelength_step_nm is None else args.wavelength_step_nm
         ),
         "wavelength_stride": args.wavelength_stride,
+        "prediction_row_chunk_size": int(
+            data.get("prediction_row_chunk_size", PREDICTION_ROW_CHUNK_SIZE)
+        ),
         "likelihood_weight": args.likelihood_weight,
         "log_noise_sigma": args.log_noise_sigma,
         "statistics_path": np.asarray(str(args.tile_statistics)),
+        "fixed_corrections_path": np.asarray(
+            data.get(
+                "fixed_corrections_path",
+                "" if getattr(args, "fixed_corrections", None) is None
+                else str(args.fixed_corrections),
+            )
+        ),
+        "fixed_corrections_applied": int(data.get("fixed_corrections_applied", False)),
+        "fixed_acm_step_log_offset": float(
+            data.get("fixed_acm_step_log_offset", 0.0)
+        ),
+        "fixed_late_acm_step_log_offset": float(
+            data.get("fixed_late_acm_step_log_offset", 0.0)
+        ),
+        "min_observation_day": (
+            np.nan
+            if getattr(args, "min_observation_day", None) is None
+            else args.min_observation_day
+        ),
+        "early_time_scale_cutoff_day": (
+            np.nan
+            if getattr(args, "early_time_scale_cutoff_day", None) is None
+            else args.early_time_scale_cutoff_day
+        ),
+        "early_time_scale_prior_sigma": args.early_time_scale_prior_sigma,
+        "early_time_scale_definition": np.asarray(
+            "relative observed-count multiplier before per-LED normalization"
+        ),
+        "early_time_scale_repeat": (
+            np.asarray(data["early_time_scale_repeat"], dtype=int)
+            if "early_time_scale_repeat" in data
+            else np.empty(0, dtype=int)
+        ),
+        "early_time_scale_days": (
+            np.asarray(data["early_time_scale_days"], dtype=float)
+            if "early_time_scale_days" in data
+            else np.empty(0, dtype=float)
+        ),
+        "observation_early_time_scale_index": (
+            np.asarray(data["early_time_scale_index"], dtype=int)
+            if "early_time_scale_index" in data
+            else np.full(len(data["days"]), -1, dtype=int)
+        ),
+        "command_line": np.asarray(command_line),
         "statistics_fingerprint": np.asarray(statistics_fingerprint(data)),
         "statistics_row_fingerprints": statistics_row_fingerprints(data),
         "sed_mode": np.asarray(args.sed_mode),
+        "sed_weighting": np.asarray(args.sed_weighting),
         "max_tiles": -1 if args.max_tiles is None else args.max_tiles,
         "shared_ar_optical_properties": int(args.shared_ar_optical_properties),
+        "shared_ar_parameters_across_tiles": int(
+            getattr(args, "shared_ar_parameters_across_tiles", False)
+        ),
         "fit_ar_absorption": int(args.fit_ar_absorption),
         "fit_hgcdte": int(getattr(args, "fit_hgcdte", False)),
+        "fit_hgcdte_modulation": int(
+            getattr(args, "fit_hgcdte_modulation", False)
+        ),
+        "absolute_substrate_power": int(
+            getattr(args, "absolute_substrate_power", False)
+        ),
+        "absolute_hgcdte_scale_prior_sigma_log": float(
+            getattr(
+                args,
+                "absolute_hgcdte_scale_prior_sigma_log",
+                ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG,
+            )
+        ),
+        "hgcdte_modulation_prior_sigma_log": getattr(
+            args,
+            "hgcdte_modulation_prior_sigma_log",
+            HGCDTE_MODULATION_PRIOR_SIGMA_LOG,
+        ),
+        "use_hgcdte_optical_constants": int(
+            getattr(args, "use_hgcdte_optical_constants", False)
+        ),
         "fit_conductive_layer": int(getattr(args, "fit_conductive_layer", False)),
+        "finite_hgcdte_detector": int(
+            getattr(args, "finite_hgcdte_detector", False)
+            or getattr(args, "fit_detector_thickness", False)
+        ),
+        "detector_thickness_reference_nm": float(
+            getattr(args, "detector_thickness_nm", DETECTOR_THICKNESS_DEFAULT_NM)
+        ),
+        "fit_detector_thickness": int(
+            getattr(args, "fit_detector_thickness", False)
+        ),
+        "detector_thickness_prior_sigma_log": float(
+            getattr(
+                args,
+                "detector_thickness_prior_sigma_log",
+                DETECTOR_THICKNESS_PRIOR_SIGMA_LOG,
+            )
+        ),
+        "detector_thickness_neighbor_sigma_log": float(
+            getattr(
+                args,
+                "detector_thickness_neighbor_sigma_log",
+                DETECTOR_THICKNESS_NEIGHBOR_SIGMA_LOG,
+            )
+        ),
+        "detector_backside_index": float(
+            getattr(args, "detector_backside_index", 1.0)
+        ),
         "fit_qe_rbf": int(getattr(args, "fit_qe_rbf", False)),
         "use_asw_optical_constants": int(
             getattr(args, "use_asw_optical_constants", False)
         ),
+        "ice_optical_constants_source": np.asarray(
+            str(
+                getattr(
+                    args,
+                    "ice_optical_constants_source",
+                    ASW_OPTICAL_CONSTANTS_URL,
+                )
+            )
+        ),
+        "incidence_cone_half_angle_deg": float(
+            getattr(args, "incidence_cone_half_angle_deg", 0.0)
+        ),
+        "incidence_pupil_half_angle_deg": float(
+            getattr(args, "incidence_pupil_half_angle_deg", 0.0)
+        ),
+        "incidence_chief_ray_tilts_deg": load_incidence_chief_ray_tilts(
+            getattr(args, "incidence_chief_ray_map", None),
+            data,
+            (
+                getattr(args, "incidence_chief_ray_x_deg", 0.0),
+                getattr(args, "incidence_chief_ray_y_deg", 0.0),
+            ),
+        ),
+        "incidence_chief_ray_map": np.asarray(
+            ""
+            if getattr(args, "incidence_chief_ray_map", None) is None
+            else str(args.incidence_chief_ray_map)
+        ),
         "led_dependent_acm_step": int(
             getattr(args, "led_dependent_acm_step", False)
+        ),
+        "acm_step_prior_sigma": getattr(args, "acm_step_prior_sigma", 0.05),
+        "fit_late_acm_step": int(getattr(args, "fit_late_acm_step", False)),
+        "late_acm_step_prior_sigma": getattr(
+            args, "late_acm_step_prior_sigma", 0.02
+        ),
+        "initial_thickness_prior_mean_nm": float(
+            getattr(
+                args,
+                "initial_thickness_prior_mean_nm",
+                INITIAL_THICKNESS_PRIOR_MEAN_NM,
+            )
+        ),
+        "initial_thickness_prior_sigma_nm": float(
+            getattr(
+                args,
+                "initial_thickness_prior_sigma_nm",
+                INITIAL_THICKNESS_PRIOR_SIGMA_NM,
+            )
+        ),
+        "initial_thickness_init_nm": float(
+            getattr(args, "initial_thickness_init_nm", INITIAL_THICKNESS_INIT_NM)
+        ),
+        "nuts_initial_thickness_nm": float(
+            getattr(
+                args,
+                "nuts_initial_thickness_nm",
+                NUTS_INITIAL_THICKNESS_INIT_NM,
+            )
+        ),
+        "nuts_init_jitter": float(
+            getattr(args, "nuts_init_jitter", NUTS_INIT_JITTER)
+        ),
+        "np_modulation": int(getattr(args, "np_modulation", False)),
+        "constant_rate_modulation": int(
+            getattr(args, "constant_rate_modulation", False)
+        ),
+        "constant_rate_smoothness_weight": float(
+            getattr(args, "constant_rate_smoothness_weight", 0.0)
         ),
         "fully_np_trajectory": int(
             getattr(args, "fully_np_trajectory", False)
@@ -2147,13 +4849,21 @@ def write_outputs(
         "trajectory_rate_prior_sigma_log": args.trajectory_rate_prior_sigma_log,
         "trajectory_rate_definition": np.asarray(
             (
-                "fully non-parametric instantaneous rate at each repeat node"
+                "fully non-parametric instantaneous rate at each observation-epoch node"
                 if getattr(args, "fully_np_trajectory", False)
+                else "constant instantaneous rate with observation-epoch modulation"
+                if getattr(args, "constant_rate_modulation", False)
                 else "unmodulated instantaneous rate at the first observed time"
             )
         ),
         "trajectory_rate_reference_day": float(np.min(data["days"])),
         "tile_rate_variation": int(getattr(args, "tile_rate_variation", False)),
+        "tile_rate_trajectory_variation": int(
+            getattr(args, "tile_rate_trajectory_variation", False)
+        ),
+        "tile_rate_trajectory_smoothness_weight": float(
+            getattr(args, "tile_rate_trajectory_smoothness_weight", 0.01)
+        ),
         "tile_rate_prior_sigma_log": getattr(
             args, "tile_rate_prior_sigma_log", np.nan
         ),
@@ -2167,11 +4877,21 @@ def write_outputs(
             else args.map_trajectory_rate_nm_day
         ),
         "map_only": int(getattr(args, "map_only", False)),
+        "map_parameter_scaling": np.asarray(
+            getattr(args, "map_parameter_scaling", "none")
+        ),
+        "map_init_from": np.asarray(
+            "" if getattr(args, "map_init_from", None) is None
+            else str(getattr(args, "map_init_from"))
+        ),
         "observation_days": data["days"],
         "observation_led": data["led"],
         "observation_repeat": data["repeat"],
         "observation_exposure_times": np.asarray(data["exposure_times"]),
         "observation_step_design": data["step_design"],
+        "observation_late_step_design": np.asarray(
+            data.get("late_step_design", np.zeros(len(data["days"])))
+        ),
     }
     if map_diagnostics:
         metadata.update(
@@ -2188,6 +4908,26 @@ def write_outputs(
                     map_diagnostics.get("gradient_converged", False)
                 ),
                 "map_gradient_norm": float(map_diagnostics["gradient_norm"]),
+                "map_projected_gradient_norm": float(
+                    map_diagnostics.get(
+                        "projected_gradient_norm", map_diagnostics["gradient_norm"]
+                    )
+                ),
+                "map_scaled_gradient_norm": float(
+                    map_diagnostics.get("scaled_gradient_norm", np.nan)
+                ),
+                "map_scaled_projected_gradient_norm": float(
+                    map_diagnostics.get("scaled_projected_gradient_norm", np.nan)
+                ),
+                "map_parameter_scale_min": float(
+                    map_diagnostics.get("parameter_scale_min", np.nan)
+                ),
+                "map_parameter_scale_max": float(
+                    map_diagnostics.get("parameter_scale_max", np.nan)
+                ),
+                "map_function_tolerance": float(
+                    map_diagnostics.get("function_tolerance", np.nan)
+                ),
                 "map_objective": float(map_diagnostics["objective"]),
                 "map_initial_objective": float(
                     map_diagnostics["initial_objective"]
@@ -2259,7 +4999,12 @@ def write_outputs(
             np.asarray(samples["tile_mean_rate_nm_day"]), [16, 50, 84], axis=0
         )
         tile_offsets = np.percentile(
-            np.asarray(samples["trajectory_rate_tile_offsets"]),
+            np.asarray(
+                samples.get(
+                    "centered_trajectory_rate_tile_offsets",
+                    samples["trajectory_rate_tile_offsets"],
+                )
+            ),
             [16, 50, 84],
             axis=0,
         )
@@ -2308,6 +5053,45 @@ def write_outputs(
                         }
                     )
 
+    if "detector_thickness_nm" in samples:
+        detector_thickness_quantiles = np.percentile(
+            np.asarray(samples["detector_thickness_nm"]), [16, 50, 84], axis=0
+        )
+        with (output_dir / "detector_thickness_posterior.csv").open(
+            "w", newline=""
+        ) as handle:
+            fields = [
+                "detector",
+                "tile_id",
+                "tile_row",
+                "tile_col",
+                "thickness_nm_p16",
+                "thickness_nm_median",
+                "thickness_nm_p84",
+            ]
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            for sca_index, detector in enumerate(data["sca_names"]):
+                for tile_index, tile_id in enumerate(data["tile_ids"]):
+                    tile_metadata = data["metadata"][int(tile_id)]
+                    writer.writerow(
+                        {
+                            "detector": detector,
+                            "tile_id": int(tile_id),
+                            "tile_row": tile_metadata["tile_row"],
+                            "tile_col": tile_metadata["tile_col"],
+                            "thickness_nm_p16": detector_thickness_quantiles[
+                                0, sca_index, tile_index
+                            ],
+                            "thickness_nm_median": detector_thickness_quantiles[
+                                1, sca_index, tile_index
+                            ],
+                            "thickness_nm_p84": detector_thickness_quantiles[
+                                2, sca_index, tile_index
+                            ],
+                        }
+                    )
+
     if "ar_sca_mean" in samples:
         sca_quantiles = np.percentile(
             np.asarray(samples["ar_sca_mean"]), [16, 50, 84], axis=0
@@ -2326,7 +5110,11 @@ def write_outputs(
                 add_sca_ar_quantiles(row, sca_quantiles, index, ar_layers)
                 writer.writerow(row)
 
-    if args.np_modulation or getattr(args, "fully_np_trajectory", False):
+    if (
+        args.np_modulation
+        or getattr(args, "constant_rate_modulation", False)
+        or getattr(args, "fully_np_trajectory", False)
+    ):
         node_samples = np.asarray(samples["np_node_multipliers"])
         node_quantiles = np.percentile(node_samples, [16, 50, 84], axis=0)
         with (output_dir / "np_node_posterior.csv").open("w", newline="") as handle:
@@ -2357,12 +5145,46 @@ def write_outputs(
                         "instantaneous_rate_nm_day_p16": node_rate_quantiles[0, index],
                         "instantaneous_rate_nm_day_median": node_rate_quantiles[1, index],
                         "instantaneous_rate_nm_day_p84": node_rate_quantiles[2, index],
+                        }
+                    )
+
+    if (
+        getattr(args, "early_time_scale_cutoff_day", None) is not None
+        and "early_time_scale" in samples
+    ):
+        scale_quantiles = np.percentile(
+            np.asarray(samples["early_time_scale"]), [16, 50, 84], axis=0
+        )
+        with (output_dir / "early_time_scale_posterior.csv").open(
+            "w", newline=""
+        ) as handle:
+            fields = [
+                "repeat",
+                "days",
+                "relative_count_scale_p16",
+                "relative_count_scale_median",
+                "relative_count_scale_p84",
+            ]
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            for index, (repeat, day) in enumerate(
+                zip(data["early_time_scale_repeat"], data["early_time_scale_days"])
+            ):
+                writer.writerow(
+                    {
+                        "repeat": int(repeat),
+                        "days": float(day),
+                        "relative_count_scale_p16": scale_quantiles[0, index],
+                        "relative_count_scale_median": scale_quantiles[1, index],
+                        "relative_count_scale_p84": scale_quantiles[2, index],
                     }
                 )
 
     trajectory_label = (
         "fully non-parametric positive log-rate trajectory"
         if getattr(args, "fully_np_trajectory", False)
+        else "constant positive rate with entropy-regularized node modulation"
+        if getattr(args, "constant_rate_modulation", False)
         else "NP-modulated rate-integrated square-root trajectory"
         if args.np_modulation
         else "shared rate-integrated square-root trajectory"
@@ -2371,16 +5193,45 @@ def write_outputs(
     lines = [
         f"# {scope_label(data['sca_names'])} NumPyro hierarchical TMM fit",
         "",
+        "## Reproduce",
+        "",
+        "```bash",
+        command_line,
+        "```",
+        "",
         f"Tile statistics: `{args.tile_statistics}`.",
+        (
+            f"Complete observation groups before day `{args.min_observation_day}` were excluded; "
+            f"the first retained observation is at day `{np.min(data['days']):.8g}`."
+            if getattr(args, "min_observation_day", None) is not None
+            else "All available observation groups were retained."
+        ),
+        (
+            f"Fixed gain and ACM corrections were applied from `{args.fixed_corrections}`; "
+            "no early-time gain correction is fitted."
+            if getattr(args, "fixed_corrections", None) is not None
+            else (
+            f"One relative observed-count scale per repeat epoch, shared across all LEDs, is fitted through day "
+            f"`{args.early_time_scale_cutoff_day}`; the first epoch is the unit reference and "
+            f"the log-relative scale prior sigma is `{args.early_time_scale_prior_sigma}`. "
+            "The scale is applied to the observed counts before their per-LED normalization."
+            if getattr(args, "early_time_scale_cutoff_day", None) is not None
+            else "No early-time scale correction is fitted."
+            )
+        ),
         f"SCAs used: `{data['sca_names'].tolist()}`.",
         f"QE curves used by SCA: `{dict(zip(data['sca_names'].tolist(), (data['qe_columns'] + 1).tolist()))}`.",
         f"Coating model: `{ar_layers}` dielectric AR layer(s), ordered from air toward HgCdTe.",
         (
-            "AR optical properties: direct single-tile parameters; no tile hierarchy."
-            if is_single_tile_data(data)
-            else "AR optical properties: shared n/k across all tiles; thickness varies hierarchically."
-            if args.shared_ar_optical_properties
-            else "AR optical properties: thickness, n, and k all vary hierarchically."
+            "AR optical properties: one full AR parameter vector is shared across all selected tiles."
+            if getattr(args, "shared_ar_parameters_across_tiles", False)
+            else (
+                "AR optical properties: direct single-tile parameters; no tile hierarchy."
+                if is_single_tile_data(data)
+                else "AR optical properties: shared n/k across all tiles; thickness varies hierarchically."
+                if args.shared_ar_optical_properties
+                else "AR optical properties: thickness, n, and k all vary hierarchically."
+            )
         ),
         (
             "AR absorption indices are fitted."
@@ -2389,11 +5240,44 @@ def write_outputs(
         ),
         f"Tiles per SCA: `{len(data['tile_ids'])}`; tile IDs: `{data['tile_ids'].tolist()}`.",
         (
+            "Absolute substrate-power nuisance mode: SED-only source integration is "
+            "normalized by the modeled clean substrate power, and global positive "
+            "HgCdTe n/k log scales are fitted around the wavelength-dependent reference "
+            f"with prior sigma `{getattr(args, 'absolute_hgcdte_scale_prior_sigma_log', ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG)}`."
+            if getattr(args, "absolute_substrate_power", False)
+            else (
             "HgCdTe n/k are fitted as global wavelength-independent optical "
             f"parameters with priors centered at `{NOMINAL_HGCDTE.tolist()}`; "
             f"bounds are `{HGCDTE_LOWER.tolist()}` to `{HGCDTE_UPPER.tolist()}`."
             if getattr(args, "fit_hgcdte", False)
-            else f"HgCdTe fixed at n/k = `{NOMINAL_HGCDTE.tolist()}`."
+            else (
+                "HgCdTe n/k use global smooth log-space modulation around the "
+                f"80 K wavelength-dependent baseline at nodes `{HGCDTE_MODULATION_NODE_WAVELENGTHS_NM.tolist()}` nm; "
+                f"node prior sigma is `{args.hgcdte_modulation_prior_sigma_log}`."
+                if getattr(args, "fit_hgcdte_modulation", False)
+                else (
+                "HgCdTe uses the fixed 80 K wavelength-dependent optical-constant "
+                f"sensitivity model from `{HGCDTE_OPTICAL_CONSTANTS_SOURCE}`."
+                if getattr(args, "use_hgcdte_optical_constants", False)
+                else f"HgCdTe fixed at n/k = `{NOMINAL_HGCDTE.tolist()}`."
+                )
+            )
+            )
+        ),
+        (
+            "Finite HgCdTe detector layer: fixed wavelength-dependent HgCdTe n/k, "
+            f"thickness reference `{getattr(args, 'detector_thickness_nm', DETECTOR_THICKNESS_DEFAULT_NM)}` nm, "
+            f"backside index `{getattr(args, 'detector_backside_index', 1.0)}`."
+            if getattr(args, "finite_hgcdte_detector", False)
+            or getattr(args, "fit_detector_thickness", False)
+            else "HgCdTe is used as the semi-infinite terminal boundary."
+        ),
+        (
+            "Detector thickness is fit independently per SCA/tile in log space with "
+            f"prior sigma `{getattr(args, 'detector_thickness_prior_sigma_log', DETECTOR_THICKNESS_PRIOR_SIGMA_LOG)}` "
+            "and neighboring-tile smoothness."
+            if getattr(args, "fit_detector_thickness", False)
+            else "Detector thickness is fixed for the finite-layer model."
         ),
         (
             "Conductive interlayer: global Drude-like film between the AR stack and HgCdTe; "
@@ -2411,15 +5295,67 @@ def write_outputs(
             else "QE uses the archived ground-measured wavelength weighting without a fitted RBF correction."
         ),
         (
+            "SED spectral weighting: published relative energy output converted to photon rate."
+            if args.sed_weighting == "photon"
+            else "SED spectral weighting: table values treated as photon-rate weights."
+        ),
+        (
             "Ice uses the published 100 K amorphous-H2O optical constants with "
-            f"wavelength-dependent n and k from `{ASW_OPTICAL_CONSTANTS_URL}`."
+            f"wavelength-dependent n and k from `{args.ice_optical_constants_source}`."
             if getattr(args, "use_asw_optical_constants", False)
             else "Ice is modeled as a lossless constant-index layer with n=1.25 and k=0."
         ),
         (
-            "ACM throughput steps are fitted independently for each LED."
-            if getattr(args, "led_dependent_acm_step", False)
-            else "One common ACM throughput step is fitted across all LEDs."
+            (
+                "Optical response is averaged over a two-dimensional uniformly "
+                "illuminated circular pupil with marginal-ray half-angle "
+                f"`{getattr(args, 'incidence_pupil_half_angle_deg', 0.0)}` degrees; "
+                + (
+                    f"chief-ray tilts are loaded from `{args.incidence_chief_ray_map}`."
+                    if getattr(args, "incidence_chief_ray_map", None) is not None
+                    else "the global chief-ray x/y tilts are "
+                    f"`{getattr(args, 'incidence_chief_ray_x_deg', 0.0)}` / "
+                    f"`{getattr(args, 'incidence_chief_ray_y_deg', 0.0)}` degrees."
+                )
+            )
+            if (
+                getattr(args, "incidence_pupil_half_angle_deg", 0.0) != 0.0
+                or getattr(args, "incidence_chief_ray_x_deg", 0.0) != 0.0
+                or getattr(args, "incidence_chief_ray_y_deg", 0.0) != 0.0
+                or getattr(args, "incidence_chief_ray_map", None) is not None
+            )
+            else (
+                "Optical response is averaged over an unpolarized TE/TM cone "
+                "uniform in solid angle with half-angle "
+                f"`{args.incidence_cone_half_angle_deg}` degrees."
+                if getattr(args, "incidence_cone_half_angle_deg", 0.0) != 0.0
+                else "Optical response uses normal incidence."
+            )
+        ),
+        (
+            (
+                "Fixed shared ACM throughput correction applied from the correction file; "
+                "the ACM step is not fitted."
+                if getattr(args, "fixed_corrections", None) is not None
+                else (
+                    f"ACM throughput steps are fitted independently for each LED with log prior sigma `{args.acm_step_prior_sigma}`."
+                    if getattr(args, "led_dependent_acm_step", False)
+                    else f"One common ACM throughput step is fitted across all LEDs with log prior sigma `{args.acm_step_prior_sigma}`."
+                )
+            )
+        ),
+        (
+            (
+                "Fixed shared late ACM throughput correction applied from the correction file; "
+                "the late ACM step is not fitted."
+                if getattr(args, "fixed_corrections", None) is not None
+                else (
+                    "A second common ACM throughput step is fitted at the final observed repeat epoch "
+                    f"with log prior sigma `{args.late_acm_step_prior_sigma}`."
+                    if getattr(args, "fit_late_acm_step", False)
+                    else "No additional final-epoch ACM step is fitted."
+                )
+            )
         ),
         (
             f"Likelihood pixel weight before selected-tile averaging: `{args.likelihood_weight}` "
@@ -2429,6 +5365,18 @@ def write_outputs(
         ),
         f"AR population-mean prior sigma in unconstrained space: `{args.ar_mean_prior_sigma}`.",
         (
+            "Global AR mean is sampled in standard-normal coordinates with the same "
+            "raw-space prior."
+            if getattr(args, "standardize_ar_mean", False)
+            else "Global AR mean is sampled directly in raw coordinates."
+        ),
+        (
+            "AR thickness/index coordinates use an orthogonal full-rank rotation; "
+            "the standardized Normal prior and all parameter degrees of freedom are unchanged."
+            if getattr(args, "rotate_ar_coordinates", False)
+            else "AR thickness/index coordinates use their standard ordering."
+        ),
+        (
             (
                 "Fully non-parametric node-rate prior: centered at the default "
                 f"`{trajectory_rate_per_scale(data['days']) * TRAJECTORY_SCALE_INIT:.8g}` nm/day."
@@ -2437,6 +5385,14 @@ def write_outputs(
                 f"`{args.trajectory_rate_prior_mean_nm_day}` nm/day."
             )
             if getattr(args, "fully_np_trajectory", False)
+            else (
+                "Constant base-rate prior: centered at the default "
+                f"`{trajectory_rate_per_scale(data['days']) * TRAJECTORY_SCALE_INIT:.8g}` nm/day."
+                if args.trajectory_rate_prior_mean_nm_day is None
+                else "Constant base-rate prior: centered at "
+                f"`{args.trajectory_rate_prior_mean_nm_day}` nm/day."
+            )
+            if getattr(args, "constant_rate_modulation", False)
             else (
                 "Unmodulated initial instantaneous-rate prior: centered at the default "
                 f"`{trajectory_rate_per_scale(data['days']) * TRAJECTORY_SCALE_INIT:.8g}` nm/day."
@@ -2448,15 +5404,40 @@ def write_outputs(
         (
             f"Initial ice thickness is fixed at `{args.fixed_initial_thickness_nm}` nm."
             if getattr(args, "fixed_initial_thickness_nm", None) is not None
-            else "Initial ice thickness is fitted with a truncated Normal prior over 0 to 50 nm."
+            else (
+                "Initial ice thickness is fitted with a truncated Normal prior centered at "
+                f"`{getattr(args, 'initial_thickness_prior_mean_nm', INITIAL_THICKNESS_PRIOR_MEAN_NM)}` nm "
+                f"with sigma `{getattr(args, 'initial_thickness_prior_sigma_nm', INITIAL_THICKNESS_PRIOR_SIGMA_NM)}` nm over 0 to 50 nm."
+            )
+        ),
+        (
+            "Initial thickness is sampled in an unconstrained central-pivot coordinate; "
+            "the exact truncated prior is applied to the recovered initial thickness."
+            if getattr(args, "pivot_initial_thickness", False)
+            else "Initial thickness is sampled directly in its constrained coordinate."
         ),
         f"Trajectory-rate prior log-scale sigma: `{args.trajectory_rate_prior_sigma_log}`.",
+        (
+            "Fully non-parametric log-rate nodes are sampled in exact prior-whitened "
+            "coordinates; all node degrees of freedom remain free."
+            if getattr(args, "whiten_np_trajectory", False)
+            else "Fully non-parametric log-rate nodes are sampled directly."
+        ),
         "The primary trajectory quantity is a positive instantaneous rate; ice thickness is its time integral.",
         (
-            "Fully non-parametric rates are log-linearly interpolated between repeat nodes, "
+            "Fully non-parametric rates are log-linearly interpolated between observation-epoch nodes, "
             "so the positive accumulation trajectory remains monotonic."
             if getattr(args, "fully_np_trajectory", False)
-            else "NP node values are log-linearly interpolated rate multipliers, so the rate is continuous at repeat nodes."
+            else (
+                "A constant positive base rate is log-linearly modulated between observation-epoch nodes; "
+                + (
+                    "generalized relative-entropy regularization is applied."
+                    if args.constant_rate_smoothness_weight == 0.0
+                    else "generalized relative-entropy and time-aware log-rate smoothness regularization are applied."
+                )
+                if getattr(args, "constant_rate_modulation", False)
+                else "NP node values are log-linearly interpolated rate multipliers, so the rate is continuous at observation-epoch nodes."
+            )
         ),
         (
             f"MAP-only trajectory-rate start: `{args.map_trajectory_rate_nm_day}` nm/day."
@@ -2469,30 +5450,60 @@ def write_outputs(
             else f"Warmup/samples/chains: `{args.warmup}/{args.samples}/{args.chains}`."
         ),
         (
-            f"NUTS dense mass matrix: `{args.dense_mass}`; maximum tree depth: `{args.max_tree_depth}`."
+            f"NUTS dense mass matrix: `{args.dense_mass}`; global dense mass block: "
+            f"`{getattr(args, 'dense_mass_global', False)}`; maximum tree depth: "
+            f"`{args.max_tree_depth}`."
             if not getattr(args, "map_only", False)
             else "NUTS settings were not used."
+        ),
+        (
+            f"NUTS starts use the complete MAP sample-site state with per-chain "
+            f"unconstrained jitter sigma `{getattr(args, 'nuts_init_jitter', NUTS_INIT_JITTER)}`; "
+            f"a boundary-valued initial thickness is nudged to `{args.nuts_initial_thickness_nm}` nm "
+            "only for initialization."
+            if not getattr(args, "map_only", False)
+            else "NUTS initialization was not used."
         ),
         (
             f"Wavelength grid: exact SED nodes / stride `{args.wavelength_stride}`."
             if args.wavelength_step_nm is None
             else f"Wavelength grid step/stride: `{args.wavelength_step_nm}` nm / `{args.wavelength_stride}`."
         ),
+        f"Prediction likelihood row chunk size: `{data.get('prediction_row_chunk_size', PREDICTION_ROW_CHUNK_SIZE)}`.",
         (
             f"MAP optimizer/maximum iterations: `{args.map_optimizer}` / `{args.map_steps}`; "
-            f"L-BFGS-B tolerance: `{args.map_tolerance}`."
+            f"parameter scaling: `{args.map_parameter_scaling}`; "
+            f"projected-gradient tolerance: `{args.map_tolerance}`; "
+            f"function-reduction tolerance: `{args.map_ftol}`."
             if args.map_optimizer == "lbfgs"
-            else f"MAP optimizer/steps/learning rate: `{args.map_optimizer}` / "
-            f"`{args.map_steps}` / `{args.map_learning_rate}`."
+            else (
+                f"MAP optimizer/maximum iterations: `{args.map_optimizer}` / `{args.map_steps}`; "
+                f"projected-gradient tolerance: `{args.map_tolerance}`; "
+                "JAXopt line-search stopping is used."
+                if args.map_optimizer == "jax-lbfgsb"
+                else f"MAP optimizer/steps/learning rate: `{args.map_optimizer}` / "
+                f"`{args.map_steps}` / `{args.map_learning_rate}`."
+            )
         ),
         f"Ice trajectory: `{trajectory_label}`.",
     ]
-    if getattr(args, "tile_rate_variation", False):
+    if getattr(args, "tile_rate_variation", False) or getattr(
+        args, "tile_rate_trajectory_variation", False
+    ):
         lines.extend(
             [
                 "Per-SCA/tile instantaneous-rate variation is enabled.",
                 f"Tile log-rate prior sigma: `{args.tile_rate_prior_sigma_log}`.",
                 f"Neighboring-tile log-rate sigma: `{args.tile_rate_neighbor_sigma_log}`; selected adjacency edges per SCA: `{len(tile_neighbor_edges(data))}`.",
+            ]
+        )
+    if getattr(args, "tile_rate_trajectory_variation", False):
+        lines.extend(
+            [
+                "Tile-specific log-rate deviations are fit at every observation epoch, "
+                "with zero-mean tile offsets at each node.",
+                "Tile rate curves use time-curvature regularization with weight "
+                f"`{args.tile_rate_trajectory_smoothness_weight}`.",
             ]
         )
     if args.ar_prior_from_map_start:
@@ -2502,6 +5513,9 @@ def write_outputs(
         lines.append(
             f"Reduced MAP initialization tile count per SCA: `{map_init_max_tiles}`."
         )
+    map_init_from = getattr(args, "map_init_from", None)
+    if map_init_from is not None:
+        lines.append(f"MAP sample sites warm-started from `{map_init_from}`.")
     map_design_wavelength_nm = getattr(args, "map_design_wavelength_nm", None)
     if map_design_wavelength_nm is not None:
         middle_layer_start = (
@@ -2568,7 +5582,19 @@ def write_outputs(
                 f"- Status: `{map_diagnostics['status']}`; message: `{map_diagnostics['message']}`.",
                 f"- Iterations/function evaluations: `{map_diagnostics['iterations']}/{map_diagnostics['function_evaluations']}`.",
                 f"- Initial/final objective: `{map_diagnostics['initial_objective']:.10g}` / `{map_diagnostics['objective']:.10g}`.",
-                f"- Final gradient infinity norm: `{map_diagnostics['gradient_norm']:.10g}`.",
+                f"- Final raw gradient infinity norm: `{map_diagnostics['gradient_norm']:.10g}`.",
+                f"- Final projected gradient infinity norm: `{map_diagnostics.get('projected_gradient_norm', map_diagnostics['gradient_norm']):.10g}`.",
+                (
+                    f"- Final scaled projected gradient infinity norm: `{map_diagnostics['scaled_projected_gradient_norm']:.10g}`."
+                    if "scaled_projected_gradient_norm" in map_diagnostics
+                    else "- Final scaled projected gradient infinity norm: `not assessed`."
+                ),
+                (
+                    f"- Function-reduction tolerance: `{map_diagnostics.get('function_tolerance', np.nan):.10g}`; "
+                    f"projected-gradient tolerance: `{args.map_tolerance:.10g}`."
+                    if args.map_optimizer == "lbfgs"
+                    else f"- Projected-gradient tolerance: `{args.map_tolerance:.10g}`; JAXopt line-search stopping was used."
+                ),
                 f"- Parameter step norm: `{map_diagnostics['parameter_step_norm']:.10g}`.",
             ]
         )
@@ -2589,6 +5615,20 @@ def write_outputs(
                 f"NP entropy/smoothness weights: `{args.np_entropy_weight}` / `{args.np_smoothness_weight}`.",
                 f"NP node multiplier limit: `{args.np_max_node_multiplier}`; first node fixed at one.",
                 "NP modulation is regularized in log-node space with generalized relative entropy and time-aware curvature.",
+            ]
+        )
+    if getattr(args, "constant_rate_modulation", False):
+        lines.extend(
+            [
+                f"Constant-rate NP entropy weight: `{args.np_entropy_weight}`.",
+                f"Constant-rate smoothness weight: `{args.constant_rate_smoothness_weight}`.",
+                f"NP node multiplier limit: `{args.np_max_node_multiplier}`; first node fixed at one.",
+                (
+                    "Constant-rate modulation uses generalized relative entropy only; "
+                    "rate smoothness regularization is disabled."
+                    if args.constant_rate_smoothness_weight == 0.0
+                    else "Constant-rate modulation uses generalized relative entropy plus time-aware log-rate smoothness."
+                ),
             ]
         )
     if getattr(args, "fully_np_trajectory", False):
@@ -2614,6 +5654,13 @@ def write_outputs(
                 ("HgCdTe absorption index", "hgcdte_k"),
             )
         )
+    if (
+        getattr(args, "finite_hgcdte_detector", False)
+        or getattr(args, "fit_detector_thickness", False)
+    ) and "detector_thickness_nm" in samples:
+        summary_quantities.append(
+            ("Detector thickness (nm)", "detector_thickness_nm")
+        )
     if getattr(args, "fit_conductive_layer", False):
         summary_quantities.extend(
             (
@@ -2633,6 +5680,30 @@ def write_outputs(
         values = np.asarray(samples[key])
         values = quantile(values)
         lines.append(f"| {label} | {values[0]:.8g} | {values[1]:.8g} | {values[2]:.8g} |")
+    if (
+        getattr(args, "early_time_scale_cutoff_day", None) is not None
+        and "early_time_scale" in samples
+    ):
+        scale_quantiles = np.percentile(
+            np.asarray(samples["early_time_scale"]), [16, 50, 84], axis=0
+        )
+        lines.extend(
+            [
+                "",
+                "### Early-time Epoch Scales",
+                "",
+                "| Repeat | Day | 16th percentile | Median | 84th percentile |",
+                "|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for index, (repeat, day) in enumerate(
+            zip(data["early_time_scale_repeat"], data["early_time_scale_days"])
+        ):
+            values = scale_quantiles[:, index]
+            lines.append(
+                f"| {int(repeat)} | {float(day):.8g} | "
+                f"{values[0]:.8g} | {values[1]:.8g} | {values[2]:.8g} |"
+            )
     if getattr(args, "fit_qe_rbf", False):
         qe_node_quantiles = np.percentile(
             np.asarray(samples["qe_rbf_modulation"]), [16, 50, 84], axis=0
@@ -2661,6 +5732,15 @@ def write_outputs(
             )
     else:
         raise ValueError("Unexpected ACM step posterior shape")
+    if "late_acm_step_log_offset" in samples:
+        late_step_percent = 100.0 * np.expm1(
+            np.asarray(samples["late_acm_step_log_offset"])
+        )
+        values = quantile(late_step_percent)
+        lines.append(
+            f"| Final-epoch ACM throughput step (%) | {values[0]:.8g} | "
+            f"{values[1]:.8g} | {values[2]:.8g} |"
+        )
     if "tile_mean_rate_nm_day" in samples:
         values = quantile(samples["tile_mean_rate_nm_day"])
         lines.append(
@@ -2699,20 +5779,30 @@ def write_outputs(
             lines.append(f"| {led} | {rms:.10g} |")
     if data["n_scas"] > 1:
         model_note = (
-            "This all-SCA fit shares one ice trajectory globally and hierarchically "
-            "shrinks tile AR thickness toward an SCA-specific population; dielectric "
-            "n/k are shared across all tiles."
-            if args.shared_ar_optical_properties
-            else "This all-SCA fit shares one ice trajectory globally and hierarchically "
-            "shrinks tile AR parameters toward an SCA-specific population."
+            "This all-SCA fit shares one ice trajectory and one complete AR parameter "
+            "vector across all selected tiles and SCAs."
+            if getattr(args, "shared_ar_parameters_across_tiles", False)
+            else (
+                "This all-SCA fit shares one ice trajectory globally and hierarchically "
+                "shrinks tile AR thickness toward an SCA-specific population; dielectric "
+                "n/k are shared across all tiles."
+                if args.shared_ar_optical_properties
+                else "This all-SCA fit shares one ice trajectory globally and hierarchically "
+                "shrinks tile AR parameters toward an SCA-specific population."
+            )
         )
     else:
         model_note = (
-            "This is a single-tile fit. The ice trajectory and all AR parameters are "
-            "directly shared by the selected tile."
-            if is_single_tile_data(data)
-            else "This is a hierarchical fit. The ice trajectory is shared globally; "
-            f"the {ar_layers} dielectric AR layer(s) vary by tile under hierarchical shrinkage."
+            "The complete AR parameter vector is shared across all selected tiles; "
+            "there is no tile-level AR variation."
+            if getattr(args, "shared_ar_parameters_across_tiles", False)
+            else (
+                "This is a single-tile fit. The ice trajectory and all AR parameters are "
+                "directly shared by the selected tile."
+                if is_single_tile_data(data)
+                else "This is a hierarchical fit. The ice trajectory is shared globally; "
+                f"the {ar_layers} dielectric AR layer(s) vary by tile under hierarchical shrinkage."
+            )
         )
     lines.extend(
         [
@@ -2811,14 +5901,99 @@ def parse_args():
         help="Share each layer's refractive and absorption indices across all tiles; vary thickness hierarchically.",
     )
     parser.add_argument(
+        "--shared-ar-parameters-across-tiles",
+        action="store_true",
+        help=(
+            "Use one identical full AR parameter vector for every selected tile, "
+            "removing tile-level AR variation."
+        ),
+    )
+    parser.add_argument(
         "--fit-ar-absorption",
         action="store_true",
         help="Fit one absorption index k per AR layer instead of fixing dielectric k to zero.",
     )
-    parser.add_argument(
+    hgcdte_group = parser.add_mutually_exclusive_group()
+    hgcdte_group.add_argument(
         "--fit-hgcdte",
         action="store_true",
         help="Fit global wavelength-independent HgCdTe n and k instead of fixing them to the nominal constants.",
+    )
+    hgcdte_group.add_argument(
+        "--use-hgcdte-optical-constants",
+        action="store_true",
+        help=(
+            "Use the fixed 80 K wavelength-dependent HgCdTe n/k sensitivity "
+            "model instead of the nominal constant boundary."
+        ),
+    )
+    hgcdte_group.add_argument(
+        "--fit-hgcdte-modulation",
+        action="store_true",
+        help=(
+            "Fit global smooth log-space n/k modulation around the fixed "
+            "wavelength-dependent HgCdTe baseline."
+        ),
+    )
+    hgcdte_group.add_argument(
+        "--absolute-substrate-power",
+        action="store_true",
+        help=(
+            "Fit the absolute SED-weighted power entering the semi-infinite HgCdTe "
+            "boundary, with global positive n/k scale nuisance parameters."
+        ),
+    )
+    parser.add_argument(
+        "--hgcdte-modulation-prior-sigma-log",
+        type=float,
+        default=HGCDTE_MODULATION_PRIOR_SIGMA_LOG,
+        help="Normal prior sigma for fitted HgCdTe n/k log modulation.",
+    )
+    parser.add_argument(
+        "--absolute-hgcdte-scale-prior-sigma-log",
+        type=float,
+        default=ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG,
+        help="Normal prior sigma for absolute-power HgCdTe log n/k scales.",
+    )
+    parser.add_argument(
+        "--finite-hgcdte-detector",
+        action="store_true",
+        help=(
+            "Propagate through a finite HgCdTe active layer and include the "
+            "fixed-index backside boundary instead of using a semi-infinite boundary."
+        ),
+    )
+    parser.add_argument(
+        "--detector-thickness-nm",
+        type=float,
+        default=DETECTOR_THICKNESS_DEFAULT_NM,
+        help="Fixed finite HgCdTe active-layer thickness in nm.",
+    )
+    parser.add_argument(
+        "--fit-detector-thickness",
+        action="store_true",
+        help=(
+            "Fit one positive log detector thickness per selected SCA/tile; "
+            "this also enables --finite-hgcdte-detector."
+        ),
+    )
+    parser.add_argument(
+        "--detector-thickness-prior-sigma-log",
+        type=float,
+        default=DETECTOR_THICKNESS_PRIOR_SIGMA_LOG,
+        help="Normal prior sigma for log finite-detector thickness.",
+    )
+    parser.add_argument(
+        "--detector-thickness-neighbor-sigma-log",
+        type=float,
+        default=DETECTOR_THICKNESS_NEIGHBOR_SIGMA_LOG,
+        help="Gaussian neighbor sigma for log finite-detector thickness differences.",
+    )
+    parser.add_argument(
+        "--detector-backside-index",
+        type=float,
+        default=1.0,
+        help="Real refractive index of the medium behind the finite HgCdTe layer.",
     )
     parser.add_argument(
         "--fit-conductive-layer",
@@ -2837,9 +6012,91 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--ice-optical-constants-source",
+        default=ASW_OPTICAL_CONSTANTS_URL,
+        help=(
+            "Local path or URL for the ice n/k table used with "
+            "--use-asw-optical-constants."
+        ),
+    )
+    parser.add_argument(
+        "--incidence-cone-half-angle-deg",
+        type=float,
+        default=0.0,
+        help=(
+            "Average the unpolarized TE/TM response over a cone uniform in "
+            "solid angle; zero retains the exact normal-incidence model."
+        ),
+    )
+    parser.add_argument(
+        "--incidence-pupil-half-angle-deg",
+        type=float,
+        default=0.0,
+        help=(
+            "Average over a uniformly illuminated circular pupil with this "
+            "marginal-ray half-angle. Roman's documented f/8 beam uses about 3.576 degrees."
+        ),
+    )
+    parser.add_argument(
+        "--incidence-chief-ray-x-deg",
+        type=float,
+        default=0.0,
+        help="Global chief-ray x tilt relative to the detector normal.",
+    )
+    parser.add_argument(
+        "--incidence-chief-ray-y-deg",
+        type=float,
+        default=0.0,
+        help="Global chief-ray y tilt relative to the detector normal.",
+    )
+    parser.add_argument(
+        "--incidence-chief-ray-map",
+        type=Path,
+        help=(
+            "CSV with detector,tile_id,chief_ray_x_deg,chief_ray_y_deg for every "
+            "selected optical row; overrides the global chief-ray tilt."
+        ),
+    )
+    acm_step_mode = parser.add_mutually_exclusive_group()
+    acm_step_mode.add_argument(
         "--led-dependent-acm-step",
         action="store_true",
-        help="Fit an independent ACM throughput step for each of the six LEDs.",
+        help="Fit an independent ACM throughput step for each LED (default).",
+    )
+    acm_step_mode.add_argument(
+        "--common-acm-step",
+        dest="led_dependent_acm_step",
+        action="store_false",
+        help="Fit one existing ACM step shared across all LEDs.",
+    )
+    parser.add_argument(
+        "--acm-step-prior-sigma",
+        type=float,
+        default=0.05,
+        help="Normal prior sigma for ACM log throughput steps.",
+    )
+    parser.add_argument(
+        "--fit-late-acm-step",
+        action="store_true",
+        help=(
+            "Fit a second ACM step, shared across LEDs, that turns on at the "
+            "final observed repeat epoch."
+        ),
+    )
+    parser.add_argument(
+        "--late-acm-step-prior-sigma",
+        type=float,
+        default=0.02,
+        help="Normal prior sigma for the final-epoch ACM log step.",
+    )
+    parser.add_argument(
+        "--fixed-corrections",
+        type=Path,
+        default=None,
+        help=(
+            "Apply a fixed common gain correction and fixed shared ACM steps from "
+            "this correction CSV; ACM and early-time gain terms are then not fitted."
+        ),
     )
     parser.add_argument(
         "--fit-qe-rbf",
@@ -2873,7 +6130,44 @@ def parse_args():
         default=None,
         help="Tiles per SCA to fit; default is all available tiles.",
     )
+    parser.add_argument(
+        "--min-observation-day",
+        type=float,
+        default=None,
+        help=(
+            "Discard complete observation groups before this day; the first "
+            "retained group becomes the reference time."
+        ),
+    )
+    parser.add_argument(
+        "--early-time-scale-cutoff-day",
+        type=float,
+        default=None,
+        help=(
+            "Fit one positive relative raw-count scale per repeat epoch, shared "
+            "across LEDs, for epochs at or before this day; the first epoch is "
+            "the unit reference."
+        ),
+    )
+    parser.add_argument(
+        "--early-time-scale-prior-sigma",
+        type=float,
+        default=EARLY_TIME_SCALE_PRIOR_SIGMA,
+        help=(
+            "Normal prior sigma for each early-time log-relative count scale "
+            "(default: 0.05)."
+        ),
+    )
     parser.add_argument("--sed-mode", choices=("signed", "clipped", "core"), default="core")
+    parser.add_argument(
+        "--sed-weighting",
+        choices=("photon", "energy"),
+        default="photon",
+        help=(
+            "Use wavelength photon weighting for the published relative energy SED, "
+            "or treat SED values as photon-rate weights for a sensitivity check."
+        ),
+    )
     parser.add_argument(
         "--wavelength-stride",
         type=int,
@@ -2885,6 +6179,15 @@ def parse_args():
         type=float,
         default=None,
         help="Use a uniform base grid at this spacing; omit to evaluate exact SED nodes.",
+    )
+    parser.add_argument(
+        "--prediction-row-chunk-size",
+        type=int,
+        default=PREDICTION_ROW_CHUNK_SIZE,
+        help=(
+            "Number of SCA/tile rows evaluated per likelihood scan chunk; smaller "
+            "values reduce JAX compilation memory for large hierarchical fits."
+        ),
     )
     parser.add_argument("--log-noise-sigma", type=float, default=0.005)
     parser.add_argument(
@@ -2910,12 +6213,70 @@ def parse_args():
         help="Fix ice thickness at the first observed/reference time instead of fitting it.",
     )
     parser.add_argument(
+        "--initial-thickness-prior-mean-nm",
+        type=float,
+        default=INITIAL_THICKNESS_PRIOR_MEAN_NM,
+        help="Truncated-Normal prior mean for fitted initial ice thickness in nm.",
+    )
+    parser.add_argument(
+        "--initial-thickness-prior-sigma-nm",
+        type=float,
+        default=INITIAL_THICKNESS_PRIOR_SIGMA_NM,
+        help="Truncated-Normal prior sigma for fitted initial ice thickness in nm.",
+    )
+    parser.add_argument(
+        "--initial-thickness-init-nm",
+        type=float,
+        default=INITIAL_THICKNESS_INIT_NM,
+        help="MAP/sampler initialization for fitted initial ice thickness in nm.",
+    )
+    parser.add_argument(
+        "--nuts-initial-thickness-nm",
+        type=float,
+        default=NUTS_INITIAL_THICKNESS_INIT_NM,
+        help=(
+            "Initial thickness used only when NUTS has no MAP warm start; it does "
+            "not change the fitted prior."
+        ),
+    )
+    parser.add_argument(
+        "--nuts-init-jitter",
+        type=float,
+        default=NUTS_INIT_JITTER,
+        help=(
+            "Per-chain standard deviation for unconstrained NUTS initialization "
+            "around the complete MAP warm start; zero uses the exact MAP state."
+        ),
+    )
+    parser.add_argument(
+        "--pivot-initial-thickness",
+        action="store_true",
+        help=(
+            "Sample an unconstrained thickness coordinate at the central trajectory "
+            "pivot while retaining the exact truncated prior on initial thickness."
+        ),
+    )
+    parser.add_argument(
         "--tile-rate-variation",
         action="store_true",
         help=(
             "Fit a log-rate offset for each selected SCA/tile, with neighboring "
             "tile offsets regularized toward one another."
         ),
+    )
+    parser.add_argument(
+        "--tile-rate-trajectory-variation",
+        action="store_true",
+        help=(
+            "Fit time-varying log-rate deviations at each observation epoch for every "
+            "tile, centered across tiles and regularized in time and over neighbors."
+        ),
+    )
+    parser.add_argument(
+        "--tile-rate-trajectory-smoothness-weight",
+        type=float,
+        default=0.01,
+        help="Curvature regularization weight for tile-specific log-rate trajectories.",
     )
     parser.add_argument(
         "--tile-rate-prior-sigma-log",
@@ -2946,6 +6307,22 @@ def parse_args():
         help="Normal prior sigma for global AR raw parameters; larger values relax the AR reference center.",
     )
     parser.add_argument(
+        "--standardize-ar-mean",
+        action="store_true",
+        help=(
+            "Sample global AR mean coordinates as standard-normal latents while "
+            "retaining the same raw-space prior and physical bounds."
+        ),
+    )
+    parser.add_argument(
+        "--rotate-ar-coordinates",
+        action="store_true",
+        help=(
+            "Apply an orthogonal thickness/index rotation to standardized AR "
+            "coordinates while retaining the full parameter dimension and prior."
+        ),
+    )
+    parser.add_argument(
         "--ar-prior-from-map-start",
         action="store_true",
         help="Center the global AR prior on the physical MAP initialization instead of the historical reference.",
@@ -2953,6 +6330,11 @@ def parse_args():
     parser.add_argument("--warmup", type=int, default=300)
     parser.add_argument("--samples", type=int, default=500)
     parser.add_argument("--chains", type=int, default=2)
+    parser.add_argument(
+        "--no-progress-bar",
+        action="store_true",
+        help="Disable NumPyro's live sampler progress display.",
+    )
     chain_group = parser.add_mutually_exclusive_group()
     chain_group.add_argument(
         "--parallel-chains",
@@ -2973,6 +6355,14 @@ def parse_args():
         help="Adapt a dense NUTS mass matrix; useful for the correlated single-tile optical fit.",
     )
     parser.add_argument(
+        "--dense-mass-global",
+        action="store_true",
+        help=(
+            "Adapt a dense mass matrix only for global latent sites and retain diagonal "
+            "mass adaptation for tile-local sites."
+        ),
+    )
+    parser.add_argument(
         "--map-steps",
         type=int,
         default=0,
@@ -2985,15 +6375,36 @@ def parse_args():
     )
     parser.add_argument(
         "--map-optimizer",
-        choices=("lbfgs", "adam"),
+        choices=("jax-lbfgsb", "lbfgs", "adam"),
         default="lbfgs",
-        help="Optimizer for --map-steps; L-BFGS-B is the deterministic default.",
+        help=(
+            "Optimizer for --map-steps; SciPy L-BFGS-B is the default, with "
+            "JAX-native bounded L-BFGS-B and Adam available as alternatives."
+        ),
     )
     parser.add_argument(
         "--map-tolerance",
         type=float,
         default=1.0e-9,
-        help="Function/gradient tolerance for the L-BFGS-B MAP optimizer.",
+        help="Projected-gradient tolerance for the L-BFGS-B MAP optimizer.",
+    )
+    parser.add_argument(
+        "--map-ftol",
+        type=float,
+        default=0.0,
+        help=(
+            "Relative function-reduction tolerance for SciPy L-BFGS-B; zero "
+            "disables this early stopping criterion."
+        ),
+    )
+    parser.add_argument(
+        "--map-parameter-scaling",
+        choices=("prior", "none"),
+        default="prior",
+        help=(
+            "Optimize SciPy L-BFGS-B in prior-width standardized coordinates "
+            "(default), or retain raw sample-site coordinates."
+        ),
     )
     parser.add_argument(
         "--map-learning-rate",
@@ -3018,6 +6429,15 @@ def parse_args():
         help=(
             "Run the MAP initializer first on this many tiles per SCA, then "
             "transfer compatible sites to the full selected-tile fit."
+        ),
+    )
+    parser.add_argument(
+        "--map-init-from",
+        type=Path,
+        default=None,
+        help=(
+            "Warm-start MAP sample sites from a compatible map-only posterior_samples.npz "
+            "or its output directory; tile-statistics fingerprints must match."
         ),
     )
     parser.add_argument(
@@ -3062,15 +6482,31 @@ def parse_args():
     trajectory_model_group.add_argument(
         "--np-modulation",
         action="store_true",
-        help="Use entropy-regularized repeat-node modulation of the square-root rate.",
+        help="Use entropy-regularized observation-epoch-node modulation of the square-root rate.",
+    )
+    trajectory_model_group.add_argument(
+        "--constant-rate-modulation",
+        action="store_true",
+        help=(
+            "Use a constant positive rate with observation-epoch-node modulation; "
+            "apply relative-entropy regularization without rate smoothness."
+        ),
     )
     trajectory_model_group.add_argument(
         "--fully-np-trajectory",
         action="store_true",
         help=(
-            "Fit a positive instantaneous rate independently at every repeat node, "
+            "Fit a positive instantaneous rate independently at every observation-epoch node, "
             "with the existing curvature smoothness regularization, instead of using "
-            "the square-root trajectory."
+            "the square-root trajectory (enabled by default)."
+        ),
+    )
+    parser.add_argument(
+        "--whiten-np-trajectory",
+        action="store_true",
+        help=(
+            "Whiten the fully non-parametric log-rate nodes using the exact "
+            "independent-plus-curvature Gaussian prior; all node degrees of freedom remain free."
         ),
     )
     parser.add_argument("--np-entropy-weight", type=float, default=NP_ENTROPY_WEIGHT)
@@ -3080,16 +6516,42 @@ def parse_args():
         default=NP_SMOOTHNESS_WEIGHT,
     )
     parser.add_argument(
+        "--constant-rate-smoothness-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional time-aware log-rate smoothness weight for "
+            "--constant-rate-modulation; zero keeps entropy-only regularization."
+        ),
+    )
+    parser.add_argument(
         "--np-max-node-multiplier",
         type=float,
         default=NP_MAX_NODE_MULTIPLIER,
     )
-    parser.set_defaults(all_sca=None)
+    parser.set_defaults(
+        all_sca=None,
+        fully_np_trajectory=True,
+        led_dependent_acm_step=True,
+    )
     return parser.parse_args()
 
 
 def main():
+    run_start = time.perf_counter()
     args = parse_args()
+    if args.absolute_substrate_power:
+        args.use_hgcdte_optical_constants = True
+    if args.np_modulation or args.constant_rate_modulation:
+        args.fully_np_trajectory = False
+    if args.whiten_np_trajectory and not args.fully_np_trajectory:
+        raise ValueError("--whiten-np-trajectory requires --fully-np-trajectory")
+    if args.pivot_initial_thickness and not args.fully_np_trajectory:
+        raise ValueError("--pivot-initial-thickness requires --fully-np-trajectory")
+    if args.rotate_ar_coordinates and not args.standardize_ar_mean:
+        raise ValueError("--rotate-ar-coordinates requires --standardize-ar-mean")
+    if args.dense_mass and args.dense_mass_global:
+        raise ValueError("--dense-mass and --dense-mass-global are mutually exclusive")
     (
         args.qe_rbf_node_wavelengths_nm,
         args.qe_rbf_width_nm,
@@ -3105,6 +6567,57 @@ def main():
         raise ValueError("Noise sigma and an explicit likelihood weight must be positive")
     if args.ar_mean_prior_sigma <= 0.0:
         raise ValueError("ar-mean-prior-sigma must be positive")
+    if (
+        args.hgcdte_modulation_prior_sigma_log <= 0.0
+        or not np.isfinite(args.hgcdte_modulation_prior_sigma_log)
+    ):
+        raise ValueError(
+            "hgcdte-modulation-prior-sigma-log must be positive and finite"
+        )
+    if (
+        args.absolute_hgcdte_scale_prior_sigma_log <= 0.0
+        or not np.isfinite(args.absolute_hgcdte_scale_prior_sigma_log)
+    ):
+        raise ValueError(
+            "absolute-hgcdte-scale-prior-sigma-log must be positive and finite"
+        )
+    if not np.isfinite(args.detector_thickness_nm) or args.detector_thickness_nm <= 0.0:
+        raise ValueError("detector-thickness-nm must be positive and finite")
+    if (
+        not np.isfinite(args.detector_thickness_prior_sigma_log)
+        or args.detector_thickness_prior_sigma_log <= 0.0
+    ):
+        raise ValueError(
+            "detector-thickness-prior-sigma-log must be positive and finite"
+        )
+    if (
+        not np.isfinite(args.detector_thickness_neighbor_sigma_log)
+        or args.detector_thickness_neighbor_sigma_log <= 0.0
+    ):
+        raise ValueError(
+            "detector-thickness-neighbor-sigma-log must be positive and finite"
+        )
+    if not np.isfinite(args.detector_backside_index) or args.detector_backside_index <= 0.0:
+        raise ValueError("detector-backside-index must be positive and finite")
+    if (args.finite_hgcdte_detector or args.fit_detector_thickness) and args.fit_hgcdte_modulation:
+        raise ValueError(
+            "Finite HgCdTe detectors do not support --fit-hgcdte-modulation"
+        )
+    if args.absolute_substrate_power and (
+        args.finite_hgcdte_detector
+        or args.fit_detector_thickness
+        or args.fit_qe_rbf
+    ):
+        raise ValueError(
+            "Absolute substrate power requires a semi-infinite detector and no QE RBF"
+        )
+    if args.acm_step_prior_sigma <= 0.0 or not np.isfinite(args.acm_step_prior_sigma):
+        raise ValueError("acm-step-prior-sigma must be positive and finite")
+    if (
+        not np.isfinite(args.late_acm_step_prior_sigma)
+        or args.late_acm_step_prior_sigma <= 0.0
+    ):
+        raise ValueError("late-acm-step-prior-sigma must be positive and finite")
     if args.trajectory_rate_prior_mean_nm_day is not None and (
         not np.isfinite(args.trajectory_rate_prior_mean_nm_day)
         or args.trajectory_rate_prior_mean_nm_day <= 0.0
@@ -3116,10 +6629,54 @@ def main():
         raise ValueError("trajectory-rate-prior-sigma-log must be positive and finite")
     if args.fixed_initial_thickness_nm is not None and (
         not np.isfinite(args.fixed_initial_thickness_nm)
-        or args.fixed_initial_thickness_nm < 0.0
-        or args.fixed_initial_thickness_nm > 50.0
+        or args.fixed_initial_thickness_nm < INITIAL_THICKNESS_PRIOR_LOW_NM
+        or args.fixed_initial_thickness_nm > INITIAL_THICKNESS_PRIOR_HIGH_NM
     ):
         raise ValueError("fixed-initial-thickness-nm must be between 0 and 50")
+    if (
+        not np.isfinite(args.initial_thickness_prior_mean_nm)
+        or args.initial_thickness_prior_mean_nm < INITIAL_THICKNESS_PRIOR_LOW_NM
+        or args.initial_thickness_prior_mean_nm > INITIAL_THICKNESS_PRIOR_HIGH_NM
+    ):
+        raise ValueError("initial-thickness-prior-mean-nm must be between 0 and 50")
+    if (
+        not np.isfinite(args.initial_thickness_prior_sigma_nm)
+        or args.initial_thickness_prior_sigma_nm <= 0.0
+    ):
+        raise ValueError("initial-thickness-prior-sigma-nm must be positive and finite")
+    if (
+        not np.isfinite(args.initial_thickness_init_nm)
+        or args.initial_thickness_init_nm < INITIAL_THICKNESS_PRIOR_LOW_NM
+        or args.initial_thickness_init_nm > INITIAL_THICKNESS_PRIOR_HIGH_NM
+    ):
+        raise ValueError("initial-thickness-init-nm must be between 0 and 50")
+    if (
+        not np.isfinite(args.nuts_initial_thickness_nm)
+        or args.nuts_initial_thickness_nm <= INITIAL_THICKNESS_PRIOR_LOW_NM
+        or args.nuts_initial_thickness_nm >= INITIAL_THICKNESS_PRIOR_HIGH_NM
+    ):
+        raise ValueError("nuts-initial-thickness-nm must be strictly between 0 and 50")
+    if not np.isfinite(args.nuts_init_jitter) or args.nuts_init_jitter < 0.0:
+        raise ValueError("nuts-init-jitter must be finite and non-negative")
+    if args.min_observation_day is not None and (
+        not np.isfinite(args.min_observation_day)
+        or args.min_observation_day < 0.0
+    ):
+        raise ValueError("min-observation-day must be finite and non-negative")
+    if args.early_time_scale_cutoff_day is not None and (
+        not np.isfinite(args.early_time_scale_cutoff_day)
+        or args.early_time_scale_cutoff_day <= 0.0
+    ):
+        raise ValueError("early-time-scale-cutoff-day must be positive and finite")
+    if args.fixed_corrections is not None and args.early_time_scale_cutoff_day is not None:
+        raise ValueError(
+            "--fixed-corrections cannot be combined with --early-time-scale-cutoff-day"
+        )
+    if (
+        not np.isfinite(args.early_time_scale_prior_sigma)
+        or args.early_time_scale_prior_sigma <= 0.0
+    ):
+        raise ValueError("early-time-scale-prior-sigma must be positive and finite")
     if args.tile_rate_prior_sigma_log <= 0.0 or not np.isfinite(
         args.tile_rate_prior_sigma_log
     ):
@@ -3134,8 +6691,17 @@ def main():
         raise ValueError("MAP steps must be non-negative and its learning rate must be positive")
     if args.map_tolerance <= 0.0 or not np.isfinite(args.map_tolerance):
         raise ValueError("map-tolerance must be positive and finite")
+    if args.map_ftol < 0.0 or not np.isfinite(args.map_ftol):
+        raise ValueError("map-ftol must be finite and non-negative")
     if args.map_only and args.map_steps < 1:
         raise ValueError("--map-only requires --map-steps")
+    if args.map_optimizer != "lbfgs" and args.map_parameter_scaling != "none":
+        raise ValueError(
+            "Prior-width parameter scaling currently requires --map-optimizer lbfgs; "
+            "use --map-parameter-scaling none with other optimizers"
+        )
+    if args.map_init_from is not None and args.map_init_max_tiles is not None:
+        raise ValueError("--map-init-from cannot be combined with --map-init-max-tiles")
     if args.map_trajectory_rate_nm_day is not None and (
         not np.isfinite(args.map_trajectory_rate_nm_day)
         or args.map_trajectory_rate_nm_day <= 0.0
@@ -3155,7 +6721,28 @@ def main():
         not np.isfinite(args.wavelength_step_nm) or args.wavelength_step_nm <= 0.0
     ):
         raise ValueError("wavelength-step-nm must be positive and finite")
-    if args.np_entropy_weight < 0.0 or args.np_smoothness_weight < 0.0:
+    if args.prediction_row_chunk_size < 1:
+        raise ValueError("prediction-row-chunk-size must be positive")
+    incidence_cone_quadrature(args.incidence_cone_half_angle_deg)
+    incidence_pupil_quadrature(args.incidence_pupil_half_angle_deg)
+    if args.incidence_cone_half_angle_deg and (
+        args.incidence_pupil_half_angle_deg
+        or args.incidence_chief_ray_x_deg
+        or args.incidence_chief_ray_y_deg
+        or args.incidence_chief_ray_map is not None
+    ):
+        raise ValueError(
+            "--incidence-cone-half-angle-deg cannot be combined with the 2D pupil geometry"
+        )
+    incidence_pupil_ray_sines(
+        args.incidence_pupil_half_angle_deg,
+        [[args.incidence_chief_ray_x_deg, args.incidence_chief_ray_y_deg]],
+    )
+    if (
+        args.np_entropy_weight < 0.0
+        or args.np_smoothness_weight < 0.0
+        or args.constant_rate_smoothness_weight < 0.0
+    ):
         raise ValueError("NP regularization weights must be non-negative")
     if args.np_modulation and args.np_max_node_multiplier <= 1.0:
         raise ValueError("np-max-node-multiplier must be greater than one")
@@ -3194,7 +6781,28 @@ def main():
         args.output_dir = args.output_dir.with_name(
             f"{args.output_dir.name}_ar{args.ar_layers}layer"
         )
-    data = load_tile_statistics(statistics_path, args.max_tiles)
+    data = load_tile_statistics(
+        statistics_path,
+        args.max_tiles,
+        min_observation_day=args.min_observation_day,
+    )
+    data["prediction_row_chunk_size"] = args.prediction_row_chunk_size
+    if args.fixed_corrections is not None:
+        data = apply_fixed_corrections(data, args.fixed_corrections)
+    incidence_chief_ray_tilts_deg = load_incidence_chief_ray_tilts(
+        args.incidence_chief_ray_map,
+        data,
+        (args.incidence_chief_ray_x_deg, args.incidence_chief_ray_y_deg),
+    )
+    early_time_configuration = early_time_scale_configuration(
+        data, args.early_time_scale_cutoff_day
+    )
+    if early_time_configuration is not None:
+        data["early_time_scale_index"] = early_time_configuration[
+            "observation_scale_index"
+        ]
+        data["early_time_scale_repeat"] = early_time_configuration["repeat"]
+        data["early_time_scale_days"] = early_time_configuration["days"]
     args.likelihood_weight_automatic = args.likelihood_weight is None
     if args.likelihood_weight_automatic:
         args.likelihood_weight = default_likelihood_weight(data["counts"])
@@ -3204,12 +6812,24 @@ def main():
         args.wavelength_stride,
         data["sca_names"],
         args.wavelength_step_nm,
-        ASW_OPTICAL_CONSTANTS_URL if args.use_asw_optical_constants else None,
+        args.ice_optical_constants_source if args.use_asw_optical_constants else None,
+        args.use_hgcdte_optical_constants or args.fit_hgcdte_modulation,
+        sed_weighting=args.sed_weighting,
+        absolute_substrate_power=args.absolute_substrate_power,
     )
     data["qe_columns"] = context["qe_columns"]
     initial_values = initial_values_for_data(
         data, args, ar_reference, ar_lower, ar_upper
     )
+    if args.map_init_from is not None:
+        initial_values = load_map_warm_start(
+            args.map_init_from,
+            initial_values,
+            data,
+            value_converters=reparameterized_map_value_converters(
+                data, args, ar_reference, ar_lower, ar_upper
+            ),
+        )
     ar_prior_reference = (
         map_start_reference(args, ar_reference, ar_lower, ar_upper)
         if args.ar_prior_from_map_start
@@ -3224,29 +6844,69 @@ def main():
         ar_prior_reference=ar_prior_reference,
         ar_layers=args.ar_layers,
         np_modulation=args.np_modulation,
+        constant_rate_modulation=args.constant_rate_modulation,
+        constant_rate_smoothness_weight=args.constant_rate_smoothness_weight,
         fully_np_trajectory=args.fully_np_trajectory,
+        standardize_ar_mean=args.standardize_ar_mean,
+        rotate_ar_coordinates=args.rotate_ar_coordinates,
+        whiten_np_trajectory=args.whiten_np_trajectory,
+        pivot_initial_thickness=args.pivot_initial_thickness,
         np_entropy_weight=args.np_entropy_weight,
         np_smoothness_weight=args.np_smoothness_weight,
         np_max_node_multiplier=args.np_max_node_multiplier,
         ar_sca_sigma_prior=args.ar_sca_sigma_prior,
         ar_tile_sigma_prior=args.ar_tile_sigma_prior,
         shared_ar_optical_properties=args.shared_ar_optical_properties,
+        shared_ar_parameters_across_tiles=args.shared_ar_parameters_across_tiles,
         fit_ar_absorption=args.fit_ar_absorption,
         fit_hgcdte=args.fit_hgcdte,
+        fit_hgcdte_modulation=args.fit_hgcdte_modulation,
+        hgcdte_modulation_prior_sigma_log=args.hgcdte_modulation_prior_sigma_log,
         fit_conductive_layer=args.fit_conductive_layer,
+        finite_hgcdte_detector=args.finite_hgcdte_detector,
+        detector_thickness_nm=args.detector_thickness_nm,
+        fit_detector_thickness=args.fit_detector_thickness,
+        detector_thickness_prior_sigma_log=args.detector_thickness_prior_sigma_log,
+        detector_thickness_neighbor_sigma_log=args.detector_thickness_neighbor_sigma_log,
+        detector_backside_index=args.detector_backside_index,
         fit_qe_rbf=args.fit_qe_rbf,
         qe_rbf_node_wavelengths_nm=args.qe_rbf_node_wavelengths_nm,
         qe_rbf_width_nm=args.qe_rbf_width_nm,
         qe_rbf_prior_sigma_log=args.qe_rbf_prior_sigma_log,
         use_asw_optical_constants=args.use_asw_optical_constants,
+        use_hgcdte_optical_constants=(
+            args.use_hgcdte_optical_constants or args.fit_hgcdte_modulation
+        ),
+        incidence_cone_half_angle_deg=args.incidence_cone_half_angle_deg,
+        incidence_pupil_half_angle_deg=args.incidence_pupil_half_angle_deg,
+        incidence_chief_ray_tilts_deg=incidence_chief_ray_tilts_deg,
         led_dependent_acm_step=args.led_dependent_acm_step,
+        fit_acm_step=args.fixed_corrections is None,
+        acm_step_prior_sigma=args.acm_step_prior_sigma,
+        fit_late_acm_step=(
+            args.fit_late_acm_step if args.fixed_corrections is None else False
+        ),
+        late_acm_step_prior_sigma=args.late_acm_step_prior_sigma,
         trajectory_rate_prior_mean_nm_day=args.trajectory_rate_prior_mean_nm_day,
         trajectory_rate_prior_sigma_log=args.trajectory_rate_prior_sigma_log,
         tile_rate_variation=args.tile_rate_variation,
+        tile_rate_trajectory_variation=args.tile_rate_trajectory_variation,
+        tile_rate_trajectory_smoothness_weight=(
+            args.tile_rate_trajectory_smoothness_weight
+        ),
         tile_rate_prior_sigma_log=args.tile_rate_prior_sigma_log,
         tile_rate_neighbor_sigma_log=args.tile_rate_neighbor_sigma_log,
         fixed_initial_thickness_nm=args.fixed_initial_thickness_nm,
+        initial_thickness_prior_mean_nm=args.initial_thickness_prior_mean_nm,
+        initial_thickness_prior_sigma_nm=args.initial_thickness_prior_sigma_nm,
+        early_time_cutoff_day=(
+            args.early_time_scale_cutoff_day
+            if args.fixed_corrections is None
+            else None
+        ),
+        early_time_scale_prior_sigma=args.early_time_scale_prior_sigma,
     )
+    setup_seconds = time.perf_counter() - run_start
     map_diagnostics = None
     if (
         args.map_steps
@@ -3254,7 +6914,19 @@ def main():
         and args.map_init_max_tiles < data["n_tiles"]
     ):
         reduced_data = load_tile_statistics(
-            statistics_path, max_tiles=args.map_init_max_tiles
+            statistics_path,
+            max_tiles=args.map_init_max_tiles,
+            min_observation_day=args.min_observation_day,
+        )
+        if args.fixed_corrections is not None:
+            reduced_data = apply_fixed_corrections(
+                reduced_data, args.fixed_corrections
+            )
+        reduced_data["prediction_row_chunk_size"] = args.prediction_row_chunk_size
+        reduced_incidence_chief_ray_tilts_deg = load_incidence_chief_ray_tilts(
+            args.incidence_chief_ray_map,
+            reduced_data,
+            (args.incidence_chief_ray_x_deg, args.incidence_chief_ray_y_deg),
         )
         reduced_model = build_model(
             reduced_data,
@@ -3265,34 +6937,88 @@ def main():
             ar_prior_reference=ar_prior_reference,
             ar_layers=args.ar_layers,
             np_modulation=args.np_modulation,
+            constant_rate_modulation=args.constant_rate_modulation,
+            constant_rate_smoothness_weight=args.constant_rate_smoothness_weight,
             fully_np_trajectory=args.fully_np_trajectory,
+            standardize_ar_mean=args.standardize_ar_mean,
+            rotate_ar_coordinates=args.rotate_ar_coordinates,
+            whiten_np_trajectory=args.whiten_np_trajectory,
+            pivot_initial_thickness=args.pivot_initial_thickness,
             np_entropy_weight=args.np_entropy_weight,
             np_smoothness_weight=args.np_smoothness_weight,
             np_max_node_multiplier=args.np_max_node_multiplier,
             ar_sca_sigma_prior=args.ar_sca_sigma_prior,
             ar_tile_sigma_prior=args.ar_tile_sigma_prior,
             shared_ar_optical_properties=args.shared_ar_optical_properties,
+            shared_ar_parameters_across_tiles=args.shared_ar_parameters_across_tiles,
             fit_ar_absorption=args.fit_ar_absorption,
             fit_hgcdte=args.fit_hgcdte,
+            fit_hgcdte_modulation=args.fit_hgcdte_modulation,
+            hgcdte_modulation_prior_sigma_log=args.hgcdte_modulation_prior_sigma_log,
             fit_conductive_layer=args.fit_conductive_layer,
+            finite_hgcdte_detector=args.finite_hgcdte_detector,
+            detector_thickness_nm=args.detector_thickness_nm,
+            fit_detector_thickness=args.fit_detector_thickness,
+            detector_thickness_prior_sigma_log=args.detector_thickness_prior_sigma_log,
+            detector_thickness_neighbor_sigma_log=args.detector_thickness_neighbor_sigma_log,
+            detector_backside_index=args.detector_backside_index,
             fit_qe_rbf=args.fit_qe_rbf,
             qe_rbf_node_wavelengths_nm=args.qe_rbf_node_wavelengths_nm,
             qe_rbf_width_nm=args.qe_rbf_width_nm,
             qe_rbf_prior_sigma_log=args.qe_rbf_prior_sigma_log,
             use_asw_optical_constants=args.use_asw_optical_constants,
+            use_hgcdte_optical_constants=(
+                args.use_hgcdte_optical_constants or args.fit_hgcdte_modulation
+            ),
+            incidence_cone_half_angle_deg=args.incidence_cone_half_angle_deg,
+            incidence_pupil_half_angle_deg=args.incidence_pupil_half_angle_deg,
+            incidence_chief_ray_tilts_deg=reduced_incidence_chief_ray_tilts_deg,
             led_dependent_acm_step=args.led_dependent_acm_step,
+            fit_acm_step=args.fixed_corrections is None,
+            acm_step_prior_sigma=args.acm_step_prior_sigma,
+            fit_late_acm_step=(
+                args.fit_late_acm_step if args.fixed_corrections is None else False
+            ),
+            late_acm_step_prior_sigma=args.late_acm_step_prior_sigma,
             trajectory_rate_prior_mean_nm_day=args.trajectory_rate_prior_mean_nm_day,
             trajectory_rate_prior_sigma_log=args.trajectory_rate_prior_sigma_log,
             tile_rate_variation=args.tile_rate_variation,
+            tile_rate_trajectory_variation=args.tile_rate_trajectory_variation,
+            tile_rate_trajectory_smoothness_weight=(
+                args.tile_rate_trajectory_smoothness_weight
+            ),
             tile_rate_prior_sigma_log=args.tile_rate_prior_sigma_log,
             tile_rate_neighbor_sigma_log=args.tile_rate_neighbor_sigma_log,
             fixed_initial_thickness_nm=args.fixed_initial_thickness_nm,
+            initial_thickness_prior_mean_nm=args.initial_thickness_prior_mean_nm,
+            initial_thickness_prior_sigma_nm=args.initial_thickness_prior_sigma_nm,
+            early_time_cutoff_day=(
+                args.early_time_scale_cutoff_day
+                if args.fixed_corrections is None
+                else None
+            ),
+            early_time_scale_prior_sigma=args.early_time_scale_prior_sigma,
         )
         reduced_initial_values = initial_values_for_data(
             reduced_data, args, ar_reference, ar_lower, ar_upper
         )
         if args.map_optimizer == "lbfgs":
+            reduced_scales = (
+                map_parameter_scale_values(reduced_initial_values, args)
+                if args.map_parameter_scaling == "prior"
+                else None
+            )
             reduced_map_values, _ = run_map_optimization(
+                reduced_model,
+                reduced_initial_values,
+                jax,
+                args.map_steps,
+                args.map_tolerance,
+                args.map_ftol,
+                parameter_scales=reduced_scales,
+            )
+        elif args.map_optimizer == "jax-lbfgsb":
+            reduced_map_values, _ = run_jax_map_optimization(
                 reduced_model,
                 reduced_initial_values,
                 jax,
@@ -3314,7 +7040,22 @@ def main():
         )
     if args.map_steps:
         if args.map_optimizer == "lbfgs":
+            parameter_scales = (
+                map_parameter_scale_values(initial_values, args)
+                if args.map_parameter_scaling == "prior"
+                else None
+            )
             initial_values, map_diagnostics = run_map_optimization(
+                model,
+                initial_values,
+                jax,
+                args.map_steps,
+                args.map_tolerance,
+                args.map_ftol,
+                parameter_scales=parameter_scales,
+            )
+        elif args.map_optimizer == "jax-lbfgsb":
+            initial_values, map_diagnostics = run_jax_map_optimization(
                 model,
                 initial_values,
                 jax,
@@ -3334,6 +7075,7 @@ def main():
     if args.map_only:
         from numpyro.infer import Predictive
 
+        postprocessing_start = time.perf_counter()
         map_posterior = {
             name: jax.numpy.asarray(value)[None, ...]
             for name, value in initial_values.items()
@@ -3351,12 +7093,26 @@ def main():
             context,
             samples,
             fit_hgcdte=args.fit_hgcdte,
+            fit_hgcdte_modulation=args.fit_hgcdte_modulation,
             fit_conductive_layer=args.fit_conductive_layer,
+            finite_hgcdte_detector=(
+                args.finite_hgcdte_detector or args.fit_detector_thickness
+            ),
+            detector_backside_index=args.detector_backside_index,
             fit_qe_rbf=args.fit_qe_rbf,
             qe_rbf_node_wavelengths_nm=args.qe_rbf_node_wavelengths_nm,
             qe_rbf_width_nm=args.qe_rbf_width_nm,
             use_asw_optical_constants=args.use_asw_optical_constants,
+            use_hgcdte_optical_constants=(
+                args.use_hgcdte_optical_constants or args.fit_hgcdte_modulation
+            ),
+            incidence_cone_half_angle_deg=args.incidence_cone_half_angle_deg,
+            incidence_pupil_half_angle_deg=args.incidence_pupil_half_angle_deg,
+            incidence_chief_ray_tilts_deg=incidence_chief_ray_tilts_deg,
+            early_time_cutoff_day=args.early_time_scale_cutoff_day,
+            fit_late_acm_step=args.fit_late_acm_step,
         )
+        postprocessing_seconds = time.perf_counter() - postprocessing_start
         write_outputs(
             args.output_dir,
             data,
@@ -3365,22 +7121,127 @@ def main():
             fit_diagnostics=fit_diagnostics,
             map_diagnostics=map_diagnostics,
         )
+        output_seconds = time.perf_counter() - postprocessing_start - postprocessing_seconds
+        print(
+            f"MAP stage timing: setup={setup_seconds:.2f}s; "
+            f"posterior/diagnostics={postprocessing_seconds:.2f}s; "
+            f"write={output_seconds:.2f}s; total={time.perf_counter() - run_start:.2f}s"
+        )
         print(f"Wrote {args.output_dir / 'numpyro_summary.md'}")
         print(f"Wrote {args.output_dir / 'tile_ar_posterior.csv'}")
         if data["n_scas"] > 1:
             print(f"Wrote {args.output_dir / 'sca_ar_posterior.csv'}")
         if "tile_initial_rate_nm_day" in samples:
             print(f"Wrote {args.output_dir / 'tile_rate_posterior.csv'}")
-        if args.np_modulation or args.fully_np_trajectory:
+        if "detector_thickness_nm" in samples:
+            print(f"Wrote {args.output_dir / 'detector_thickness_posterior.csv'}")
+        if (
+            args.np_modulation
+            or args.constant_rate_modulation
+            or args.fully_np_trajectory
+        ):
             print(f"Wrote {args.output_dir / 'np_node_posterior.csv'}")
         return
+    nuts_dense_mass = args.dense_mass
+    if args.dense_mass_global:
+        global_site_candidates = {
+            "ar_mu_raw",
+            "ar_mu_z",
+            "ar_sigma_raw",
+            "ar_sca_sigma",
+            "ar_tile_sigma",
+            "initial_thickness_nm",
+            "initial_thickness_pivot_z",
+            "early_time_log_scale",
+            "np_log_rate_nodes",
+            "np_log_rate_z",
+            "log_trajectory_scale",
+            "np_node_raw",
+            "absolute_hgcdte_n_log_scale",
+            "absolute_hgcdte_k_log_scale",
+            "hgcdte_n",
+            "hgcdte_k",
+            "hgcdte_n_log_modulation",
+            "hgcdte_k_log_modulation",
+            "conductive_log_thickness_nm",
+            "conductive_log_plasma_strength",
+            "conductive_log_damping_ratio",
+            "qe_rbf_log_modulation",
+            "acm_step_log_offset",
+            "late_acm_step_log_offset",
+        }
+        global_sites = tuple(
+            sorted(name for name in initial_values if name in global_site_candidates)
+        )
+        if not global_sites:
+            raise ValueError("No global latent sites are available for dense adaptation")
+        nuts_dense_mass = [global_sites]
+    if (
+        args.fixed_initial_thickness_nm is None
+        and not args.map_init_from
+        and not args.map_steps
+    ):
+        if args.pivot_initial_thickness:
+            initial_values["initial_thickness_pivot_z"] = (
+                trajectory_pivot_z_from_initial_thickness(
+                    args.nuts_initial_thickness_nm,
+                    data,
+                    args,
+                    trajectory_log_rates_from_initial_values(data, args, initial_values),
+                )
+            )
+        else:
+            initial_values["initial_thickness_nm"] = args.nuts_initial_thickness_nm
+    nuts_initial_values = initial_values
+    if (
+        args.fixed_initial_thickness_nm is None
+        and (args.map_init_from is not None or args.map_steps)
+    ):
+        if args.pivot_initial_thickness:
+            boundary_d0 = trajectory_pivot_d0_from_initial_values(
+                data, args, initial_values
+            )
+            if boundary_d0 <= INITIAL_THICKNESS_PRIOR_LOW_NM + 1.0e-7:
+                nuts_initial_values = dict(initial_values)
+                nuts_initial_values["initial_thickness_pivot_z"] = (
+                    trajectory_pivot_z_from_initial_thickness(
+                        args.nuts_initial_thickness_nm,
+                        data,
+                        args,
+                        trajectory_log_rates_from_initial_values(data, args, initial_values),
+                    )
+                )
+        elif (
+            "initial_thickness_nm" in initial_values
+            and float(np.asarray(initial_values["initial_thickness_nm"]))
+            <= INITIAL_THICKNESS_PRIOR_LOW_NM + 1.0e-7
+        ):
+            # A boundary MAP value has a singular transformed geometry. Keep every
+            # other MAP site intact and start d0 just inside the support; d0 remains
+            # a free NUTS variable after initialization.
+            nuts_initial_values = dict(initial_values)
+            nuts_initial_values["initial_thickness_nm"] = args.nuts_initial_thickness_nm
+    nuts_initial_params = build_nuts_initial_params(
+        model,
+        nuts_initial_values,
+        jax,
+        init_to_value,
+        args.seed + 3,
+        args.chains,
+        args.nuts_init_jitter,
+    )
     kernel = NUTS(
         model,
         target_accept_prob=args.target_accept_prob,
         max_tree_depth=args.max_tree_depth,
-        dense_mass=args.dense_mass,
-        init_strategy=init_to_value(values=initial_values),
+        dense_mass=nuts_dense_mass,
+        init_strategy=init_to_value(values=nuts_initial_values),
     )
+    if not args.no_progress_bar and jax.default_backend() == "gpu":
+        # ROCm can fail when NumPyro formats live JAX diagnostics for tqdm.
+        # Keep the iteration/rate/ETA display, but avoid copying these values
+        # from the device on every transition.
+        kernel.get_diagnostics_str = lambda state: ""
     mcmc = MCMC(
         kernel,
         num_warmup=args.warmup,
@@ -3393,10 +7254,11 @@ def main():
             if args.vectorized_chains
             else "sequential"
         ),
-        progress_bar=True,
+        progress_bar=not args.no_progress_bar,
     )
     mcmc.run(
         jax.random.PRNGKey(args.seed),
+        init_params=nuts_initial_params,
         extra_fields=("accept_prob", "diverging", "num_steps"),
     )
     chain_samples = mcmc.get_samples(group_by_chain=True)
@@ -3421,11 +7283,24 @@ def main():
         context,
         samples,
         fit_hgcdte=args.fit_hgcdte,
+        fit_hgcdte_modulation=args.fit_hgcdte_modulation,
         fit_conductive_layer=args.fit_conductive_layer,
+        finite_hgcdte_detector=(
+            args.finite_hgcdte_detector or args.fit_detector_thickness
+        ),
+        detector_backside_index=args.detector_backside_index,
         fit_qe_rbf=args.fit_qe_rbf,
         qe_rbf_node_wavelengths_nm=args.qe_rbf_node_wavelengths_nm,
         qe_rbf_width_nm=args.qe_rbf_width_nm,
         use_asw_optical_constants=args.use_asw_optical_constants,
+        use_hgcdte_optical_constants=(
+            args.use_hgcdte_optical_constants or args.fit_hgcdte_modulation
+        ),
+        incidence_cone_half_angle_deg=args.incidence_cone_half_angle_deg,
+        incidence_pupil_half_angle_deg=args.incidence_pupil_half_angle_deg,
+        incidence_chief_ray_tilts_deg=incidence_chief_ray_tilts_deg,
+        early_time_cutoff_day=args.early_time_scale_cutoff_day,
+        fit_late_acm_step=args.fit_late_acm_step,
     )
     write_outputs(
         args.output_dir,
@@ -3446,7 +7321,13 @@ def main():
         print(f"Wrote {args.output_dir / 'sca_ar_posterior.csv'}")
     if "tile_initial_rate_nm_day" in samples:
         print(f"Wrote {args.output_dir / 'tile_rate_posterior.csv'}")
-    if args.np_modulation or args.fully_np_trajectory:
+    if "detector_thickness_nm" in samples:
+        print(f"Wrote {args.output_dir / 'detector_thickness_posterior.csv'}")
+    if (
+        args.np_modulation
+        or args.constant_rate_modulation
+        or args.fully_np_trajectory
+    ):
         print(f"Wrote {args.output_dir / 'np_node_posterior.csv'}")
 
 

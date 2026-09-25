@@ -10,12 +10,14 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
 
 from fit_wfi_tmm_numpyro import (
     ASW_OPTICAL_CONSTANTS_URL,
     QE_RBF_NODE_WAVELENGTHS_NM,
     QE_RBF_WIDTH_NM,
     PREDICTION_ROW_CHUNK_SIZE,
+    early_time_scale_configuration,
 )
 from assess_rcs_spectral_identifiability import QE_URL, load_qe
 
@@ -210,29 +212,57 @@ def save_np_node_plot(path, samples, days, repeats):
         [np.mean(days[repeats == repeat]) for repeat in repeat_values],
         dtype=float,
     )
-    multipliers = np.asarray(samples["np_node_multipliers"], dtype=float)
-    multiplier_quantiles = np.percentile(multipliers, [16, 50, 84], axis=0)
+    fully_np_trajectory = bool(npz_scalar(samples, "fully_np_trajectory", 0))
+    if fully_np_trajectory:
+        if "node_instantaneous_rate_nm_day" not in samples:
+            raise ValueError(
+                "Fully non-parametric output is missing node instantaneous rates"
+            )
+        node_values = np.asarray(
+            samples["node_instantaneous_rate_nm_day"], dtype=float
+        )
+        node_value_quantiles = np.percentile(node_values, [16, 50, 84], axis=0)
+        node_ylabel = "Instantaneous rate (nm/day)"
+        node_title = "Fully non-parametric observation-epoch-node rate"
+    else:
+        multipliers = np.asarray(samples["np_node_multipliers"], dtype=float)
+        node_value_quantiles = np.percentile(multipliers, [16, 50, 84], axis=0)
+        node_ylabel = "NP instantaneous-rate multiplier"
+        node_title = "Observation-epoch-node rate modulation"
 
     figure, axes = plt.subplots(1, 2, figsize=(12, 4.5), constrained_layout=True)
     axes[0].fill_between(
         node_days,
-        multiplier_quantiles[0],
-        multiplier_quantiles[2],
+        node_value_quantiles[0],
+        node_value_quantiles[2],
         color="#56B4E9",
         alpha=0.35,
         label="16th-84th percentile",
     )
     axes[0].plot(
         node_days,
-        multiplier_quantiles[1],
+        node_value_quantiles[1],
         color="#0072B2",
         linewidth=2.0,
         label="Median",
     )
-    axes[0].axhline(1.0, color="black", linewidth=0.8, linestyle="--")
+    if fully_np_trajectory:
+        prior_rate = float(
+            npz_scalar(samples, "trajectory_rate_prior_mean_nm_day", np.nan)
+        )
+        if np.isfinite(prior_rate) and prior_rate > 0.0:
+            axes[0].axhline(
+                prior_rate,
+                color="black",
+                linewidth=0.8,
+                linestyle="--",
+                label="Prior center",
+            )
+    else:
+        axes[0].axhline(1.0, color="black", linewidth=0.8, linestyle="--")
     axes[0].set_xlabel("Days since first exposure")
-    axes[0].set_ylabel("NP instantaneous-rate multiplier")
-    axes[0].set_title("Repeat-node rate modulation")
+    axes[0].set_ylabel(node_ylabel)
+    axes[0].set_title(node_title)
     axes[0].legend(frameon=False, fontsize=8)
     axes[0].grid(alpha=0.2)
 
@@ -257,11 +287,18 @@ def save_np_node_plot(path, samples, days, repeats):
             label="Median",
         )
         axes[1].set_ylabel("Ice thickness (nm)")
-        axes[1].set_title("NP-modulated node thickness")
+        axes[1].set_title("Ice thickness at observation-epoch nodes")
         axes[1].legend(frameon=False, fontsize=8)
     axes[1].set_xlabel("Days since first exposure")
     axes[1].grid(alpha=0.2)
-    figure.suptitle(f"{sample_scope(samples)} non-parametric rate modulation")
+    figure.suptitle(
+        f"{sample_scope(samples)} "
+        + (
+            "fully non-parametric ice trajectory"
+            if fully_np_trajectory
+            else "non-parametric rate modulation"
+        )
+    )
     figure.savefig(path, dpi=180)
     plt.close(figure)
 
@@ -426,6 +463,7 @@ def _load_prediction_inputs(
 ):
     from fit_wfi_tmm_numpyro import (
         build_prediction_function,
+        apply_fixed_corrections,
         load_response_context,
         load_tile_statistics,
         require_numpyro,
@@ -440,16 +478,55 @@ def _load_prediction_inputs(
         ar_parameters = np.asarray(samples["ar_parameters"], dtype=float).copy()
         acm_step = np.asarray(samples["acm_step_log_offset"], dtype=float).copy()
         fit_hgcdte = bool(npz_scalar(samples, "fit_hgcdte", 0))
+        fit_hgcdte_modulation = bool(
+            npz_scalar(samples, "fit_hgcdte_modulation", 0)
+        )
+        absolute_substrate_power = bool(
+            npz_scalar(samples, "absolute_substrate_power", 0)
+        )
         hgcdte_parameters = None
-        if fit_hgcdte:
+        if absolute_substrate_power:
+            hgcdte_parameters = np.column_stack(
+                (
+                    np.asarray(
+                        samples["absolute_hgcdte_n_log_scale"], dtype=float
+                    ),
+                    np.asarray(
+                        samples["absolute_hgcdte_k_log_scale"], dtype=float
+                    ),
+                )
+            )
+        elif fit_hgcdte:
             hgcdte_parameters = np.column_stack(
                 (
                     np.asarray(samples["hgcdte_n"], dtype=float),
                     np.asarray(samples["hgcdte_k"], dtype=float),
                 )
             )
+        elif fit_hgcdte_modulation:
+            hgcdte_parameters = np.concatenate(
+                (
+                    np.asarray(samples["hgcdte_n_log_modulation"], dtype=float),
+                    np.asarray(samples["hgcdte_k_log_modulation"], dtype=float),
+                ),
+                axis=1,
+            )
         fit_conductive_layer = bool(
             npz_scalar(samples, "fit_conductive_layer", 0)
+        )
+        finite_hgcdte_detector = bool(
+            npz_scalar(samples, "finite_hgcdte_detector", 0)
+        )
+        detector_backside_index = float(
+            npz_scalar(samples, "detector_backside_index", 1.0)
+        )
+        detector_thickness = (
+            np.asarray(samples["detector_thickness_nm"], dtype=float).copy()
+            if finite_hgcdte_detector and "detector_thickness_nm" in samples
+            else None
+        )
+        shared_ar_parameters_across_tiles = bool(
+            npz_scalar(samples, "shared_ar_parameters_across_tiles", 0)
         )
         conductive_parameters = None
         if fit_conductive_layer:
@@ -469,6 +546,32 @@ def _load_prediction_inputs(
         fit_qe_rbf = bool(npz_scalar(samples, "fit_qe_rbf", 0))
         use_asw_optical_constants = bool(
             npz_scalar(samples, "use_asw_optical_constants", 0)
+        )
+        ice_optical_constants_source = (
+            str(
+                npz_scalar(
+                    samples,
+                    "ice_optical_constants_source",
+                    ASW_OPTICAL_CONSTANTS_URL,
+                )
+            )
+            if use_asw_optical_constants
+            else None
+        )
+        sed_weighting = str(npz_scalar(samples, "sed_weighting", "photon"))
+        use_hgcdte_optical_constants = bool(
+            npz_scalar(samples, "use_hgcdte_optical_constants", 0)
+        )
+        incidence_cone_half_angle_deg = float(
+            npz_scalar(samples, "incidence_cone_half_angle_deg", 0.0)
+        )
+        incidence_pupil_half_angle_deg = float(
+            npz_scalar(samples, "incidence_pupil_half_angle_deg", 0.0)
+        )
+        incidence_chief_ray_tilts_deg = (
+            np.asarray(samples["incidence_chief_ray_tilts_deg"], dtype=float)
+            if "incidence_chief_ray_tilts_deg" in samples
+            else None
         )
         qe_rbf_node_wavelengths_nm = (
             np.asarray(
@@ -505,11 +608,56 @@ def _load_prediction_inputs(
             if "statistics_row_fingerprints" in samples
             else None
         )
+        archived_min_observation_day = npz_scalar(
+            samples, "min_observation_day", np.nan
+        )
+        min_observation_day = (
+            None
+            if np.isnan(archived_min_observation_day)
+            else float(archived_min_observation_day)
+        )
+        archived_early_time_cutoff_day = npz_scalar(
+            samples, "early_time_scale_cutoff_day", np.nan
+        )
+        early_time_cutoff_day = (
+            None
+            if np.isnan(archived_early_time_cutoff_day)
+            else float(archived_early_time_cutoff_day)
+        )
+        early_time_scale = (
+            np.asarray(samples["early_time_scale"], dtype=float).copy()
+            if early_time_cutoff_day is not None and "early_time_scale" in samples
+            else None
+        )
+        fit_late_acm_step = bool(npz_scalar(samples, "fit_late_acm_step", 0))
+        late_acm_step = (
+            np.asarray(samples["late_acm_step_log_offset"], dtype=float).copy()
+            if fit_late_acm_step and "late_acm_step_log_offset" in samples
+            else None
+        )
+        fixed_corrections_path = str(
+            npz_scalar(samples, "fixed_corrections_path", "")
+        )
+        fixed_corrections_applied = bool(
+            npz_scalar(samples, "fixed_corrections_applied", 0)
+        )
     data = load_tile_statistics(
         tile_statistics,
         max_tiles=max_tiles,
         max_groups=ice_thickness.shape[-1],
+        min_observation_day=min_observation_day,
     )
+    if fixed_corrections_applied:
+        if not fixed_corrections_path:
+            raise ValueError(
+                "Posterior says fixed corrections were applied but no correction path was archived"
+            )
+        correction_path = resolve_archived_path(fixed_corrections_path)
+        if correction_path is None or not correction_path.exists():
+            raise FileNotFoundError(
+                f"Archived fixed-correction file does not exist: {fixed_corrections_path}"
+            )
+        data = apply_fixed_corrections(data, correction_path)
     if posterior_sca_names is not None and not np.array_equal(
         data["sca_names"].astype(str), posterior_sca_names
     ):
@@ -561,6 +709,7 @@ def _load_prediction_inputs(
             ("repeat", "observation_repeat"),
             ("exposure_times", "observation_exposure_times"),
             ("step_design", "observation_step_design"),
+            ("late_step_design", "observation_late_step_design"),
         ):
             if sample_key in samples and not np.array_equal(
                 data[data_key], np.asarray(samples[sample_key])
@@ -572,11 +721,28 @@ def _load_prediction_inputs(
         wavelength_stride,
         data["sca_names"],
         wavelength_step_nm,
-        ASW_OPTICAL_CONSTANTS_URL if use_asw_optical_constants else None,
+        ice_optical_constants_source,
+        use_hgcdte_optical_constants
+        or fit_hgcdte_modulation
+        or absolute_substrate_power,
+        sed_weighting=sed_weighting,
+        absolute_substrate_power=absolute_substrate_power,
     )
     context["qe_rbf_node_wavelengths_nm"] = qe_rbf_node_wavelengths_nm
     context["qe_rbf_width_nm"] = qe_rbf_width_nm
     context["use_asw_optical_constants"] = use_asw_optical_constants
+    context["use_hgcdte_optical_constants"] = (
+        use_hgcdte_optical_constants
+        or fit_hgcdte_modulation
+        or absolute_substrate_power
+    )
+    context["fit_hgcdte_modulation"] = fit_hgcdte_modulation
+    context["absolute_substrate_power"] = absolute_substrate_power
+    context["shared_ar_parameters_across_tiles"] = (
+        shared_ar_parameters_across_tiles
+    )
+    context["incidence_cone_half_angle_deg"] = incidence_cone_half_angle_deg
+    context["incidence_pupil_half_angle_deg"] = incidence_pupil_half_angle_deg
     if ice_thickness.ndim not in (2, 3) or ice_thickness.shape[-1] != data["counts"].shape[1]:
         raise ValueError("Posterior groups do not match the tile statistics")
     if ar_parameters.ndim == 4:
@@ -588,7 +754,9 @@ def _load_prediction_inputs(
     if ar_parameters.shape[1] != data["counts"].shape[0]:
         if max_tiles is None or ar_parameters.shape[1] % len(data["sca_names"]):
             raise ValueError("Posterior tiles do not match the tile statistics")
-        full_data = load_tile_statistics(tile_statistics)
+        full_data = load_tile_statistics(
+            tile_statistics, min_observation_day=min_observation_day
+        )
         posterior_tiles = ar_parameters.shape[1] // len(data["sca_names"])
         if (
             posterior_tiles != len(full_data["tile_ids"])
@@ -611,6 +779,17 @@ def _load_prediction_inputs(
         )
         if ice_thickness.ndim == 3:
             ice_thickness = ice_thickness[:, selected_row_indices, :]
+        if detector_thickness is not None:
+            detector_thickness = detector_thickness.reshape(
+                detector_thickness.shape[0], len(data["sca_names"]), posterior_tiles
+            )
+            detector_thickness = detector_thickness[:, :, selected_indices].reshape(
+                detector_thickness.shape[0], -1
+            )
+        if incidence_chief_ray_tilts_deg is not None:
+            incidence_chief_ray_tilts_deg = incidence_chief_ray_tilts_deg[
+                selected_row_indices
+            ]
         ar_parameters = ar_parameters.reshape(
             ar_parameters.shape[0], len(data["sca_names"]), posterior_tiles, -1
         )
@@ -619,6 +798,19 @@ def _load_prediction_inputs(
         )
     if ar_parameters.shape[1] != data["counts"].shape[0]:
         raise ValueError("Posterior tiles do not match the tile statistics")
+    if detector_thickness is not None:
+        detector_thickness = detector_thickness.reshape(
+            detector_thickness.shape[0], -1
+        )
+        if detector_thickness.shape[1] != data["counts"].shape[0]:
+            raise ValueError("Posterior detector thickness does not match the tile statistics")
+    context["finite_hgcdte_detector"] = finite_hgcdte_detector
+    context["detector_backside_index"] = detector_backside_index
+    if incidence_chief_ray_tilts_deg is None:
+        incidence_chief_ray_tilts_deg = np.zeros((data["counts"].shape[0], 2))
+    if incidence_chief_ray_tilts_deg.shape != (data["counts"].shape[0], 2):
+        raise ValueError("Archived chief-ray geometry does not match the selected tiles")
+    context["incidence_chief_ray_tilts_deg"] = incidence_chief_ray_tilts_deg
 
     return (
         data,
@@ -635,7 +827,57 @@ def _load_prediction_inputs(
         jax,
         jnp,
         build_prediction_function,
+        early_time_scale,
+        early_time_cutoff_day,
+        late_acm_step,
+        detector_thickness,
     )
+
+
+def apply_early_time_data_correction(
+    data, prediction_values, early_time_scale, early_time_cutoff_day
+):
+    """Apply the posterior-median count correction to observations for plotting."""
+    if early_time_cutoff_day is None:
+        return data, prediction_values
+    if early_time_scale is None:
+        raise ValueError("Early-time scale is required when the cutoff is active")
+    scale_samples = np.asarray(early_time_scale, dtype=float)
+    if scale_samples.ndim == 1:
+        scale = scale_samples
+    elif scale_samples.ndim == 2:
+        scale = np.median(scale_samples, axis=0)
+    else:
+        raise ValueError("Early-time scale posterior must be one- or two-dimensional")
+    if np.any(~np.isfinite(scale)) or np.any(scale <= 0.0):
+        raise ValueError("Early-time scale posterior must be finite and positive")
+    configuration = early_time_scale_configuration(data, early_time_cutoff_day)
+    if scale.size != len(configuration["days"]):
+        raise ValueError("Early-time scale posterior does not match the data nodes")
+    observation_scale_index = np.asarray(
+        configuration["observation_scale_index"], dtype=int
+    )
+    safe_scale_index = np.maximum(observation_scale_index, 0)
+    log_correction = np.where(
+        observation_scale_index >= 0,
+        np.log(scale[safe_scale_index]),
+        0.0,
+    )
+
+    corrected_data = dict(data)
+    counts = np.asarray(data["counts"], dtype=float)
+    sums = np.asarray(data["sums"], dtype=float)
+    correction = log_correction[None, :]
+    corrected_data["sums"] = sums + counts * correction
+    if "sum_squared" in data:
+        sum_squared = np.asarray(data["sum_squared"], dtype=float)
+        corrected_data["sum_squared"] = (
+            sum_squared + 2.0 * correction * sums + counts * correction * correction
+        )
+    corrected_data["early_time_scale_applied_to_data"] = True
+    corrected_data["early_time_scale_log_correction"] = log_correction
+    # Predictions were evaluated with the early-time model offset disabled.
+    return corrected_data, np.asarray(prediction_values, dtype=float)
 
 
 def load_model_predictions(
@@ -663,6 +905,10 @@ def load_model_predictions(
         jax,
         jnp,
         build_prediction_function,
+        early_time_scale,
+        early_time_cutoff_day,
+        late_acm_step,
+        detector_thickness,
     ) = _load_prediction_inputs(
         output_dir,
         tile_statistics,
@@ -672,6 +918,7 @@ def load_model_predictions(
         wavelength_step_nm,
         max_tiles,
     )
+    fit_hgcdte_modulation = bool(context["fit_hgcdte_modulation"])
     prediction_chunks = []
     for start in range(0, len(ice_thickness), 16):
         stop = min(start + 16, len(ice_thickness))
@@ -688,25 +935,38 @@ def load_model_predictions(
                 context,
                 row_indices=row_indices,
                 fit_hgcdte=fit_hgcdte,
+                fit_hgcdte_modulation=fit_hgcdte_modulation,
                 fit_conductive_layer=fit_conductive_layer,
+                finite_hgcdte_detector=context["finite_hgcdte_detector"],
+                detector_backside_index=context["detector_backside_index"],
                 fit_qe_rbf=fit_qe_rbf,
                 qe_rbf_node_wavelengths_nm=context["qe_rbf_node_wavelengths_nm"],
                 qe_rbf_width_nm=context["qe_rbf_width_nm"],
                 use_asw_optical_constants=context["use_asw_optical_constants"],
+                use_hgcdte_optical_constants=context["use_hgcdte_optical_constants"],
+                incidence_cone_half_angle_deg=context["incidence_cone_half_angle_deg"],
+                incidence_pupil_half_angle_deg=context["incidence_pupil_half_angle_deg"],
+                incidence_chief_ray_tilts_deg=context["incidence_chief_ray_tilts_deg"],
+                # Plot the physical model against data corrected below.
+                early_time_cutoff_day=None,
+                share_ar_across_rows=context["shared_ar_parameters_across_tiles"],
+                fit_late_acm_step=late_acm_step is not None,
             )
             predictor_in_axes = [0, 0, 0]
-            if fit_hgcdte:
-                predictor_in_axes.append(0)
-            elif fit_conductive_layer:
-                predictor_in_axes.append(None)
-            if fit_conductive_layer:
-                predictor_in_axes.append(0)
-            if fit_qe_rbf:
-                if not fit_hgcdte and not fit_conductive_layer:
-                    predictor_in_axes.append(None)
-                if not fit_conductive_layer:
-                    predictor_in_axes.append(None)
-                predictor_in_axes.append(0)
+            predictor_in_axes.append(
+                0
+                if fit_hgcdte or fit_hgcdte_modulation or absolute_substrate_power
+                else None
+            )
+            predictor_in_axes.append(0 if fit_conductive_layer else None)
+            predictor_in_axes.append(0 if fit_qe_rbf else None)
+            if late_acm_step is not None:
+                predictor_in_axes.extend((None, 0))
+            if detector_thickness is not None:
+                if late_acm_step is None:
+                    predictor_in_axes.extend((None, None, 0))
+                else:
+                    predictor_in_axes.append(0)
             row_batched_predictor = jax.jit(
                 jax.vmap(predictor, in_axes=tuple(predictor_in_axes))
             )
@@ -719,27 +979,37 @@ def load_model_predictions(
                 jnp.asarray(ar_parameters[start:stop, row_indices]),
                 jnp.asarray(acm_step[start:stop]),
             )
-            if fit_hgcdte:
+            prediction_args += (
+                jnp.asarray(hgcdte_parameters[start:stop])
+                if fit_hgcdte or fit_hgcdte_modulation or absolute_substrate_power
+                else None,
+            )
+            prediction_args += (
+                jnp.asarray(conductive_parameters[start:stop])
+                if fit_conductive_layer
+                else None,
+            )
+            prediction_args += (
+                jnp.asarray(qe_rbf_parameters[start:stop])
+                if fit_qe_rbf
+                else None,
+            )
+            if late_acm_step is not None:
+                prediction_args += (None, jnp.asarray(late_acm_step[start:stop]))
+            elif detector_thickness is not None:
+                prediction_args += (None, None)
+            if detector_thickness is not None:
                 prediction_args += (
-                    jnp.asarray(hgcdte_parameters[start:stop]),
-                )
-            elif fit_conductive_layer:
-                prediction_args += (None,)
-            if fit_conductive_layer:
-                prediction_args += (
-                    jnp.asarray(conductive_parameters[start:stop]),
-                )
-            if fit_qe_rbf:
-                if not fit_hgcdte and not fit_conductive_layer:
-                    prediction_args += (None,)
-                if not fit_conductive_layer:
-                    prediction_args += (None,)
-                prediction_args += (
-                    jnp.asarray(qe_rbf_parameters[start:stop]),
+                    jnp.asarray(detector_thickness[start:stop, row_indices]),
                 )
             row_chunks.append(np.asarray(row_batched_predictor(*prediction_args)))
         prediction_chunks.append(np.concatenate(row_chunks, axis=1))
-    return data, np.concatenate(prediction_chunks, axis=0)
+    return apply_early_time_data_correction(
+        data,
+        np.concatenate(prediction_chunks, axis=0),
+        early_time_scale,
+        early_time_cutoff_day,
+    )
 
 
 def load_model_prediction_quantiles(
@@ -767,6 +1037,10 @@ def load_model_prediction_quantiles(
         jax,
         jnp,
         build_prediction_function,
+        early_time_scale,
+        early_time_cutoff_day,
+        late_acm_step,
+        detector_thickness,
     ) = _load_prediction_inputs(
         output_dir,
         tile_statistics,
@@ -776,6 +1050,8 @@ def load_model_prediction_quantiles(
         wavelength_step_nm,
         max_tiles,
     )
+    fit_hgcdte_modulation = bool(context["fit_hgcdte_modulation"])
+    absolute_substrate_power = bool(context["absolute_substrate_power"])
     quantile_chunks = []
     for row_start in range(
         0, ar_parameters.shape[1], PREDICTION_ROW_CHUNK_SIZE
@@ -789,25 +1065,39 @@ def load_model_prediction_quantiles(
             context,
             row_indices=row_indices,
             fit_hgcdte=fit_hgcdte,
+            fit_hgcdte_modulation=fit_hgcdte_modulation,
             fit_conductive_layer=fit_conductive_layer,
+            finite_hgcdte_detector=context["finite_hgcdte_detector"],
+            detector_backside_index=context["detector_backside_index"],
             fit_qe_rbf=fit_qe_rbf,
             qe_rbf_node_wavelengths_nm=context["qe_rbf_node_wavelengths_nm"],
             qe_rbf_width_nm=context["qe_rbf_width_nm"],
             use_asw_optical_constants=context["use_asw_optical_constants"],
+            use_hgcdte_optical_constants=context["use_hgcdte_optical_constants"],
+            incidence_cone_half_angle_deg=context["incidence_cone_half_angle_deg"],
+            incidence_pupil_half_angle_deg=context["incidence_pupil_half_angle_deg"],
+            incidence_chief_ray_tilts_deg=context["incidence_chief_ray_tilts_deg"],
+            # Plot the physical model against data corrected below.
+            early_time_cutoff_day=None,
+            share_ar_across_rows=context["shared_ar_parameters_across_tiles"],
+            fit_late_acm_step=late_acm_step is not None,
+            absolute_substrate_power=absolute_substrate_power,
         )
         predictor_in_axes = [0, 0, 0]
-        if fit_hgcdte:
-            predictor_in_axes.append(0)
-        elif fit_conductive_layer:
-            predictor_in_axes.append(None)
-        if fit_conductive_layer:
-            predictor_in_axes.append(0)
-        if fit_qe_rbf:
-            if not fit_hgcdte and not fit_conductive_layer:
-                predictor_in_axes.append(None)
-            if not fit_conductive_layer:
-                predictor_in_axes.append(None)
-            predictor_in_axes.append(0)
+        predictor_in_axes.append(
+            0
+            if fit_hgcdte or fit_hgcdte_modulation or absolute_substrate_power
+            else None
+        )
+        predictor_in_axes.append(0 if fit_conductive_layer else None)
+        predictor_in_axes.append(0 if fit_qe_rbf else None)
+        if late_acm_step is not None:
+            predictor_in_axes.extend((None, 0))
+        if detector_thickness is not None:
+            if late_acm_step is None:
+                predictor_in_axes.extend((None, None, 0))
+            else:
+                predictor_in_axes.append(0)
         row_batched_predictor = jax.jit(
             jax.vmap(predictor, in_axes=tuple(predictor_in_axes))
         )
@@ -823,23 +1113,28 @@ def load_model_prediction_quantiles(
                 jnp.asarray(ar_parameters[start:stop, row_indices]),
                 jnp.asarray(acm_step[start:stop]),
             )
-            if fit_hgcdte:
+            prediction_args += (
+                jnp.asarray(hgcdte_parameters[start:stop])
+                if fit_hgcdte or fit_hgcdte_modulation or absolute_substrate_power
+                else None,
+            )
+            prediction_args += (
+                jnp.asarray(conductive_parameters[start:stop])
+                if fit_conductive_layer
+                else None,
+            )
+            prediction_args += (
+                jnp.asarray(qe_rbf_parameters[start:stop])
+                if fit_qe_rbf
+                else None,
+            )
+            if late_acm_step is not None:
+                prediction_args += (None, jnp.asarray(late_acm_step[start:stop]))
+            elif detector_thickness is not None:
+                prediction_args += (None, None)
+            if detector_thickness is not None:
                 prediction_args += (
-                    jnp.asarray(hgcdte_parameters[start:stop]),
-                )
-            elif fit_conductive_layer:
-                prediction_args += (None,)
-            if fit_conductive_layer:
-                prediction_args += (
-                    jnp.asarray(conductive_parameters[start:stop]),
-                )
-            if fit_qe_rbf:
-                if not fit_hgcdte and not fit_conductive_layer:
-                    prediction_args += (None,)
-                if not fit_conductive_layer:
-                    prediction_args += (None,)
-                prediction_args += (
-                    jnp.asarray(qe_rbf_parameters[start:stop]),
+                    jnp.asarray(detector_thickness[start:stop, row_indices]),
                 )
             sample_predictions.append(
                 np.asarray(row_batched_predictor(*prediction_args))
@@ -848,13 +1143,23 @@ def load_model_prediction_quantiles(
         quantile_chunks.append(
             np.percentile(row_predictions, [16.0, 50.0, 84.0], axis=0)
         )
-    return data, np.concatenate(quantile_chunks, axis=1)
+    return apply_early_time_data_correction(
+        data,
+        np.concatenate(quantile_chunks, axis=1),
+        early_time_scale,
+        early_time_cutoff_day,
+    )
 
 
 def save_tile_fit_plot(path, data, prediction_quantiles):
     observed = data["sums"] / data["counts"]
     days = data["days"]
     leds = data["led"]
+    observation_label = (
+        "Corrected tile observations"
+        if data.get("early_time_scale_applied_to_data", False)
+        else "Tile observations"
+    )
     figure, axes = plt.subplots(2, 3, figsize=(15, 8), sharex=False, sharey=True, constrained_layout=True)
     for led, axis in enumerate(axes.flat, start=1):
         groups = np.flatnonzero(leds == led)
@@ -880,7 +1185,7 @@ def save_tile_fit_plot(path, data, prediction_quantiles):
             color="#444444",
             alpha=0.18,
             s=7,
-            label="Tile observations" if led == 1 else None,
+            label=observation_label if led == 1 else None,
         )
         axis.fill_between(
             x,
@@ -906,7 +1211,9 @@ def save_tile_fit_plot(path, data, prediction_quantiles):
     axes[0, 0].set_ylabel("Relative change (%)")
     axes[1, 0].set_ylabel("Relative change (%)")
     axes[0, 0].legend(frameon=False, fontsize=8)
-    figure.suptitle(f"{scope_label(data['sca_names'])} tile observations versus posterior TMM model")
+    figure.suptitle(
+        f"{scope_label(data['sca_names'])} observations versus posterior physical TMM model"
+    )
     figure.savefig(path, dpi=180)
     plt.close(figure)
 
@@ -987,47 +1294,116 @@ def save_qe_modulation_plot(path, samples, data):
     plt.close(figure)
 
 
-def save_tile_data_model_time_plot(path, data, prediction_quantiles):
-    observed = data["sums"] / data["counts"]
-    median_prediction = prediction_quantiles[1]
-    days = data["days"]
-    leds = data["led"]
-    figure, axes = plt.subplots(
-        2, 3, figsize=(15, 8), sharex=False, sharey=True, constrained_layout=True
+def save_tile_data_model_time_plot(
+    path, data, prediction_quantiles, acm_step=0.0, late_acm_step=0.0
+):
+    """Plot every LED after ACM handling; count correction is already in the data."""
+    observed = np.asarray(data["sums"] / data["counts"], dtype=float)
+    prediction_quantiles = np.asarray(prediction_quantiles, dtype=float).copy()
+    days = np.asarray(data["days"], dtype=float)
+    leds = np.asarray(data["led"], dtype=int)
+    step_design = np.asarray(data["step_design"], dtype=float)
+    late_step_design = np.asarray(
+        data.get("late_step_design", np.zeros(len(days))), dtype=float
     )
-    for led, axis in enumerate(axes.flat, start=1):
+    acm_step = np.asarray(acm_step, dtype=float).reshape(-1)
+    if acm_step.size == 1:
+        group_acm_step = np.full(len(leds), acm_step[0])
+    elif acm_step.size == 6:
+        group_acm_step = acm_step[leds - 1]
+    else:
+        raise ValueError("ACM step must be scalar or have one value per LED")
+    acm_correction = group_acm_step * step_design
+    late_acm_step = float(np.asarray(late_acm_step).reshape(-1)[0])
+    acm_correction += late_acm_step * late_step_design
+    observed -= acm_correction[None, :]
+    prediction_quantiles -= acm_correction[None, None, :]
+
+    figure, axis = plt.subplots(figsize=(13, 7), constrained_layout=True)
+    led_values = sorted(np.unique(leds))
+    cmap = plt.get_cmap("tab10")
+    color_by_led = {
+        led: cmap(index / max(1, len(led_values) - 1))
+        for index, led in enumerate(led_values)
+    }
+    for led in led_values:
         groups = np.flatnonzero(leds == led)
         order = groups[np.argsort(days[groups], kind="stable")]
         x = days[order]
         observed_led = observed[:, order]
-        model_led = median_prediction[:, order]
+        model_led = prediction_quantiles[1][:, order]
         for tile in range(observed_led.shape[0]):
             axis.scatter(
                 x,
                 100.0 * np.expm1(observed_led[tile]),
-                color="#555555",
-                alpha=0.16,
-                s=7,
+                color=color_by_led[led],
+                alpha=0.22,
+                s=12,
                 linewidths=0,
             )
-            axis.plot(
-                x,
-                100.0 * np.expm1(model_led[tile]),
-                color="#0072B2",
-                alpha=0.22,
-                linewidth=0.8,
-            )
-        residual = observed_led - model_led
-        axis.set_title(f"LED {led}; RMS={np.sqrt(np.mean(residual**2)):.4g} log")
-        axis.axhline(0.0, color="black", linewidth=0.6)
-        axis.set_xlabel("Days since first exposure")
-        axis.grid(alpha=0.2)
-    axes[0, 0].set_ylabel("Relative change (%)")
-    axes[1, 0].set_ylabel("Relative change (%)")
-    axes[0, 0].scatter([], [], color="#555555", s=18, label="Observed tile data")
-    axes[0, 0].plot([], [], color="#0072B2", linewidth=2.0, label="Tile posterior model")
-    axes[0, 0].legend(frameon=False, fontsize=8)
-    figure.suptitle(f"{scope_label(data['sca_names'])} tile data with the modeled curves overlaid")
+        if model_led.shape[0] == 1:
+            model_center = model_led[0]
+            model_lower = prediction_quantiles[0, 0, order]
+            model_upper = prediction_quantiles[2, 0, order]
+        else:
+            model_center = np.median(model_led, axis=0)
+            model_lower = np.percentile(model_led, 16.0, axis=0)
+            model_upper = np.percentile(model_led, 84.0, axis=0)
+        axis.fill_between(
+            x,
+            100.0 * np.expm1(model_lower),
+            100.0 * np.expm1(model_upper),
+            color=color_by_led[led],
+            alpha=0.12,
+        )
+        axis.plot(
+            x,
+            100.0 * np.expm1(model_center),
+            color=color_by_led[led],
+            linewidth=2.0,
+        )
+
+    color_handles = [
+        Line2D(
+            [],
+            [],
+            color=color_by_led[led],
+            linewidth=2.0,
+            label=f"LED {led}",
+        )
+        for led in led_values
+    ]
+    style_handles = [
+        Line2D(
+            [],
+            [],
+            color="#444444",
+            marker="o",
+            linestyle="",
+            markersize=4,
+            label="Data",
+        ),
+        Line2D([], [], color="#444444", linewidth=2.0, label="Model"),
+    ]
+    axis.legend(
+        handles=color_handles + style_handles,
+        frameon=False,
+        fontsize=9,
+        ncol=min(4, len(color_handles) + len(style_handles)),
+    )
+    axis.axhline(0.0, color="black", linewidth=0.6)
+    axis.set_xlabel("Days since first exposure")
+    if data.get("fixed_corrections_applied", False):
+        axis.set_ylabel("Relative change after fixed gain/ACM correction (%)")
+        title_suffix = "fixed gain/ACM corrections applied to data"
+    else:
+        axis.set_ylabel("Relative change after ACM-step removal (%)")
+        title_suffix = "fitted ACM throughput step removed; count correction applied to data"
+    axis.grid(alpha=0.2)
+    figure.suptitle(
+        f"{scope_label(data['sca_names'])} tile data and modeled curves; "
+        + title_suffix
+    )
     figure.savefig(path, dpi=180)
     plt.close(figure)
 
@@ -1194,6 +1570,41 @@ def npz_scalar(samples, key, default=None):
     return value.reshape(-1)[0].item()
 
 
+def save_map_optimization_plot(path, samples):
+    """Plot MAP objective progress and the remaining objective gap."""
+    if "map_objective_history" not in samples:
+        return False
+    history = np.asarray(samples["map_objective_history"], dtype=float).reshape(-1)
+    if history.size < 2 or not np.all(np.isfinite(history)):
+        return False
+    iterations = np.arange(history.size)
+    final_objective = history[-1]
+    objective_floor = max(
+        1.0e-12,
+        10.0 * np.finfo(float).eps * max(1.0, abs(final_objective)),
+    )
+    objective_gap = np.maximum(history - final_objective, objective_floor)
+    figure, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True, constrained_layout=True)
+    axes[0].plot(iterations, history, color="#0072B2", linewidth=1.2)
+    axes[0].set_ylabel("Negative log joint")
+    axes[0].set_title("MAP objective history")
+    axes[0].grid(alpha=0.2)
+    axes[1].semilogy(iterations, objective_gap, color="#D55E00", linewidth=1.2)
+    axes[1].set_xlabel("Accepted optimizer iterations")
+    axes[1].set_ylabel("Objective - final objective")
+    axes[1].set_title("Objective gap to final iterate")
+    axes[1].grid(alpha=0.2)
+    status = npz_scalar(samples, "map_message", "unknown")
+    gradient = npz_scalar(samples, "map_scaled_projected_gradient_norm", np.nan)
+    figure.suptitle(
+        f"{status}; scaled projected gradient={gradient:.3g}",
+        fontsize=10,
+    )
+    figure.savefig(path, dpi=180)
+    plt.close(figure)
+    return True
+
+
 def resolve_archived_path(value):
     if value is None:
         return None
@@ -1225,7 +1636,7 @@ def save_tile_fit_scatter_plot(path, data, prediction_quantiles):
         )
     limits = np.asarray([observed.min(), observed.max(), median_prediction.min(), median_prediction.max()])
     axes[0].plot([limits.min(), limits.max()], [limits.min(), limits.max()], "k--", linewidth=1.0)
-    axes[0].set_xlabel("Observed tile mean (log change)")
+    axes[0].set_xlabel("Corrected observed tile mean (log change)")
     axes[0].set_ylabel("Modeled tile mean (log change)")
     axes[0].set_title("Observed versus modeled")
     axes[0].legend(frameon=False, fontsize=8, ncol=2)
@@ -1309,7 +1720,7 @@ def main():
         statistics_path = (
             ROOT / "wfi_tile_log_statistics_512"
             if len(archived_sca_names) > 1
-            else ROOT / "wfi01_tile_log_statistics_512.csv"
+            else ROOT / "wfi_tile_log_statistics_512" / "wfi01_tile_log_statistics_512.csv"
         )
     sed_mode = args.sed_mode or npz_scalar(samples, "sed_mode", "core")
     wavelength_stride = args.wavelength_stride
@@ -1319,6 +1730,14 @@ def main():
     if wavelength_step_nm is None:
         archived_step = npz_scalar(samples, "wavelength_step_nm", np.nan)
         wavelength_step_nm = None if np.isnan(archived_step) else float(archived_step)
+    archived_min_observation_day = npz_scalar(
+        samples, "min_observation_day", np.nan
+    )
+    min_observation_day = (
+        None
+        if np.isnan(archived_min_observation_day)
+        else float(archived_min_observation_day)
+    )
     max_tiles = args.max_tiles
     if max_tiles is None:
         archived_max_tiles = int(npz_scalar(samples, "max_tiles", -1))
@@ -1329,6 +1748,7 @@ def main():
         statistics_path,
         max_groups=np.asarray(samples["ice_thickness"]).shape[-1],
         max_tiles=max_tiles,
+        min_observation_day=min_observation_day,
     )
     metadata["qe_columns"] = (
         np.asarray(samples["qe_columns"], dtype=int)
@@ -1343,6 +1763,10 @@ def main():
     repeats = metadata["repeat"]
     rows = load_tile_posterior(tile_posterior_path)
     map_only = bool(npz_scalar(samples, "map_only", 0))
+    map_optimization_path = args.output_dir / "numpyro_map_optimization.png"
+    has_map_optimization_plot = save_map_optimization_plot(
+        map_optimization_path, samples
+    )
     trajectory_path = args.output_dir / "numpyro_ice_trajectory.png"
     save_trajectory_plot(trajectory_path, samples, days, args.seed)
     np_trajectory_path = args.output_dir / "numpyro_np_trajectory.png"
@@ -1366,13 +1790,29 @@ def main():
         wavelength_step_nm,
         max_tiles,
     )
+    acm_step = np.median(
+        np.asarray(samples["acm_step_log_offset"], dtype=float), axis=0
+    )
+    late_acm_step = (
+        float(np.median(np.asarray(samples["late_acm_step_log_offset"], dtype=float)))
+        if bool(npz_scalar(samples, "fit_late_acm_step", 0))
+        else 0.0
+    )
     fit_path = args.output_dir / "numpyro_tile_fit.png"
     time_fit_path = args.output_dir / "numpyro_tile_data_model_vs_time.png"
     scatter_path = args.output_dir / "numpyro_tile_fit_scatter.png"
     save_tile_fit_plot(fit_path, data, prediction_quantiles)
-    save_tile_data_model_time_plot(time_fit_path, data, prediction_quantiles)
+    save_tile_data_model_time_plot(
+        time_fit_path,
+        data,
+        prediction_quantiles,
+        acm_step=acm_step,
+        late_acm_step=late_acm_step,
+    )
     save_tile_fit_scatter_plot(scatter_path, data, prediction_quantiles)
     print(f"Wrote {trajectory_path}")
+    if has_map_optimization_plot:
+        print(f"Wrote {map_optimization_path}")
     if qe_plot_path is not None:
         print(f"Wrote {qe_plot_path}")
     if "np_node_multipliers" in samples:
