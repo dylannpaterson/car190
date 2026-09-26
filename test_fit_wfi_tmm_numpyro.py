@@ -47,6 +47,7 @@ from fit_wfi_tmm_numpyro import (
     tile_neighbor_edges,
     rate_curvature_matrix,
     trajectory_rate_whitener,
+    trajectory_rate_posterior_rotation,
     trajectory_rate_per_scale,
     transfer_map_initial_values,
 )
@@ -846,6 +847,32 @@ class TestTmmTileData(unittest.TestCase):
         whitened_quadratic = -0.5 * np.sum(standard**2)
         self.assertAlmostEqual(original_quadratic, whitened_quadratic, places=10)
 
+    def test_trajectory_posterior_rotation_uses_conditional_hessian(self):
+        jax, _, _, _, _, _, _ = require_numpyro()
+        import numpyro
+        import numpyro.distributions as dist
+
+        precision = jax.numpy.asarray(
+            [[4.0, 1.0, 0.0], [1.0, 2.0, 0.5], [0.0, 0.5, 3.0]]
+        )
+
+        def model():
+            rate = numpyro.sample(
+                "np_log_rate_z",
+                dist.Normal(0.0, 1.0).expand((3,)).to_event(1),
+            )
+            numpyro.factor("conditional_rate_curvature", -0.5 * rate @ precision @ rate)
+
+        rotation = trajectory_rate_posterior_rotation(
+            model, {"np_log_rate_z": np.zeros(3)}, jax
+        )
+        np.testing.assert_allclose(rotation.T @ rotation, np.eye(3), atol=1.0e-10)
+        expected_eigenvalues = np.linalg.eigvalsh(np.eye(3) + np.asarray(precision))
+        rotated_precision = rotation.T @ (np.eye(3) + np.asarray(precision)) @ rotation
+        np.testing.assert_allclose(
+            np.sort(np.diag(rotated_precision)), expected_eigenvalues, atol=1.0e-10
+        )
+
     def test_whitened_model_does_not_double_count_rate_smoothness(self):
         jax, _, _, _, _, _, _ = require_numpyro()
         from numpyro.handlers import seed, trace
@@ -888,6 +915,25 @@ class TestTmmTileData(unittest.TestCase):
 
         self.assertIn("np_smoothness_regularization", direct_sites)
         self.assertNotIn("np_smoothness_regularization", whitened_sites)
+
+        rotation = np.eye(3)
+        rotated_sites = trace(
+            seed(
+                build_model(
+                    data,
+                    context,
+                    whiten_np_trajectory=True,
+                    np_rate_likelihood_rotation=rotation,
+                    **common,
+                ),
+                jax.random.PRNGKey(62),
+            )
+        ).get_trace()
+        self.assertIn("np_log_rate_likelihood_rotated", rotated_sites)
+        self.assertEqual(
+            rotated_sites["np_log_rate_likelihood_rotated"]["value"].shape,
+            (3,),
+        )
 
     def test_map_warm_start_checks_data_fingerprint_and_site_shapes(self):
         data = load_tile_statistics(DEFAULT_SINGLE_SCA_TILE_STATISTICS, max_tiles=1)

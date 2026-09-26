@@ -721,10 +721,59 @@ def trajectory_log_rates_from_initial_values(data, args, initial_values):
             trajectory_rate_likelihood_scale(data, args),
             args.np_smoothness_weight,
         )
+        rate_latents = np.asarray(initial_values["np_log_rate_z"], dtype=float)
+        rate_rotation = getattr(args, "np_rate_likelihood_rotation", None)
+        if rate_rotation is not None:
+            rate_latents = np.asarray(rate_rotation, dtype=float) @ rate_latents
         return np.log(trajectory_prior_rate) + whitener @ np.asarray(
-            initial_values["np_log_rate_z"], dtype=float
+            rate_latents,
         )
     return np.asarray(initial_values["np_log_rate_nodes"], dtype=float)
+
+
+def apply_trajectory_rate_likelihood_rotation(initial_values, args):
+    """Convert old whitened rate starts into the rotated latent coordinates."""
+    rotation = getattr(args, "np_rate_likelihood_rotation", None)
+    if rotation is None or "np_log_rate_z" not in initial_values:
+        return initial_values
+    rotated_values = dict(initial_values)
+    rotated_values["np_log_rate_z"] = np.asarray(rotation, dtype=float).T @ np.asarray(
+        initial_values["np_log_rate_z"], dtype=float
+    )
+    return rotated_values
+
+
+def trajectory_rate_posterior_rotation(model, initial_values, jax):
+    """Return an orthogonal rate rotation from the conditional MAP Hessian."""
+    from numpyro.infer.util import log_density
+
+    if "np_log_rate_z" not in initial_values:
+        raise ValueError("A rate-latent start is required for Hessian rotation")
+    base_values = {
+        name: jax.numpy.asarray(value) for name, value in initial_values.items()
+    }
+    rate_start = base_values["np_log_rate_z"]
+
+    def negative_log_joint(rate_values):
+        values = dict(base_values)
+        values["np_log_rate_z"] = rate_values
+        log_joint, _ = log_density(model, (), {}, values)
+        return -log_joint
+
+    hessian = np.asarray(
+        jax.device_get(jax.hessian(negative_log_joint)(rate_start)), dtype=float
+    )
+    hessian = 0.5 * (hessian + hessian.T)
+    if not np.all(np.isfinite(hessian)):
+        raise ValueError("Rate posterior Hessian is not finite")
+    _, eigenvectors = np.linalg.eigh(hessian)
+    if not np.allclose(
+        eigenvectors.T @ eigenvectors,
+        np.eye(rate_start.shape[0]),
+        atol=1.0e-10,
+    ):
+        raise ValueError("Rate posterior Hessian rotation is not orthogonal")
+    return eigenvectors
 
 
 def trajectory_pivot_d0_from_initial_values(data, args, initial_values):
@@ -2959,6 +3008,7 @@ def build_model(
     standardize_ar_mean=False,
     rotate_ar_coordinates=False,
     whiten_np_trajectory=False,
+    np_rate_likelihood_rotation=None,
     pivot_initial_thickness=False,
     np_entropy_weight=NP_ENTROPY_WEIGHT,
     np_smoothness_weight=NP_SMOOTHNESS_WEIGHT,
@@ -3039,6 +3089,25 @@ def build_model(
         raise ValueError("Pivoted initial thickness currently requires a fully non-parametric trajectory")
     if rotate_ar_coordinates and not standardize_ar_mean:
         raise ValueError("AR coordinate rotation requires standardized AR mean coordinates")
+    if np_rate_likelihood_rotation is not None:
+        if not (whiten_np_trajectory and fully_np_trajectory):
+            raise ValueError(
+                "Trajectory likelihood rotation requires whitened fully non-parametric rates"
+            )
+        np_rate_likelihood_rotation = np.asarray(
+            np_rate_likelihood_rotation, dtype=float
+        )
+        expected_rotation_shape = (len(data["node_days"]), len(data["node_days"]))
+        if (
+            np_rate_likelihood_rotation.shape != expected_rotation_shape
+            or not np.all(np.isfinite(np_rate_likelihood_rotation))
+            or not np.allclose(
+                np_rate_likelihood_rotation.T @ np_rate_likelihood_rotation,
+                np.eye(expected_rotation_shape[0]),
+                atol=1.0e-10,
+            )
+        ):
+            raise ValueError("Trajectory likelihood rotation must be finite and orthogonal")
     if (
         not np.isfinite(constant_rate_smoothness_weight)
         or constant_rate_smoothness_weight < 0.0
@@ -3273,6 +3342,7 @@ def build_model(
         data, trajectory_prior_rate, initial_thickness_prior_mean_nm
     )
     rate_whitener = None
+    rate_likelihood_rotation_holder = {"value": None}
     if whiten_np_trajectory and fully_np_trajectory:
         rate_whitener = jnp.asarray(
             trajectory_rate_whitener(
@@ -3282,6 +3352,10 @@ def build_model(
                 np_smoothness_weight,
             )
         )
+        if np_rate_likelihood_rotation is not None:
+            rate_likelihood_rotation_holder["value"] = jnp.asarray(
+                np_rate_likelihood_rotation
+            )
 
     def physical_ar_parameters(ar_raw):
         active_parameters = active_lower + (
@@ -3547,12 +3621,18 @@ def build_model(
         if fully_np_trajectory:
             log_scale = jnp.asarray(0.0)
             if whiten_np_trajectory:
+                rate_likelihood_rotation = rate_likelihood_rotation_holder["value"]
                 np_log_rate_z = numpyro.sample(
                     "np_log_rate_z",
                     dist.Normal(0.0, 1.0)
                     .expand((len(data["node_days"]),))
                     .to_event(1),
                 )
+                if rate_likelihood_rotation is not None:
+                    np_log_rate_z = numpyro.deterministic(
+                        "np_log_rate_likelihood_rotated",
+                        jnp.matmul(np_log_rate_z, rate_likelihood_rotation.T),
+                    )
                 np_log_rate_nodes = numpyro.deterministic(
                     "np_log_rate_nodes",
                     jnp.log(trajectory_prior_rate)
@@ -4107,6 +4187,7 @@ def build_model(
         if np_modulation or constant_rate_modulation or fully_np_trajectory:
             numpyro.deterministic("np_smoothness", np_smoothness)
 
+    model.np_rate_likelihood_rotation_holder = rate_likelihood_rotation_holder
     return model
 
 
@@ -4838,6 +4919,13 @@ def write_outputs(
         "fully_np_trajectory": int(
             getattr(args, "fully_np_trajectory", False)
         ),
+        "standardize_ar_mean": int(getattr(args, "standardize_ar_mean", False)),
+        "rotate_ar_coordinates": int(getattr(args, "rotate_ar_coordinates", False)),
+        "whiten_np_trajectory": int(getattr(args, "whiten_np_trajectory", False)),
+        "rotate_np_likelihood": int(getattr(args, "rotate_np_likelihood", False)),
+        "pivot_initial_thickness": int(
+            getattr(args, "pivot_initial_thickness", False)
+        ),
         "qe_rbf_node_wavelengths_nm": qe_rbf_nodes,
         "qe_rbf_width_nm": qe_rbf_width_nm,
         "qe_rbf_prior_sigma_log": qe_rbf_prior_sigma_log,
@@ -5422,6 +5510,12 @@ def write_outputs(
             "coordinates; all node degrees of freedom remain free."
             if getattr(args, "whiten_np_trajectory", False)
             else "Fully non-parametric log-rate nodes are sampled directly."
+        ),
+        (
+            "Whitened rate latents use a full-rank orthogonal rotation from the "
+            "conditional posterior Hessian; all node degrees of freedom remain free."
+            if getattr(args, "rotate_np_likelihood", False)
+            else "No likelihood-informed rate rotation is applied."
         ),
         "The primary trajectory quantity is a positive instantaneous rate; ice thickness is its time integral.",
         (
@@ -6509,6 +6603,14 @@ def parse_args():
             "independent-plus-curvature Gaussian prior; all node degrees of freedom remain free."
         ),
     )
+    parser.add_argument(
+        "--rotate-np-likelihood",
+        action="store_true",
+        help=(
+            "Apply a full-rank orthogonal rotation to whitened log-rate latents "
+            "using the conditional posterior Hessian at the initialization point."
+        ),
+    )
     parser.add_argument("--np-entropy-weight", type=float, default=NP_ENTROPY_WEIGHT)
     parser.add_argument(
         "--np-smoothness-weight",
@@ -6546,6 +6648,8 @@ def main():
         args.fully_np_trajectory = False
     if args.whiten_np_trajectory and not args.fully_np_trajectory:
         raise ValueError("--whiten-np-trajectory requires --fully-np-trajectory")
+    if args.rotate_np_likelihood and not args.whiten_np_trajectory:
+        raise ValueError("--rotate-np-likelihood requires --whiten-np-trajectory")
     if args.pivot_initial_thickness and not args.fully_np_trajectory:
         raise ValueError("--pivot-initial-thickness requires --fully-np-trajectory")
     if args.rotate_ar_coordinates and not args.standardize_ar_mean:
@@ -6830,6 +6934,7 @@ def main():
                 data, args, ar_reference, ar_lower, ar_upper
             ),
         )
+    args.np_rate_likelihood_rotation = None
     ar_prior_reference = (
         map_start_reference(args, ar_reference, ar_lower, ar_upper)
         if args.ar_prior_from_map_start
@@ -6850,6 +6955,7 @@ def main():
         standardize_ar_mean=args.standardize_ar_mean,
         rotate_ar_coordinates=args.rotate_ar_coordinates,
         whiten_np_trajectory=args.whiten_np_trajectory,
+        np_rate_likelihood_rotation=args.np_rate_likelihood_rotation,
         pivot_initial_thickness=args.pivot_initial_thickness,
         np_entropy_weight=args.np_entropy_weight,
         np_smoothness_weight=args.np_smoothness_weight,
@@ -6906,6 +7012,16 @@ def main():
         ),
         early_time_scale_prior_sigma=args.early_time_scale_prior_sigma,
     )
+    if args.rotate_np_likelihood:
+        args.np_rate_likelihood_rotation = trajectory_rate_posterior_rotation(
+            model, initial_values, jax
+        )
+        initial_values = apply_trajectory_rate_likelihood_rotation(
+            initial_values, args
+        )
+        model.np_rate_likelihood_rotation_holder["value"] = jax.numpy.asarray(
+            args.np_rate_likelihood_rotation
+        )
     setup_seconds = time.perf_counter() - run_start
     map_diagnostics = None
     if (
@@ -6943,6 +7059,7 @@ def main():
             standardize_ar_mean=args.standardize_ar_mean,
             rotate_ar_coordinates=args.rotate_ar_coordinates,
             whiten_np_trajectory=args.whiten_np_trajectory,
+            np_rate_likelihood_rotation=args.np_rate_likelihood_rotation,
             pivot_initial_thickness=args.pivot_initial_thickness,
             np_entropy_weight=args.np_entropy_weight,
             np_smoothness_weight=args.np_smoothness_weight,
@@ -7001,6 +7118,9 @@ def main():
         )
         reduced_initial_values = initial_values_for_data(
             reduced_data, args, ar_reference, ar_lower, ar_upper
+        )
+        reduced_initial_values = apply_trajectory_rate_likelihood_rotation(
+            reduced_initial_values, args
         )
         if args.map_optimizer == "lbfgs":
             reduced_scales = (
