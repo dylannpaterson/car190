@@ -3010,6 +3010,7 @@ def build_model(
     whiten_np_trajectory=False,
     np_rate_likelihood_rotation=None,
     pivot_initial_thickness=False,
+    map_safe_initial_thickness=False,
     np_entropy_weight=NP_ENTROPY_WEIGHT,
     np_smoothness_weight=NP_SMOOTHNESS_WEIGHT,
     np_max_node_multiplier=NP_MAX_NODE_MULTIPLIER,
@@ -3343,6 +3344,7 @@ def build_model(
     )
     rate_whitener = None
     rate_likelihood_rotation_holder = {"value": None}
+    map_safe_initial_thickness_holder = {"value": bool(map_safe_initial_thickness)}
     if whiten_np_trajectory and fully_np_trajectory:
         rate_whitener = jnp.asarray(
             trajectory_rate_whitener(
@@ -4051,9 +4053,50 @@ def build_model(
                 low=INITIAL_THICKNESS_PRIOR_LOW_NM,
                 high=INITIAL_THICKNESS_PRIOR_HIGH_NM,
             )
+            if map_safe_initial_thickness_holder["value"]:
+                base_initial_thickness_prior = dist.Normal(
+                    initial_thickness_prior_mean_nm,
+                    initial_thickness_prior_sigma_nm,
+                )
+                normalization = jnp.log(
+                    base_initial_thickness_prior.cdf(
+                        initial_thickness_prior.high
+                    )
+                    - base_initial_thickness_prior.cdf(
+                        initial_thickness_prior.low
+                    )
+                )
+                clipped_d0 = jnp.clip(
+                    d0,
+                    initial_thickness_prior.low,
+                    initial_thickness_prior.high,
+                )
+                distance_outside = jnp.where(
+                    d0 < initial_thickness_prior.low,
+                    initial_thickness_prior.low - d0,
+                    jnp.where(
+                        d0 > initial_thickness_prior.high,
+                        d0 - initial_thickness_prior.high,
+                        0.0,
+                    ),
+                )
+                safe_log_prob = (
+                    base_initial_thickness_prior.log_prob(clipped_d0)
+                    - normalization
+                    - 0.5
+                    * (distance_outside / 1.0e-3) ** 2
+                )
+                initial_thickness_log_prob = jnp.where(
+                    (d0 >= initial_thickness_prior.low)
+                    & (d0 <= initial_thickness_prior.high),
+                    base_initial_thickness_prior.log_prob(d0) - normalization,
+                    safe_log_prob,
+                )
+            else:
+                initial_thickness_log_prob = initial_thickness_prior.log_prob(d0)
             numpyro.factor(
                 "initial_thickness_prior",
-                initial_thickness_prior.log_prob(d0)
+                initial_thickness_log_prob
                 + jnp.log(initial_thickness_prior_sigma_nm)
                 - dist.Normal(0.0, 1.0).log_prob(initial_thickness_pivot_z),
             )
@@ -4188,6 +4231,7 @@ def build_model(
             numpyro.deterministic("np_smoothness", np_smoothness)
 
     model.np_rate_likelihood_rotation_holder = rate_likelihood_rotation_holder
+    model.map_safe_initial_thickness_holder = map_safe_initial_thickness_holder
     return model
 
 
@@ -4225,9 +4269,7 @@ def initial_values_for_data(data, args, ar_reference, ar_lower, ar_upper):
     else:
         initial_values = {"ar_mu_raw": reference_raw}
     if getattr(args, "fixed_initial_thickness_nm", None) is None:
-        if getattr(args, "pivot_initial_thickness", False):
-            initial_values["initial_thickness_pivot_z"] = 0.0
-        else:
+        if not getattr(args, "pivot_initial_thickness", False):
             initial_values["initial_thickness_nm"] = getattr(
                 args, "initial_thickness_init_nm", INITIAL_THICKNESS_INIT_NM
             )
@@ -4348,6 +4390,16 @@ def initial_values_for_data(data, args, ar_reference, ar_lower, ar_upper):
             initial_values["log_trajectory_scale"] = np.log(
                 map_trajectory_rate_nm_day / trajectory_rate_per_scale(data["days"])
             )
+    if (
+        getattr(args, "pivot_initial_thickness", False)
+        and getattr(args, "fixed_initial_thickness_nm", None) is None
+    ):
+        initial_values["initial_thickness_pivot_z"] = trajectory_pivot_z_from_initial_thickness(
+            getattr(args, "initial_thickness_init_nm", INITIAL_THICKNESS_INIT_NM),
+            data,
+            args,
+            trajectory_log_rates_from_initial_values(data, args, initial_values),
+        )
     hierarchy_parameter_count = (
         args.ar_layers
         if args.shared_ar_optical_properties
@@ -5537,6 +5589,14 @@ def write_outputs(
             f"MAP-only trajectory-rate start: `{args.map_trajectory_rate_nm_day}` nm/day."
             if args.map_trajectory_rate_nm_day is not None
             else "MAP-only trajectory-rate start: historical initialization."
+        ),
+        (
+            "Cold MAP uses a finite smooth continuation outside the initial-thickness "
+            "support for line-search stability; the exact truncated prior is restored "
+            "before NUTS."
+            if getattr(args, "map_steps", 0)
+            and getattr(args, "pivot_initial_thickness", False)
+            else "No MAP-only initial-thickness support continuation is used."
         ),
         (
             "Deterministic MAP-only evaluation; no NUTS posterior was sampled."
@@ -6957,6 +7017,7 @@ def main():
         whiten_np_trajectory=args.whiten_np_trajectory,
         np_rate_likelihood_rotation=args.np_rate_likelihood_rotation,
         pivot_initial_thickness=args.pivot_initial_thickness,
+        map_safe_initial_thickness=bool(args.map_steps),
         np_entropy_weight=args.np_entropy_weight,
         np_smoothness_weight=args.np_smoothness_weight,
         np_max_node_multiplier=args.np_max_node_multiplier,
@@ -7061,6 +7122,7 @@ def main():
             whiten_np_trajectory=args.whiten_np_trajectory,
             np_rate_likelihood_rotation=args.np_rate_likelihood_rotation,
             pivot_initial_thickness=args.pivot_initial_thickness,
+            map_safe_initial_thickness=bool(args.map_steps),
             np_entropy_weight=args.np_entropy_weight,
             np_smoothness_weight=args.np_smoothness_weight,
             np_max_node_multiplier=args.np_max_node_multiplier,
@@ -7191,6 +7253,20 @@ def main():
                 args.seed + 1,
                 args.map_steps,
                 args.map_learning_rate,
+            )
+    if args.map_steps and not args.map_only:
+        model.map_safe_initial_thickness_holder["value"] = False
+    if args.map_steps and args.pivot_initial_thickness:
+        map_initial_thickness = trajectory_pivot_d0_from_initial_values(
+            data, args, initial_values
+        )
+        if not (
+            INITIAL_THICKNESS_PRIOR_LOW_NM < map_initial_thickness
+            < INITIAL_THICKNESS_PRIOR_HIGH_NM
+        ):
+            raise ValueError(
+                "MAP ended outside the supported initial-thickness interval: "
+                f"{map_initial_thickness} nm"
             )
     if args.map_only:
         from numpyro.infer import Predictive

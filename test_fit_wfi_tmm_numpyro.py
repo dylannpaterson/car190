@@ -935,6 +935,60 @@ class TestTmmTileData(unittest.TestCase):
             (3,),
         )
 
+    def test_map_safe_pivot_extension_is_only_used_for_cold_map(self):
+        jax, _, _, _, _, _, _ = require_numpyro()
+        from numpyro.handlers import seed, trace
+        from numpyro.infer.util import log_density
+
+        data = {
+            "counts": np.ones((1, 3)),
+            "sums": np.zeros((1, 3)),
+            "sum_squared": np.ones((1, 3)),
+            "days": np.asarray([0.0, 1.0, 2.0]),
+            "repeat_index": np.asarray([0, 1, 2]),
+            "node_days": np.asarray([0.0, 1.0, 2.0]),
+            "led": np.asarray([1, 1, 1]),
+            "first_by_led": np.zeros(6, dtype=int),
+            "step_design": np.zeros(3),
+            "n_scas": 1,
+            "n_tiles": 1,
+            "sca_index": np.zeros(1, dtype=int),
+            "repeat_values": np.asarray([0, 1, 2]),
+        }
+        context = {
+            "wavelengths": np.asarray([1000.0]),
+            "model_weights": np.ones((6, 1)),
+            "outside_output": np.zeros(6),
+            "clean_output": np.ones(6),
+        }
+        common = dict(
+            log_noise_sigma=0.005,
+            likelihood_weight=1.0e-8,
+            ar_layers=3,
+            shared_ar_optical_properties=True,
+            fully_np_trajectory=True,
+            whiten_np_trajectory=True,
+            pivot_initial_thickness=True,
+            initial_thickness_prior_mean_nm=0.0,
+            initial_thickness_prior_sigma_nm=50.0,
+        )
+        safe_model = build_model(
+            data, context, map_safe_initial_thickness=True, **common
+        )
+        sample_trace = trace(seed(safe_model, jax.random.PRNGKey(71))).get_trace()
+        values = {
+            name: site["value"]
+            for name, site in sample_trace.items()
+            if site["type"] == "sample"
+        }
+        values["initial_thickness_pivot_z"] = -100.0
+        safe_log_joint, _ = log_density(safe_model, (), {}, values)
+        self.assertTrue(np.isfinite(float(safe_log_joint)))
+
+        exact_model = build_model(data, context, **common)
+        exact_log_joint, _ = log_density(exact_model, (), {}, values)
+        self.assertFalse(np.isfinite(float(exact_log_joint)))
+
     def test_map_warm_start_checks_data_fingerprint_and_site_shapes(self):
         data = load_tile_statistics(DEFAULT_SINGLE_SCA_TILE_STATISTICS, max_tiles=1)
         with tempfile.TemporaryDirectory() as directory:
