@@ -4084,7 +4084,7 @@ def build_model(
                     base_initial_thickness_prior.log_prob(clipped_d0)
                     - normalization
                     - 0.5
-                    * (distance_outside / 1.0e-3) ** 2
+                    * (distance_outside / 1.0e-6) ** 2
                 )
                 initial_thickness_log_prob = jnp.where(
                     (d0 >= initial_thickness_prior.low)
