@@ -24,6 +24,25 @@ from analyze_wfi01_all_pixel_soc_model import parse_mast_time
 from build_wfi01_tile_statistics import FIELDS, tile_sufficient_statistics
 
 
+COUNT_FIELDS = tuple(
+    field
+    for field in FIELDS
+    if field
+    in {
+        "sum_reference_counts",
+        "sum_squared_reference_counts",
+        "sum_current_counts",
+        "sum_squared_current_counts",
+        "sum_reference_current_counts",
+        "min_reference_count",
+        "max_reference_count",
+        "min_current_count",
+        "max_current_count",
+    }
+)
+LEGACY_FIELDS = tuple(field for field in FIELDS if field not in COUNT_FIELDS)
+
+
 ROOT = Path(__file__).resolve().parent
 DEFAULT_INDEX = ROOT / "all_wfi_rcs_flat_index.csv"
 DEFAULT_OUTPUT_DIR = ROOT / "wfi_tile_log_statistics_512"
@@ -133,7 +152,7 @@ def detector_observations(rows, detector):
             )
     for led, count in led_counts.items():
         if count < 3:
-            raise ValueError(f"{detector} LED {led} has too few repeats")
+            raise ValueError(f"{detector} LED {led} has too few epochs")
     baselines = {}
     for row in observations:
         baselines.setdefault(row["led"], row["file_set_name"])
@@ -234,6 +253,14 @@ def write_detector_statistics(
         raise ValueError("tile_size must be positive")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if resume and output_path.exists():
+        with output_path.open(newline="") as handle:
+            fieldnames = csv.DictReader(handle).fieldnames or []
+        missing = set(FIELDS).difference(fieldnames)
+        if missing:
+            raise ValueError(
+                f"Existing statistics file is missing fields {sorted(missing)}; "
+                "rerun with --no-resume to rebuild it"
+            )
         print(f"Skipping completed detector output: {output_path}")
         return output_path
 
@@ -334,19 +361,27 @@ def incremental_part_path(parts_dir, file_set_name):
     return parts_dir / f"{file_set_name}.csv"
 
 
-def read_statistics_rows(path):
+def read_statistics_rows(path, return_fieldnames=False):
     with path.open(newline="") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames is None:
             raise ValueError(f"Statistics file has no header: {path}")
-        missing = set(FIELDS).difference(reader.fieldnames)
+        fieldnames = tuple(reader.fieldnames)
+        missing = set(LEGACY_FIELDS).difference(fieldnames)
         if missing:
             raise ValueError(
                 f"Statistics file is missing fields {sorted(missing)}: {path}"
             )
+        present_count_fields = set(fieldnames).intersection(COUNT_FIELDS)
+        if present_count_fields and present_count_fields != set(COUNT_FIELDS):
+            raise ValueError(
+                f"Statistics file has an incomplete count-moment schema: {path}"
+            )
         rows = list(reader)
     if not rows:
         raise ValueError(f"Statistics file has no rows: {path}")
+    if return_fieldnames:
+        return rows, fieldnames
     return rows
 
 
@@ -365,12 +400,13 @@ def update_statistics_metadata(row, observation):
     return updated
 
 
-def write_statistics_rows(output_path, rows):
+def write_statistics_rows(output_path, rows, fieldnames=None):
     """Atomically replace a statistics file with already-computed rows."""
+    fieldnames = tuple(FIELDS if fieldnames is None else fieldnames)
     temporary_path = output_path.with_name(output_path.name + ".partial")
     try:
         with temporary_path.open("w", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=FIELDS)
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(rows)
             handle.flush()
@@ -457,7 +493,9 @@ def update_detector_statistics_incremental(
         raise ValueError(
             f"Incremental update requires an existing statistics file: {output_path}"
         )
-    existing_rows = read_statistics_rows(output_path)
+    existing_rows, existing_fieldnames = read_statistics_rows(
+        output_path, return_fieldnames=True
+    )
     existing_by_file_set = {}
     for row in existing_rows:
         file_set_name = row["file_set_name"]
@@ -487,7 +525,7 @@ def update_detector_statistics_incremental(
         for observation in observations:
             for row in existing_by_file_set[observation["file_set_name"]].values():
                 output_rows.append(update_statistics_metadata(row, observation))
-        write_statistics_rows(output_path, output_rows)
+        write_statistics_rows(output_path, output_rows, existing_fieldnames)
         print(
             f"No new observations for {output_path}; refreshed metadata for "
             f"{len(observations)} existing observations"
@@ -549,7 +587,10 @@ def update_detector_statistics_incremental(
         for row in rows:
             output_rows.append(update_statistics_metadata(row, observation))
 
-    write_statistics_rows(output_path, output_rows)
+    output_rows = [
+        {field: row[field] for field in existing_fieldnames} for row in output_rows
+    ]
+    write_statistics_rows(output_path, output_rows, existing_fieldnames)
     print(
         f"Updated {output_path} with {len(new_observations)} new observations; "
         f"reused {len(observations) - len(new_observations)} existing observations"

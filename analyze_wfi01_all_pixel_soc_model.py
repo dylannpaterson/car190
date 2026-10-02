@@ -1,12 +1,12 @@
 """Fit one global NP SOC trajectory to every valid WFI01 pixel.
 
-For each LED and repeat, the observation for pixel ``p`` is
+For each LED and observation epoch, the observation for pixel ``p`` is
 
     log(current[p] / first[p]).
 
 The model predicts one common log throughput ratio for all pixels in that
 exposure. The primary trajectory jointly fits the physical thickness at the
-first exposure and one positive repeat multiplier on a square-root accumulation
+first exposure and one positive epoch multiplier on a square-root accumulation
 prior; a one-parameter square-root fit is retained as a baseline.
 The exact all-pixel squared-error loss is retained using count, sum, and
 sum-of-squares sufficient statistics, so fitting does not require keeping
@@ -82,7 +82,7 @@ def read_wfi01_index(path, data_dir):
         )
         led_counts.append(len(led_rows))
         if len(led_rows) < 3:
-            raise ValueError(f"LED {led} has too few repeats: {len(led_rows)}")
+            raise ValueError(f"LED {led} has too few epochs: {len(led_rows)}")
         if n_repeats is None:
             n_repeats = len(led_rows)
         for repeat, row in enumerate(led_rows):
@@ -105,7 +105,7 @@ def read_wfi01_index(path, data_dir):
                 }
             )
     if len(set(led_counts)) != 1:
-        raise ValueError(f"LEDs have unequal repeat counts: {led_counts}")
+        raise ValueError(f"LEDs have unequal epoch counts: {led_counts}")
     return observations, global_start
 
 
@@ -234,7 +234,7 @@ def build_all_pixel_statistics(index_path, data_dir, output_path, chunk_rows=256
             }
             result_rows.append(output_row)
             print(
-                f"LED {led}, repeat {row['repeat']:02d}: "
+                f"LED {led}, epoch {row['repeat']:02d}: "
                 f"n={statistics['pixel_count']:,}, "
                 f"mean={statistics['mean_log_change']:.9g}, "
                 f"pixel RMS={statistics['pixel_rms_about_mean_log']:.9g}"
@@ -681,7 +681,7 @@ def fit_global_entropy_sqrt(
 
     repeats = sorted({row["repeat"] for row in observations})
     if len(repeats) < 3:
-        raise ValueError("The NP trajectory requires at least three repeats")
+        raise ValueError("The NP trajectory requires at least three epochs")
     if optimizer_maxiter < 1 or optimizer_ftol <= 0.0:
         raise ValueError("Optimizer iteration and tolerance controls must be positive")
     repeat_to_index = {repeat: index for index, repeat in enumerate(repeats)}
@@ -938,7 +938,7 @@ def fit_global_entropy_sqrt(
             or np.any(initial_node_multipliers <= 0.0)
         ):
             raise ValueError(
-                "Initial node multipliers must be one finite positive value per repeat"
+                "Initial node multipliers must be one finite positive value per epoch"
             )
         normalized_nodes = initial_node_multipliers / initial_node_multipliers[0]
         initial_log_nodes = np.clip(
@@ -1489,13 +1489,13 @@ def write_report(
         "## Scope",
         "",
         f"- One global non-parametric trajectory is shared by every WFI01 pixel and fitted LED(s) `{fitted_led_label}`.",
-        "- The NP trajectory is `d_i = d0 + scale * m_i * d_sqrt(t_i)`, with one shared initial physical thickness `d0`, one positive multiplier per repeat, the first multiplier fixed to one, and non-decreasing fitted thickness.",
+        "- The NP trajectory is `d_i = d0 + scale * m_i * d_sqrt(t_i)`, with one shared initial physical thickness `d0`, one positive multiplier per observation epoch, the first multiplier fixed to one, and non-decreasing fitted thickness.",
         "- Each LED is normalized to its first exposure as `R(d_i) / R(d_first,LED)`; normalization does not force the physical baseline thickness to zero.",
         "- The square-root trajectory is retained as a baseline comparison with the same initial-thickness treatment; it is not the primary model.",
         "- Every comparison requires finite, positive data and `DQ == 0` in both the current and that LED's first exposure.",
-        f"- Exact pixel comparisons: {selected['pixel_count']:,} across {len(observations)} LED/repeat pairs.",
+        f"- Exact pixel comparisons: {selected['pixel_count']:,} across {len(observations)} LED/epoch pairs.",
         f"- The six identity-normalized reference pairs constrain no model parameter. Excluding them leaves {selected['nonreference_pixel_count']:,} comparisons; both RMS conventions are reported below.",
-        "- Pixels and repeats are correlated, so this fit reports descriptive residuals rather than treating the pixel count as an inferential sample size.",
+        "- Pixels and epochs are correlated, so this fit reports descriptive residuals rather than treating the pixel count as an inferential sample size.",
         "",
         "## Loss",
         "",
@@ -1840,10 +1840,19 @@ def parse_args():
     )
     parser.add_argument("--led", type=int, choices=range(1, 7), default=None)
     parser.add_argument(
-        "--max-repeat",
+        "--max-epoch",
+        dest="max_repeat",
         type=int,
         default=None,
-        help="Optionally fit only repeats up to and including this index",
+        metavar="EPOCH",
+        help="Optionally fit only observation epochs up to and including this index",
+    )
+    parser.add_argument(
+        "--max-repeat",
+        dest="max_repeat",
+        type=int,
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--step-time",
@@ -1866,7 +1875,7 @@ def main():
     if args.initial_thickness_nm is not None and args.initial_thickness_nm < 0.0:
         raise ValueError("--initial-thickness-nm must be non-negative")
     if args.max_repeat is not None and args.max_repeat < 2:
-        raise ValueError("--max-repeat must retain at least repeats 0, 1, and 2")
+        raise ValueError("--max-epoch must retain at least epochs 0, 1, and 2")
     try:
         initial_thickness_starts = [
             float(value) for value in args.initial_thickness_starts.split(",")
@@ -1899,7 +1908,7 @@ def main():
         ]
         if not observations:
             raise ValueError(
-                f"No observations found through repeat {args.max_repeat}"
+                f"No observations found through epoch {args.max_repeat}"
             )
 
     step_day = None

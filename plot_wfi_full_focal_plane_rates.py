@@ -46,14 +46,7 @@ def sca_position(sca):
     raise ValueError(f"Unknown SCA: {sca}")
 
 
-def sca_row(sca):
-    for scas in COLUMN_SCA:
-        if sca in scas:
-            return scas.index(sca)
-    raise ValueError(f"Unknown SCA: {sca}")
-
-
-def load_rate_map(path, expected_sca, orient=True):
+def load_rate_map(path, expected_sca):
     if not path.exists():
         return None
     with path.open(newline="") as handle:
@@ -66,22 +59,28 @@ def load_rate_map(path, expected_sca, orient=True):
         values = np.full((8, 8), np.nan)
         for row in rows:
             values[int(row["tile_row"]), int(row["tile_col"])] = float(row[field])
-        if orient:
-            # Top and middle detector rows are upside-down in the physical
-            # mosaic; bottom-row detectors have the opposite handedness.
-            values = np.flipud(values) if sca_row(expected_sca) < 2 else np.fliplr(values)
+        # MAST L1/L2 arrays are already in the common WFI science frame.
+        # Tile row 0 is the science-frame bottom, so no physical-detector flip
+        # belongs here.
         maps[field] = values
     return maps
 
 
-def load_all_maps(root, fit_suffix, orient=True):
+def load_all_maps(root, fit_suffix):
     maps = {}
     for sca in SCAS:
-        output_dir = root / f"{sca.lower()}_{fit_suffix}"
-        maps[sca] = load_rate_map(
-            output_dir / "tile_rate_posterior.csv",
-            sca,
-            orient=orient,
+        output_dirs = (
+            root / f"{sca.lower()}_{fit_suffix}_prod",
+            root / f"{sca.lower()}_{fit_suffix}",
+        )
+        maps[sca] = next(
+            (
+                rate_map
+                for output_dir in output_dirs
+                if (rate_map := load_rate_map(output_dir / "tile_rate_posterior.csv", sca))
+                is not None
+            ),
+            None,
         )
     return maps
 
@@ -266,24 +265,26 @@ def parse_args():
         help="Statistics CSV or directory used to derive the latest pass label.",
     )
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--no-orientation-flip", action="store_true")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     output = args.output or args.root / "wfi_rcs1039_full_focal_plane_rate_maps.png"
-    orient = not args.no_orientation_flip
-    maps = load_all_maps(args.root, args.fit_suffix, orient=orient)
+    maps = load_all_maps(args.root, args.fit_suffix)
     statistics_path = args.tile_statistics or args.root / "wfi_tile_log_statistics_512"
     if not statistics_path.is_absolute():
         statistics_path = args.root / statistics_path
     pass_label = latest_pass_label(statistics_path)
-    model_label = (
-        "square-root + NP modulation"
-        if "np_ledacm" in args.fit_suffix
-        else "fully nonparametric trajectory"
-    )
+    if "production_sharedAR_tileRate_twoCommonACM" in args.fit_suffix:
+        model_label = (
+            "constant-rate modulation; tile-specific rate scales; "
+            "shared AR and common ACM steps"
+        )
+    elif "np_ledacm" in args.fit_suffix:
+        model_label = "square-root + NP modulation"
+    else:
+        model_label = "fully nonparametric trajectory"
     draw_rate_mosaic(output, maps, model_label, pass_label)
     contrast_output = output.with_name(output.stem + "_tile_contrast.png")
     draw_rate_mosaic(

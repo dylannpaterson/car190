@@ -3,12 +3,12 @@
 The default fit treats the measured light change as ice-driven and compares
 the SCA1 model directly with WFI01.  ``--fit-mode projected`` retains the old,
 conservative all-detector check that removes a free source level for every
-LED/repeat.  That projected mode tests only tiny detector-to-detector spectral
+LED/epoch.  That projected mode tests only tiny detector-to-detector spectral
 differences; it cannot measure the dominant band-common ice signal.
 
 The direct analysis compares linear and square-root trajectories with a
 maximum-entropy extension that places one smooth positive multiplier on the
-square-root model at each repeat.  The results remain model-dependent: the
+square-root model at each observation epoch.  The results remain model-dependent: the
 WFI-to-SCU correspondence and independent source calibration still need to be
 established.
 """
@@ -364,7 +364,7 @@ def generalized_relative_entropy(values):
 
 
 def mean_squared_log_node_curvature(log_nodes, node_days):
-    """Measure log-node curvature while accounting for irregular repeat times."""
+    """Measure log-node curvature while accounting for irregular epoch times."""
     log_nodes = np.asarray(log_nodes, dtype=float)
     node_days = np.asarray(node_days, dtype=float)
     intervals = np.diff(node_days)
@@ -454,7 +454,7 @@ def fit_entropy_sqrt_trajectory(
     """Fit smooth positive node multipliers on the square-root trajectory."""
     repeats = sorted({row["repeat"] for row in observations})
     if len(repeats) < 3:
-        raise ValueError("The entropy trajectory requires at least three repeats")
+        raise ValueError("The entropy trajectory requires at least three epochs")
     repeat_to_index = {repeat: index for index, repeat in enumerate(repeats)}
     observation_nodes = np.asarray(
         [repeat_to_index[row["repeat"]] for row in observations], dtype=int
@@ -482,7 +482,7 @@ def fit_entropy_sqrt_trajectory(
         reset_day,
     )
     if np.any(np.diff(node_days) <= 0.0):
-        raise ValueError("Entropy-node repeat times must be strictly increasing")
+        raise ValueError("Entropy-node epoch times must be strictly increasing")
     null_mse = max(float(np.mean(np.asarray(y_fit) ** 2)), 1.0e-12)
 
     def evaluate_state(scale, log_nodes, details=False):
@@ -871,7 +871,7 @@ def write_report(
         )
         source_description = (
             "The fit assumes the measured relative-light evolution is ice-driven; "
-            "it does not fit a free source level at every repeat."
+            "it does not fit a free source level at every observation epoch."
         )
         model_application = (
             f"SCA1 empirical transmission model, applied only to {fit_detector} "
@@ -880,7 +880,7 @@ def write_report(
     else:
         scope = "WFI01-WFI18"
         nuisance_description = (
-            "free LED/repeat source term and detector offset, projected out before scoring"
+            "free LED/epoch source term and detector offset, projected out before scoring"
         )
         source_description = (
             "This conservative mode discards band-common changes and tests only "
@@ -892,7 +892,7 @@ def write_report(
     entropy_description = []
     if fit_mode == "direct":
         entropy_description = [
-            "- Entropy trajectory: `d_i = scale * m_i * d_sqrt(t_i)`, with one node shared by all six LEDs at each repeat.",
+            "- Entropy trajectory: `d_i = scale * m_i * d_sqrt(t_i)`, with one node shared by all six LEDs at each observation epoch.",
             "- Node constraints: `m_i > 0`, first node fixed to one, and non-decreasing fitted thickness.",
             "- Node regularization: generalized relative entropy `mean(m log(m) - m + 1)` plus time-aware curvature of `log(m)`.",
         ]
@@ -974,7 +974,7 @@ def write_report(
     else:
         lines.extend(
             [
-                "The free LED/repeat terms absorb almost all of a common ice response.",
+                "The free LED/epoch terms absorb almost all of a common ice response.",
                 "Consequently this projected result is an interaction diagnostic, not",
                 "an ice-rate fit; a small improvement cannot be interpreted as evidence",
                 "against independently established ice accumulation.",
@@ -1157,7 +1157,7 @@ def plot_results(
                 color=color,
             )
         axis.axhline(0.0, color="black", linewidth=0.6)
-        axis.set_title("LED/repeat values in the fitted data space")
+        axis.set_title("LED/epoch values in the fitted data space")
         axis.set_xlabel("Elapsed time (hours)")
         if column == 0:
             axis.set_ylabel(f"{fit_space_label.title()} log change")
@@ -1189,7 +1189,7 @@ def plot_results(
     scope = fit_detector if fit_mode == "direct" else "WFI01-WFI18"
     fig.suptitle(
         f"SOC model versus {scope} RCS metadata ({len(observations):,} medians)\n"
-        f"Top: every fitted point; bottom: LED/repeat values. "
+        f"Top: every fitted point; bottom: LED/epoch values. "
         f"Both rows use the {fit_space_label} fit space.",
         fontsize=14,
     )

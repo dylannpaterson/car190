@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from build_wfi_tile_statistics_stream import (
+    LEGACY_FIELDS,
     detector_observations,
     read_index,
     update_detector_statistics_incremental,
@@ -40,7 +41,7 @@ class TestStreamingStatistics(unittest.TestCase):
             }
         )
 
-        self.assertEqual(len(observations), 155)
+        self.assertEqual(len(observations), 257)
         self.assertEqual({row["led"] for row in observations}, set(range(1, 7)))
         self.assertEqual(
             {row["repeat"] for row in observations},
@@ -163,6 +164,24 @@ class TestStreamingStatistics(unittest.TestCase):
         self.assertEqual(len(fetched), 6 * 2)
         expected = 4 * np.log(np.float64(np.float32(1.1)))
         self.assertAlmostEqual(float(rows[-1]["sum_log_change"]), expected, places=12)
+        current_value = np.float64(np.float32(1.1))
+        self.assertAlmostEqual(float(rows[-1]["sum_reference_counts"]), 4.0)
+        self.assertAlmostEqual(
+            float(rows[-1]["sum_squared_reference_counts"]), 4.0
+        )
+        self.assertAlmostEqual(
+            float(rows[-1]["sum_current_counts"]), 4.0 * current_value
+        )
+        self.assertAlmostEqual(
+            float(rows[-1]["sum_squared_current_counts"]), 4.0 * current_value**2
+        )
+        self.assertAlmostEqual(
+            float(rows[-1]["sum_reference_current_counts"]), 4.0 * current_value
+        )
+        self.assertAlmostEqual(float(rows[-1]["min_reference_count"]), 1.0)
+        self.assertAlmostEqual(float(rows[-1]["max_reference_count"]), 1.0)
+        self.assertAlmostEqual(float(rows[-1]["min_current_count"]), current_value)
+        self.assertAlmostEqual(float(rows[-1]["max_current_count"]), current_value)
 
     def test_incremental_update_does_not_refetch_existing_exposures(self):
         def observation(led, repeat, name, days):
@@ -265,6 +284,59 @@ class TestStreamingStatistics(unittest.TestCase):
             {int(row["repeat"]) for row in relabeled_old1},
             {12, 16, 20, 24, 28, 32},
         )
+
+    def test_incremental_update_preserves_legacy_log_schema(self):
+        def observation(led, repeat, name):
+            return {
+                "led": led,
+                "repeat": repeat,
+                "group": (led - 1) * 2 + repeat,
+                "file_set_name": name,
+                "baseline_file_set_name": f"led{led}_old",
+                "exposure_start_time": f"2026-01-01T00:{led:02d}:{repeat:02d}Z",
+                "days": float(repeat),
+                "cal_uri": name,
+            }
+
+        old_observations = [
+            observation(led, 0, f"led{led}_old") for led in range(1, 7)
+        ]
+        all_observations = old_observations + [
+            observation(led, 1, f"led{led}_new") for led in range(1, 7)
+        ]
+        baseline = np.ones((4, 4), dtype=np.float32)
+        dq = np.zeros((4, 4), dtype=np.uint32)
+
+        def fetch_image(uri):
+            return baseline + (0.1 if uri.endswith("new") else 0.0), dq
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "legacy_statistics.csv"
+            write_detector_statistics(
+                old_observations,
+                fetch_image,
+                output,
+                tile_size=2,
+            )
+            with output.open(newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            with output.open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=LEGACY_FIELDS)
+                writer.writeheader()
+                writer.writerows(
+                    {field: row[field] for field in LEGACY_FIELDS} for row in rows
+                )
+
+            update_detector_statistics_incremental(
+                all_observations,
+                fetch_image,
+                output,
+                tile_size=2,
+            )
+            with output.open(newline="") as handle:
+                reader = csv.DictReader(handle)
+                self.assertEqual(tuple(reader.fieldnames), LEGACY_FIELDS)
+                self.assertEqual(len(list(reader)), 6 * 2 * 4)
 
 
 if __name__ == "__main__":

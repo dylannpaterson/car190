@@ -111,7 +111,7 @@ def plot_map_comparison(path, field, label, pairs, metrics):
             if column < 2:
                 image = axes[row_index, column].imshow(
                     grid,
-                    origin="upper",
+                    origin="lower",
                     cmap=cmap,
                     vmin=limits[0],
                     vmax=limits[1],
@@ -119,7 +119,7 @@ def plot_map_comparison(path, field, label, pairs, metrics):
             else:
                 image = axes[row_index, column].imshow(
                     grid,
-                    origin="upper",
+                    origin="lower",
                     cmap="coolwarm",
                     norm=TwoSlopeNorm(vcenter=0.0, vmin=-difference_limit, vmax=difference_limit),
                 )

@@ -138,28 +138,46 @@ def prepare_response_integration(
     qe_values,
     sed_mode,
     qe_column=0,
+    sed_weighting="photon",
+    include_qe=True,
 ):
-    """Precompute one QE-column's LED integrals on the model wavelength grid."""
-    qe_values = np.asarray(qe_values)
-    if qe_values.ndim != 2 or qe_values.shape[0] != len(qe_wavelengths):
-        raise ValueError("QE values must be a wavelength-aligned two-dimensional array")
-    qe_column = int(qe_column)
-    if qe_column < 0 or qe_column >= qe_values.shape[1]:
-        raise ValueError(f"QE column {qe_column} is outside the supplied QE table")
+    """Precompute one QE-column's LED integrals on the model wavelength grid.
+
+    The published RCS table is a relative spectral-energy output, so the
+    production ``photon`` weighting multiplies by wavelength. ``energy`` is
+    retained as a sensitivity mode for a table interpreted as photon-rate
+    output.
+    """
+    if sed_weighting not in ("photon", "energy"):
+        raise ValueError("SED weighting must be 'photon' or 'energy'")
+    if include_qe:
+        qe_values = np.asarray(qe_values)
+        if qe_values.ndim != 2 or qe_values.shape[0] != len(qe_wavelengths):
+            raise ValueError("QE values must be a wavelength-aligned two-dimensional array")
+        qe_column = int(qe_column)
+        if qe_column < 0 or qe_column >= qe_values.shape[1]:
+            raise ValueError(f"QE column {qe_column} is outside the supplied QE table")
     model_weights = np.zeros((6, len(model_wavelengths)), dtype=float)
     outside_output = np.zeros(6, dtype=float)
     clean_output = np.zeros(6, dtype=float)
     for band in range(1, 7):
         spectrum = spectra[band]
         wavelengths = spectrum["wavelength"]
-        qe = np.interp(
-            wavelengths,
-            qe_wavelengths,
-            qe_values[:, qe_column],
-            left=0.0,
-            right=0.0,
+        qe = (
+            np.interp(
+                wavelengths,
+                qe_wavelengths,
+                qe_values[:, qe_column],
+                left=0.0,
+                right=0.0,
+            )
+            if include_qe
+            else np.ones_like(wavelengths)
         )
-        weighted_output = sed_output(spectrum, sed_mode) * wavelengths * qe
+        spectral_weight = (
+            wavelengths if sed_weighting == "photon" else np.ones_like(wavelengths)
+        )
+        weighted_output = sed_output(spectrum, sed_mode) * spectral_weight * qe
         sample_weights = weighted_output * trapezoid_sample_weights(wavelengths)
         clean_output[band - 1] = np.sum(sample_weights)
         supported = (wavelengths >= model_wavelengths[0]) & (
@@ -429,7 +447,7 @@ def run_validation(
                     "optimizer_evaluations": fit["optimizer_evaluations"],
                 }
             )
-        print(f"Validated held-out repeat {repeat}")
+        print(f"Validated held-out epoch {repeat}")
     return rows
 
 
@@ -608,7 +626,7 @@ def write_plots(
                 color=color,
                 label=label.replace("_", " "),
             )
-        axis.set_xlabel("Held-out repeat")
+        axis.set_xlabel("Held-out epoch")
         axis.set_ylabel("Held-out equal-exposure RMSE (log)")
         axis.grid(alpha=0.2)
         axis.legend(frameon=False)
@@ -707,7 +725,7 @@ def write_summary(
                 "",
                 "## Repeat-Blocked Validation",
                 "",
-                "Each listed repeat was excluded for all six LEDs while preserving the full observation layout and original per-LED reference exposures.",
+                "Each listed epoch was excluded for all six LEDs while preserving the full observation layout and original per-LED reference exposures.",
                 "",
                 "| Model | Mean held-out RMSE (log) | Median held-out RMSE (log) |",
                 "|---|---:|---:|",
@@ -770,9 +788,17 @@ def parse_args():
     parser.add_argument("--phase-slope-prior-sigma", type=float, default=0.2)
     parser.add_argument("--phase-opd-prior-sigma", type=float, default=100.0)
     parser.add_argument(
-        "--validation-repeats",
+        "--validation-epochs",
+        dest="validation_repeats",
         default="",
-        help="Comma-separated repeats from 1 through 15 to hold out one at a time",
+        metavar="EPOCHS",
+        help="Comma-separated observation epochs from 1 through 15 to hold out one at a time",
+    )
+    parser.add_argument(
+        "--validation-repeats",
+        dest="validation_repeats",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--validation-initial-thickness-starts",
@@ -797,7 +823,7 @@ def main():
         else []
     )
     if any(repeat < 1 or repeat > 15 for repeat in validation_repeats):
-        raise ValueError("Validation repeats must lie between 1 and 15")
+        raise ValueError("Validation epochs must lie between 1 and 15")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     observations = load_all_pixel_statistics(args.statistics_path)
     step_mask = parse_step_mask(observations, args.step_time)

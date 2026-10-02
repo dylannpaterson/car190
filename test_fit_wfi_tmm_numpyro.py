@@ -34,6 +34,7 @@ from fit_wfi_tmm_numpyro import (
     load_asw_optical_constants,
     hgcdte_reference_optical_constants,
     hgcdte_modulation_basis,
+    ice_modulation_basis,
     incidence_cone_quadrature,
     incidence_pupil_quadrature,
     incidence_pupil_ray_sines,
@@ -180,6 +181,106 @@ class TestTmmTileData(unittest.TestCase):
         )
         self.assertTrue(Path(corrected["fixed_corrections_path"]).is_absolute())
 
+    def test_fixed_corrections_apply_additional_acm_step(self):
+        data = {
+            "groups": np.asarray([0, 1]),
+            "days": np.asarray([0.0, 1.0]),
+            "counts": np.asarray([[2.0, 3.0]]),
+            "sums": np.asarray([[1.0, 2.0]]),
+            "sum_squared": np.asarray([[0.5, 2.0]]),
+            "step_design": np.asarray([0.0, 1.0]),
+            "late_step_design": np.asarray([0.0, 0.0]),
+            "additional_step_design": np.asarray([0.0, 1.0]),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixed.csv"
+            path.write_text(
+                "group,days,log_gain_correction,acm_step_log_offset,"
+                "additional_acm_step_log_offset,late_acm_step_log_offset\n"
+                "0,0,0.1,0.3,0.7,0.4\n"
+                "1,1,0.2,0.3,0.7,0.4\n"
+            )
+            corrected = apply_fixed_corrections(data, path)
+        delta = np.asarray([[0.1, -0.8]])
+        np.testing.assert_allclose(
+            corrected["sums"], data["sums"] + data["counts"] * delta
+        )
+        self.assertEqual(
+            corrected["fixed_additional_acm_step_log_offset"],
+            0.7,
+        )
+
+    def test_fixed_corrections_apply_pre_reset_acm_step(self):
+        data = {
+            "groups": np.asarray([0, 1]),
+            "days": np.asarray([0.0, 1.0]),
+            "counts": np.asarray([[2.0, 3.0]]),
+            "sums": np.asarray([[1.0, 2.0]]),
+            "sum_squared": np.asarray([[0.5, 2.0]]),
+            "step_design": np.asarray([0.0, 1.0]),
+            "pre_reset_step_design": np.asarray([0.0, 1.0]),
+            "late_step_design": np.asarray([0.0, 0.0]),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixed.csv"
+            path.write_text(
+                "group,days,log_gain_correction,acm_step_log_offset,"
+                "pre_reset_acm_step_log_offset,late_acm_step_log_offset\n"
+                "0,0,0.1,0.3,0.7,0.4\n"
+                "1,1,0.2,0.3,0.7,0.4\n"
+            )
+            corrected = apply_fixed_corrections(data, path)
+        delta = np.asarray([[0.1, -0.8]])
+        np.testing.assert_allclose(
+            corrected["sums"], data["sums"] + data["counts"] * delta
+        )
+        self.assertEqual(
+            corrected["fixed_pre_reset_acm_step_log_offset"],
+            0.7,
+        )
+
+    def test_tile_fixed_corrections_apply_before_tile_likelihood(self):
+        data = {
+            "groups": np.asarray([0, 1]),
+            "days": np.asarray([0.0, 1.0]),
+            "tile_ids": np.asarray([0, 1]),
+            "n_tiles": 2,
+            "n_scas": 1,
+            "sca_names": np.asarray(["WFI03"]),
+            "counts": np.asarray([[2.0, 3.0], [4.0, 5.0]]),
+            "sums": np.asarray([[1.0, 2.0], [3.0, 4.0]]),
+            "sum_squared": np.asarray(
+                [[0.5, 2.0], [4.5, 8.0]]
+            ),
+            "step_design": np.asarray([0.0, 1.0]),
+            "late_step_design": np.asarray([0.0, 0.0]),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixed_tile.csv"
+            path.write_text(
+                "detector,tile_id,group,days,log_gain_correction,"
+                "acm_step_log_offset,late_acm_step_log_offset\n"
+                "WFI03,0,0,0,0.1,0.3,0.4\n"
+                "WFI03,0,1,1,0.2,0.3,0.4\n"
+                "WFI03,1,0,0,-0.1,0.5,0.6\n"
+                "WFI03,1,1,1,-0.2,0.5,0.6\n"
+            )
+            corrected = apply_fixed_corrections(data, path)
+        delta = np.asarray([[0.1, -0.1], [-0.1, -0.7]])
+        np.testing.assert_allclose(
+            corrected["sums"], data["sums"] + data["counts"] * delta
+        )
+        np.testing.assert_allclose(
+            corrected["sum_squared"],
+            data["sum_squared"]
+            + 2.0 * delta * data["sums"]
+            + data["counts"] * delta**2,
+        )
+        self.assertTrue(corrected["fixed_corrections_tile_aware"])
+        np.testing.assert_allclose(
+            corrected["fixed_acm_step_log_offset_by_row"], [0.3, 0.5]
+        )
+
     def test_format_command_line_quotes_arguments(self):
         command = format_command_line(
             ["fit_wfi_tmm_numpyro.py", "--output-dir", "path with spaces"],
@@ -306,6 +407,70 @@ class TestTmmTileData(unittest.TestCase):
         self.assertAlmostEqual(transmission, expected_transmission, places=12)
         self.assertGreaterEqual(1.0 - reflection - transmission, 0.0)
 
+    def test_pre_post_complex_ice_index_sites_and_response(self):
+        jax, jnp, _, _, _, _, _ = require_numpyro()
+        from numpyro.handlers import seed, trace
+
+        data = {
+            "counts": np.ones((1, 2)),
+            "sums": np.zeros((1, 2)),
+            "sum_squared": np.ones((1, 2)),
+            "days": np.asarray([0.0, 2.0]),
+            "repeat_index": np.asarray([0, 1]),
+            "node_days": np.asarray([0.0, 2.0]),
+            "led": np.asarray([1, 1]),
+            "first_by_led": np.zeros(6, dtype=int),
+            "step_design": np.zeros(2),
+            "n_scas": 1,
+            "n_tiles": 1,
+            "sca_index": np.zeros(1, dtype=int),
+            "repeat_values": np.asarray([0, 1]),
+        }
+        context = {
+            "wavelengths": np.asarray([1000.0]),
+            "model_weights": np.ones((6, 1)),
+            "outside_output": np.zeros(6),
+            "clean_output": np.ones(6),
+        }
+        model = build_model(
+            data,
+            context,
+            log_noise_sigma=0.005,
+            likelihood_weight=1.0e-8,
+            ar_layers=1,
+            shared_ar_parameters_across_tiles=True,
+            fully_np_trajectory=True,
+            ice_reset_day=1.0,
+            fit_pre_post_ice_index=True,
+        )
+        sites = trace(seed(model, jax.random.PRNGKey(53))).get_trace()
+        for name in (
+            "pre_reset_ice_n",
+            "pre_reset_ice_k",
+            "post_reset_ice_n",
+            "post_reset_ice_k",
+        ):
+            self.assertIn(name, sites)
+            self.assertTrue(np.isfinite(np.asarray(sites[name]["value"])))
+
+        predictor = build_prediction_function(
+            data,
+            context,
+            row_indices=np.asarray([0]),
+            post_reset_ice_reset_day=1.0,
+        )
+        prediction = np.asarray(
+            predictor(
+                jnp.asarray([0.0, 100.0]),
+                jnp.asarray([[0.0, 1.0, 0.0]]),
+                jnp.asarray(0.0),
+                post_reset_ice_index=jnp.asarray(1.30 + 0.01j),
+                pre_reset_ice_index=jnp.asarray(1.20 + 0.02j),
+            )
+        )
+        self.assertTrue(np.all(np.isfinite(prediction)))
+        self.assertNotAlmostEqual(prediction[0, 1], 0.0)
+
     def test_finite_detector_matches_independent_boundary_flux_calculation(self):
         jax, jnp, _, _, _, _, _ = require_numpyro()
         jax.config.update("jax_enable_x64", True)
@@ -395,6 +560,40 @@ class TestTmmTileData(unittest.TestCase):
         )
         self.assertAlmostEqual(prediction[0, 0], 0.02, places=12)
         self.assertTrue(np.isfinite(prediction[0, 1]))
+        shifted_prediction = np.asarray(
+            predictor(
+                jnp.asarray([0.0, 100.0]),
+                jnp.asarray([[1.25, 2.0, 0.0]]),
+                jnp.asarray(0.0),
+                jnp.asarray([0.0, 0.0]),
+                sca_ar_opd_nm=jnp.asarray([15.0]),
+            )
+        )
+        self.assertTrue(np.all(np.isfinite(shifted_prediction)))
+
+        row_data = dict(data)
+        row_data["sca_index"] = np.asarray([0, 0])
+        row_data["counts"] = np.ones((2, 2))
+        row_data["sums"] = np.asarray([[0.02, 0.03], [0.02, 0.03]])
+        row_predictor = build_prediction_function(
+            row_data,
+            context,
+            row_indices=np.asarray([0, 1]),
+            use_hgcdte_optical_constants=True,
+            fit_incidence_angle=True,
+        )
+        row_prediction = np.asarray(
+            row_predictor(
+                jnp.asarray([0.0, 100.0]),
+                jnp.asarray([[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]]),
+                jnp.asarray(0.0),
+                jnp.asarray([[0.0, 0.0], [np.log(1.2), np.log(0.8)]]),
+                incidence_angle_deg=jnp.asarray(10.0),
+            )
+        )
+        self.assertEqual(row_prediction.shape, (2, 2))
+        self.assertTrue(np.all(np.isfinite(row_prediction)))
+        self.assertNotAlmostEqual(row_prediction[0, 1], row_prediction[1, 1])
 
     def test_absolute_response_context_omits_qe_weighting(self):
         wavelengths = np.asarray([500.0, 600.0, 700.0])
@@ -426,6 +625,96 @@ class TestTmmTileData(unittest.TestCase):
         )
         np.testing.assert_allclose(
             context["model_weights"][0], context["model_weights"][1]
+        )
+
+    def test_absolute_response_context_prunes_zero_weight_wavelengths(self):
+        wavelengths = np.asarray([500.0, 600.0, 700.0])
+        spectra = {
+            band: {
+                "wavelength": wavelengths,
+                "raw_output": np.ones_like(wavelengths),
+            }
+            for band in range(1, 7)
+        }
+        qe_values = np.ones((len(wavelengths), 1))
+        full_grid = np.asarray([500.0, 550.0, 600.0, 650.0, 700.0])
+        expected = prepare_response_integration(
+            full_grid,
+            spectra,
+            wavelengths,
+            qe_values,
+            "signed",
+        )
+        with patch("fit_wfi_tmm_numpyro.load_sed", return_value=spectra), patch(
+            "fit_wfi_tmm_numpyro.load_qe",
+            return_value=(wavelengths, qe_values, ["SCU 1"]),
+        ):
+            context = load_response_context(
+                Path("model.ecsv"),
+                "signed",
+                1,
+                ["WFI01"],
+                wavelength_step_nm=50.0,
+                absolute_substrate_power=True,
+            )
+
+        np.testing.assert_array_equal(context["wavelengths"], wavelengths)
+        np.testing.assert_allclose(
+            context["model_weights"], expected[0][:, [0, 2, 4]][None, :, :]
+        )
+        np.testing.assert_allclose(context["outside_output"], expected[1][None, :])
+        np.testing.assert_allclose(context["clean_output"], expected[2][None, :])
+
+        data = {
+            "n_scas": 1,
+            "sca_index": np.zeros(1, dtype=int),
+            "led": np.repeat(np.arange(1, 7), 2),
+            "first_by_led": np.arange(0, 12, 2, dtype=int),
+            "step_design": np.zeros(12),
+            "counts": np.ones((1, 12)),
+            "sums": np.zeros((1, 12)),
+            "sum_squared": np.ones((1, 12)),
+        }
+        full_context = {
+            "wavelengths": full_grid,
+            "model_weights": expected[0],
+            "outside_output": expected[1],
+            "clean_output": expected[2],
+            "hgcdte_n": np.full(full_grid.shape, 3.6),
+            "hgcdte_k": np.full(full_grid.shape, 0.7),
+        }
+        compressed_context = {
+            **full_context,
+            "wavelengths": wavelengths,
+            "model_weights": expected[0][:, [0, 2, 4]],
+            "hgcdte_n": np.full(wavelengths.shape, 3.6),
+            "hgcdte_k": np.full(wavelengths.shape, 0.7),
+        }
+        full_predictor = build_prediction_function(
+            data,
+            full_context,
+            use_hgcdte_optical_constants=True,
+            absolute_substrate_power=True,
+        )
+        compressed_predictor = build_prediction_function(
+            data,
+            compressed_context,
+            use_hgcdte_optical_constants=True,
+            absolute_substrate_power=True,
+        )
+        jax, jnp, _, _, _, _, _ = require_numpyro()
+        jax.config.update("jax_enable_x64", True)
+        arguments = (
+            jnp.asarray(np.linspace(0.0, 50.0, 12)),
+            jnp.asarray([[1.25, 2.0, 0.0]]),
+            jnp.asarray(0.0),
+            jnp.asarray([[0.0, 0.0]]),
+        )
+        np.testing.assert_allclose(
+            full_predictor(*arguments),
+            compressed_predictor(*arguments),
+            rtol=1.0e-12,
+            atol=1.0e-12,
         )
 
     def test_finite_detector_thickness_samples_are_per_tile_and_positive(self):
@@ -478,6 +767,291 @@ class TestTmmTileData(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(thickness)))
         self.assertTrue(np.all(thickness > 0.0))
 
+    def test_absolute_hgcdte_scales_are_sampled_per_tile(self):
+        jax, _, _, _, _, _, _ = require_numpyro()
+        from numpyro.handlers import seed, trace
+
+        data = {
+            "counts": np.ones((2, 3)),
+            "sums": np.zeros((2, 3)),
+            "sum_squared": np.ones((2, 3)),
+            "days": np.asarray([0.0, 1.0, 2.0]),
+            "repeat_index": np.asarray([0, 1, 2]),
+            "node_days": np.asarray([0.0, 1.0, 2.0]),
+            "led": np.asarray([1, 1, 1]),
+            "first_by_led": np.zeros(6, dtype=int),
+            "step_design": np.zeros(3),
+            "n_scas": 1,
+            "n_tiles": 2,
+            "tile_ids": np.asarray([0, 1]),
+            "metadata": {
+                0: {"tile_row": 0, "tile_col": 0},
+                1: {"tile_row": 0, "tile_col": 1},
+            },
+            "sca_index": np.zeros(2, dtype=int),
+            "repeat_values": np.asarray([0, 1, 2]),
+        }
+        context = {
+            "wavelengths": np.asarray([1000.0]),
+            "model_weights": np.ones((6, 1)),
+            "outside_output": np.zeros(6),
+            "clean_output": np.ones(6),
+            "hgcdte_n": np.asarray([3.6]),
+            "hgcdte_k": np.asarray([0.7]),
+            "absolute_substrate_power": True,
+        }
+        model = build_model(
+            data,
+            context,
+            log_noise_sigma=0.005,
+            likelihood_weight=1.0e-8,
+            ar_layers=1,
+            shared_ar_parameters_across_tiles=True,
+            absolute_substrate_power=True,
+            use_hgcdte_optical_constants=True,
+        )
+        sites = trace(seed(model, jax.random.PRNGKey(47))).get_trace()
+
+        self.assertEqual(
+            sites["absolute_hgcdte_n_log_scale"]["value"].shape, (1, 2)
+        )
+        self.assertEqual(
+            sites["absolute_hgcdte_k_log_scale"]["value"].shape, (1, 2)
+        )
+
+    def test_absolute_hgcdte_scales_can_be_shared_without_spatial_factors(self):
+        jax, _, _, _, _, _, _ = require_numpyro()
+        from numpyro.handlers import seed, trace
+
+        data = {
+            "counts": np.ones((2, 3)),
+            "sums": np.zeros((2, 3)),
+            "sum_squared": np.ones((2, 3)),
+            "days": np.asarray([0.0, 1.0, 2.0]),
+            "repeat_index": np.asarray([0, 1, 2]),
+            "node_days": np.asarray([0.0, 1.0, 2.0]),
+            "led": np.asarray([1, 1, 1]),
+            "first_by_led": np.zeros(6, dtype=int),
+            "step_design": np.zeros(3),
+            "n_scas": 1,
+            "n_tiles": 2,
+            "tile_ids": np.asarray([0, 1]),
+            "metadata": {
+                0: {"tile_row": 0, "tile_col": 0},
+                1: {"tile_row": 0, "tile_col": 1},
+            },
+            "sca_index": np.zeros(2, dtype=int),
+            "repeat_values": np.asarray([0, 1, 2]),
+        }
+        context = {
+            "wavelengths": np.asarray([1000.0]),
+            "model_weights": np.ones((6, 1)),
+            "outside_output": np.zeros(6),
+            "clean_output": np.ones(6),
+            "hgcdte_n": np.asarray([3.6]),
+            "hgcdte_k": np.asarray([0.7]),
+            "absolute_substrate_power": True,
+        }
+        model = build_model(
+            data,
+            context,
+            log_noise_sigma=0.005,
+            likelihood_weight=1.0e-8,
+            ar_layers=1,
+            shared_ar_parameters_across_tiles=True,
+            absolute_substrate_power=True,
+            use_hgcdte_optical_constants=True,
+            shared_absolute_hgcdte_scales=True,
+            tile_rate_variation=True,
+            tile_rate_neighbor_smoothness=False,
+        )
+        sites = trace(seed(model, jax.random.PRNGKey(48))).get_trace()
+
+        self.assertEqual(
+            sites["absolute_hgcdte_n_log_scale"]["value"].shape, (1,)
+        )
+        self.assertEqual(
+            sites["absolute_hgcdte_k_log_scale"]["value"].shape, (1,)
+        )
+        self.assertNotIn("trajectory_rate_neighbor_smoothness", sites)
+        self.assertNotIn("trajectory_rate_tile_node_neighbor_smoothness", sites)
+
+    def test_independent_tile_trajectories_have_no_global_or_smoothing_terms(self):
+        jax, _, _, _, _, _, _ = require_numpyro()
+        from numpyro.handlers import seed, trace
+
+        data = {
+            "counts": np.ones((2, 4)),
+            "sums": np.zeros((2, 4)),
+            "sum_squared": np.ones((2, 4)),
+            "days": np.asarray([0.0, 1.0, 2.0, 3.0]),
+            "repeat_index": np.asarray([0, 1, 2, 3]),
+            "node_days": np.asarray([0.0, 1.0, 2.0, 3.0]),
+            "led": np.asarray([1, 1, 1, 1]),
+            "first_by_led": np.zeros(6, dtype=int),
+            "step_design": np.zeros(4),
+            "n_scas": 1,
+            "n_tiles": 2,
+            "tile_ids": np.asarray([0, 1]),
+            "metadata": {
+                0: {"tile_row": 0, "tile_col": 0},
+                1: {"tile_row": 0, "tile_col": 1},
+            },
+            "sca_index": np.zeros(2, dtype=int),
+            "repeat_values": np.asarray([0, 1, 2, 3]),
+        }
+        context = {
+            "wavelengths": np.asarray([1000.0]),
+            "model_weights": np.ones((6, 1)),
+            "outside_output": np.zeros(6),
+            "clean_output": np.ones(6),
+        }
+        model = build_model(
+            data,
+            context,
+            log_noise_sigma=0.005,
+            likelihood_weight=1.0e-8,
+            ar_layers=1,
+            shared_ar_parameters_across_tiles=True,
+            fully_np_trajectory=True,
+            tile_rate_trajectory_variation=True,
+            independent_tile_trajectories=True,
+            tile_rate_neighbor_smoothness=False,
+            tile_rate_trajectory_smoothness_weight=0.0,
+        )
+        sites = trace(seed(model, jax.random.PRNGKey(49))).get_trace()
+
+        self.assertEqual(
+            sites["trajectory_rate_tile_node_log_rates"]["value"].shape,
+            (1, 2, 4),
+        )
+        self.assertNotIn("np_log_rate_nodes", sites)
+        self.assertNotIn("trajectory_rate_tile_offsets", sites)
+        self.assertNotIn("trajectory_rate_tile_node_offsets", sites)
+        self.assertNotIn("np_smoothness_regularization", sites)
+        self.assertNotIn("trajectory_rate_neighbor_smoothness", sites)
+        self.assertNotIn("trajectory_rate_tile_node_neighbor_smoothness", sites)
+        self.assertNotIn("trajectory_rate_tile_node_smoothness", sites)
+
+        smooth_model = build_model(
+            data,
+            context,
+            log_noise_sigma=0.005,
+            likelihood_weight=1.0e-8,
+            ar_layers=1,
+            shared_ar_parameters_across_tiles=True,
+            fully_np_trajectory=True,
+            tile_rate_trajectory_variation=True,
+            independent_tile_trajectories=True,
+            tile_rate_neighbor_smoothness=False,
+            tile_rate_trajectory_smoothness_weight=0.01,
+        )
+        smooth_sites = trace(seed(smooth_model, jax.random.PRNGKey(50))).get_trace()
+
+        self.assertIn("trajectory_rate_tile_node_smoothness", smooth_sites)
+        self.assertNotIn("trajectory_rate_tile_node_neighbor_smoothness", smooth_sites)
+
+    def test_per_tile_initial_thickness_uses_positive_lognormal_sites(self):
+        jax, _, _, _, _, _, _ = require_numpyro()
+        from numpyro.handlers import seed, trace
+
+        data = {
+            "counts": np.ones((2, 4)),
+            "sums": np.zeros((2, 4)),
+            "sum_squared": np.ones((2, 4)),
+            "days": np.asarray([0.0, 1.0, 2.0, 3.0]),
+            "repeat_index": np.asarray([0, 1, 2, 3]),
+            "node_days": np.asarray([0.0, 1.0, 2.0, 3.0]),
+            "led": np.asarray([1, 1, 1, 1]),
+            "first_by_led": np.zeros(6, dtype=int),
+            "step_design": np.zeros(4),
+            "n_scas": 1,
+            "n_tiles": 2,
+            "tile_ids": np.asarray([0, 1]),
+            "metadata": {
+                0: {"tile_row": 0, "tile_col": 0},
+                1: {"tile_row": 0, "tile_col": 1},
+            },
+            "sca_index": np.zeros(2, dtype=int),
+            "repeat_values": np.asarray([0, 1, 2, 3]),
+        }
+        context = {
+            "wavelengths": np.asarray([1000.0]),
+            "model_weights": np.ones((6, 1)),
+            "outside_output": np.zeros(6),
+            "clean_output": np.ones(6),
+        }
+        model = build_model(
+            data,
+            context,
+            log_noise_sigma=0.005,
+            likelihood_weight=1.0e-8,
+            ar_layers=1,
+            shared_ar_parameters_across_tiles=True,
+            fully_np_trajectory=True,
+            tile_rate_trajectory_variation=True,
+            independent_tile_trajectories=True,
+            tile_rate_neighbor_smoothness=False,
+            tile_initial_thickness_lognormal=True,
+            tile_initial_thickness_log_median_nm=10.0,
+            tile_initial_thickness_log_sigma=1.5,
+        )
+        sites = trace(seed(model, jax.random.PRNGKey(51))).get_trace()
+
+        log_thickness = np.asarray(sites["initial_thickness_log_nm"]["value"])
+        thickness = np.asarray(sites["initial_thickness_nm"]["value"])
+        self.assertEqual(log_thickness.shape, (1, 2))
+        self.assertEqual(thickness.shape, (1, 2))
+        self.assertTrue(np.all(np.isfinite(log_thickness)))
+        self.assertTrue(np.all(np.isfinite(thickness)))
+        self.assertTrue(np.all(thickness > 0.0))
+        np.testing.assert_allclose(thickness, np.exp(log_thickness))
+        self.assertNotIn("initial_thickness_prior", sites)
+        self.assertNotIn("initial_thickness_pivot_z", sites)
+        self.assertEqual(
+            sites["tile_ice_thickness"]["value"].shape,
+            (2, 4),
+        )
+
+        reset_model = build_model(
+            data,
+            context,
+            log_noise_sigma=0.005,
+            likelihood_weight=1.0e-8,
+            ar_layers=1,
+            shared_ar_parameters_across_tiles=True,
+            fully_np_trajectory=True,
+            tile_rate_trajectory_variation=True,
+            independent_tile_trajectories=True,
+            tile_rate_neighbor_smoothness=False,
+            tile_initial_thickness_lognormal=True,
+            tile_initial_thickness_log_median_nm=10.0,
+            tile_initial_thickness_log_sigma=1.5,
+            ice_reset_day=2.0,
+        )
+        reset_sites = trace(seed(reset_model, jax.random.PRNGKey(52))).get_trace()
+
+        self.assertEqual(
+            reset_sites["reset_initial_thickness_log_nm"]["value"].shape,
+            (1, 2),
+        )
+        self.assertEqual(
+            reset_sites["reset_initial_thickness_nm"]["value"].shape,
+            (1, 2),
+        )
+        reset_thickness = np.asarray(
+            reset_sites["reset_initial_thickness_nm"]["value"]
+        ).reshape(-1)
+        reset_trajectory = np.asarray(
+            reset_sites["tile_ice_thickness"]["value"]
+        )
+        np.testing.assert_allclose(
+            reset_trajectory[:, 2], reset_thickness, rtol=0.0, atol=1.0e-12
+        )
+        self.assertFalse(
+            np.allclose(reset_trajectory[:, 0], reset_trajectory[:, 2])
+        )
+
     def test_repeat_nodes_are_shared_and_time_ordered(self):
         data = load_tile_statistics(DEFAULT_SINGLE_SCA_TILE_STATISTICS, max_tiles=2)
 
@@ -497,6 +1071,38 @@ class TestTmmTileData(unittest.TestCase):
         self.assertTrue(np.all(np.diff(data["node_days"]) > 0.0))
         self.assertEqual(data["counts"].shape, (2, len(data["led"])))
         np.testing.assert_array_equal(data["sca_index"], np.zeros(2, dtype=int))
+
+    def test_additional_acm_step_design_activates_at_requested_repeat(self):
+        data = load_tile_statistics(
+            DEFAULT_SINGLE_SCA_TILE_STATISTICS,
+            max_tiles=1,
+            additional_acm_step_repeat=39,
+        )
+        self.assertEqual(data["additional_acm_step_repeat"], 39)
+        np.testing.assert_array_equal(
+            np.unique(data["additional_step_design"][data["repeat"] < 39]),
+            [0.0],
+        )
+        np.testing.assert_array_equal(
+            np.unique(data["additional_step_design"][data["repeat"] >= 39]),
+            [1.0],
+        )
+
+    def test_pre_reset_acm_step_design_activates_at_requested_repeat(self):
+        data = load_tile_statistics(
+            DEFAULT_SINGLE_SCA_TILE_STATISTICS,
+            max_tiles=1,
+            pre_reset_acm_step_repeat=35,
+        )
+        self.assertEqual(data["pre_reset_acm_step_repeat"], 35)
+        np.testing.assert_array_equal(
+            np.unique(data["pre_reset_step_design"][data["repeat"] < 35]),
+            [0.0],
+        )
+        np.testing.assert_array_equal(
+            np.unique(data["pre_reset_step_design"][data["repeat"] >= 35]),
+            [1.0],
+        )
 
     def test_early_time_scales_are_shared_by_repeat_epoch(self):
         data = load_tile_statistics(DEFAULT_SINGLE_SCA_TILE_STATISTICS, max_tiles=1)
@@ -723,6 +1329,27 @@ class TestTmmTileData(unittest.TestCase):
             np.asarray(node_rate), 2.0, rtol=0.0, atol=1.0e-12
         )
 
+    def test_rate_integral_returns_reset_anchor_integral(self):
+        jax, jnp, _, _, _, _, _ = require_numpyro()
+        jax.config.update("jax_enable_x64", True)
+        values = integrate_rate_trajectory(
+            jax,
+            jnp,
+            jnp.asarray([0.0, 1.0, 3.0]),
+            jnp.asarray([0.0, 3.0]),
+            jnp.asarray([0.0, 3.0]),
+            0.0,
+            jnp.full(2, np.log(2.0)),
+            use_square_root=False,
+            anchor_day=1.0,
+        )
+
+        integrated, _, _, _, anchor_integral = values
+        np.testing.assert_allclose(
+            np.asarray(integrated), [0.0, 2.0, 6.0], rtol=0.0, atol=1.0e-12
+        )
+        self.assertAlmostEqual(float(np.asarray(anchor_integral)), 2.0, places=12)
+
     def test_lbfgs_map_optimization_reports_gradient_convergence(self):
         jax, _, _, _, _, _, _ = require_numpyro()
         jax.config.update("jax_enable_x64", True)
@@ -776,6 +1403,7 @@ class TestTmmTileData(unittest.TestCase):
     def test_map_parameter_scales_use_site_prior_widths(self):
         initial_values = {
             "ar_mu_raw": np.zeros(2),
+            "ar_sigma_raw": np.zeros(2),
             "hgcdte_n_log_modulation": np.zeros(3),
             "early_time_log_scale": np.zeros(4),
             "acm_step_log_offset": np.zeros(6),
@@ -783,6 +1411,7 @@ class TestTmmTileData(unittest.TestCase):
         }
         args = SimpleNamespace(
             ar_mean_prior_sigma=10.0,
+            ar_tile_sigma_prior=2.5,
             hgcdte_modulation_prior_sigma_log=5.0,
             early_time_scale_prior_sigma=1.0,
             acm_step_prior_sigma=0.5,
@@ -791,6 +1420,7 @@ class TestTmmTileData(unittest.TestCase):
         scales = map_parameter_scale_values(initial_values, args)
 
         np.testing.assert_array_equal(scales["ar_mu_raw"], [10.0, 10.0])
+        np.testing.assert_array_equal(scales["ar_sigma_raw"], [2.5, 2.5])
         np.testing.assert_array_equal(
             scales["hgcdte_n_log_modulation"], [5.0, 5.0, 5.0]
         )
@@ -1226,6 +1856,25 @@ class TestTmmTileData(unittest.TestCase):
         self.assertNotIn("ar_sigma_raw", sites)
         self.assertNotIn("ar_z", sites)
 
+        angle_model = build_model(
+            data,
+            context,
+            log_noise_sigma=0.005,
+            likelihood_weight=1.0e-8,
+            ar_layers=3,
+            shared_ar_optical_properties=True,
+            fit_incidence_angle=True,
+            incidence_angle_prior_sigma_deg=3.0,
+        )
+        angle_sites = trace(seed(angle_model, jax.random.PRNGKey(45))).get_trace()
+        self.assertEqual(angle_sites["incidence_angle_deg"]["value"].shape, ())
+        self.assertGreaterEqual(
+            float(angle_sites["incidence_angle_deg"]["value"]), 0.0
+        )
+        self.assertLessEqual(
+            float(angle_sites["incidence_angle_deg"]["value"]), 15.0
+        )
+
         rotated_model = build_model(
             data,
             context,
@@ -1363,6 +2012,25 @@ class TestTmmTileData(unittest.TestCase):
             float(np.asarray(fixed_sites["initial_thickness_nm"]["value"])), 0.0
         )
 
+        post_reset_model = build_model(
+            data,
+            context,
+            log_noise_sigma=0.005,
+            likelihood_weight=1.0e-8,
+            ar_layers=3,
+            shared_ar_optical_properties=True,
+            fixed_initial_thickness_nm=0.0,
+            ice_reset_day=0.5,
+            fit_post_reset_tile_log_offset=True,
+        )
+        post_reset_sites = trace(
+            seed(post_reset_model, jax.random.PRNGKey(11))
+        ).get_trace()
+        self.assertEqual(
+            post_reset_sites["post_reset_tile_log_offset"]["value"].shape,
+            (1, 1),
+        )
+
     def test_shared_ar_parameters_remove_all_tile_level_ar_sites(self):
         jax, _, _, _, _, _, _ = require_numpyro()
         from numpyro.handlers import seed, trace
@@ -1409,6 +2077,18 @@ class TestTmmTileData(unittest.TestCase):
         ar_parameters = np.asarray(sites["ar_parameters"]["value"])
         self.assertEqual(ar_parameters.shape, (2, 9))
         np.testing.assert_array_equal(ar_parameters[0], ar_parameters[1])
+
+        opd_model = build_model(
+            data,
+            context,
+            log_noise_sigma=0.005,
+            likelihood_weight=1.0e-8,
+            ar_layers=3,
+            shared_ar_parameters_across_tiles=True,
+            fit_sca_ar_opd=True,
+        )
+        opd_sites = trace(seed(opd_model, jax.random.PRNGKey(42))).get_trace()
+        self.assertEqual(opd_sites["sca_ar_opd_nm"]["value"].shape, (1,))
 
         tile_rate_model = build_model(
             data,
@@ -1878,6 +2558,61 @@ class TestTmmTileData(unittest.TestCase):
             direct_gradient, scanned_gradient, rtol=1.0e-10, atol=1.0e-12
         )
 
+    def test_single_sca_shared_integration_inputs_match_rowwise_inputs(self):
+        wavelengths = np.asarray([900.0, 1000.0, 1100.0])
+        model_weights = np.asarray(
+            [[0.8, 1.0, 0.7], [0.9, 1.1, 0.6]] * 3,
+            dtype=float,
+        )
+        context_single = {
+            "wavelengths": wavelengths,
+            "model_weights": model_weights,
+            "outside_output": np.zeros(6),
+            "clean_output": np.ones(6),
+        }
+        context_two_sca = {
+            "wavelengths": wavelengths,
+            "model_weights": np.stack((model_weights, 1.1 * model_weights)),
+            "outside_output": np.zeros((2, 6)),
+            "clean_output": np.ones((2, 6)),
+        }
+        common_data = {
+            "sca_index": np.zeros(4, dtype=int),
+            "led": np.repeat(np.arange(1, 7), 2),
+            "first_by_led": np.arange(0, 12, 2, dtype=int),
+            "step_design": np.zeros(12),
+            "counts": np.full((4, 12), 3.0),
+            "sums": np.zeros((4, 12)),
+            "sum_squared": np.full((4, 12), 0.0001),
+        }
+        data_single = dict(common_data, n_scas=1)
+        data_two_sca = dict(common_data, n_scas=2)
+        jax, jnp, _, _, _, _, _ = require_numpyro()
+        jax.config.update("jax_enable_x64", True)
+        thickness = jnp.asarray(np.linspace(0.0, 50.0, 12))
+        ar_parameters = jnp.asarray(
+            [[1.25 + index * 0.01, 2.0, 0.0] for index in range(4)]
+        )
+
+        single = build_prediction_function(data_single, context_single)
+        rowwise = build_prediction_function(data_two_sca, context_two_sca)
+
+        def evaluate(predictor):
+            return jax.jit(
+                jax.value_and_grad(
+                    lambda ar: predictor.residual_sum_squares(
+                        thickness, ar, jnp.asarray(0.0)
+                    )
+                )
+            )(ar_parameters)
+
+        single_value, single_gradient = evaluate(single)
+        rowwise_value, rowwise_gradient = evaluate(rowwise)
+        np.testing.assert_allclose(single_value, rowwise_value, rtol=1.0e-12)
+        np.testing.assert_allclose(
+            single_gradient, rowwise_gradient, rtol=1.0e-10, atol=1.0e-12
+        )
+
     def test_prediction_matches_scalar_coherent_stack(self):
         context = {
             "wavelengths": np.asarray([1000.0]),
@@ -1963,6 +2698,29 @@ class TestTmmTileData(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(cone_predictions)))
         self.assertFalse(np.allclose(cone_predictions, normal_predictions))
 
+        fitted_predictor = build_prediction_function(
+            data, context, fit_incidence_angle=True
+        )
+        fitted_normal = np.asarray(
+            fitted_predictor(
+                thickness,
+                parameters,
+                jnp.asarray(0.0),
+                incidence_angle_deg=jnp.asarray(0.0),
+            )
+        )
+        fitted_tilted = np.asarray(
+            fitted_predictor(
+                thickness,
+                parameters,
+                jnp.asarray(0.0),
+                incidence_angle_deg=jnp.asarray(10.0),
+            )
+        )
+        self.assertTrue(np.all(np.isfinite(fitted_tilted)))
+        np.testing.assert_allclose(fitted_normal, normal_predictions)
+        self.assertFalse(np.allclose(fitted_tilted, fitted_normal))
+
     def test_prediction_uses_row_specific_chief_ray_geometry(self):
         context = {
             "wavelengths": np.asarray([900.0, 1300.0]),
@@ -2047,6 +2805,146 @@ class TestTmmTileData(unittest.TestCase):
         )
         expected = np.asarray([[0.0, np.log(coated / clean)]])
         np.testing.assert_allclose(predictions, expected, rtol=1e-10, atol=1e-10)
+
+    def test_prediction_applies_sca_ar_opd_to_first_layer_phase(self):
+        context = {
+            "wavelengths": np.asarray([1000.0]),
+            "model_weights": np.ones((6, 1)),
+            "outside_output": np.zeros(6),
+            "clean_output": np.ones(6),
+        }
+        data = {
+            "n_scas": 1,
+            "sca_index": np.zeros(1, dtype=int),
+            "led": np.asarray([1, 1]),
+            "first_by_led": np.zeros(6, dtype=int),
+            "step_design": np.zeros(2),
+        }
+        jax, jnp, _, _, _, _, _ = require_numpyro()
+        jax.config.update("jax_enable_x64", True)
+        predictor = build_prediction_function(data, context)
+        ar_parameters = jnp.asarray([[1.25, 2.0, 0.0]])
+        thickness = jnp.asarray([0.0, 50.0])
+        baseline = np.asarray(predictor(thickness, ar_parameters, jnp.asarray(0.0)))
+        zero_offset = np.asarray(
+            predictor(
+                thickness,
+                ar_parameters,
+                jnp.asarray(0.0),
+                sca_ar_opd_nm=jnp.asarray([0.0]),
+            )
+        )
+        shifted = np.asarray(
+            predictor(
+                thickness,
+                ar_parameters,
+                jnp.asarray(0.0),
+                sca_ar_opd_nm=jnp.asarray([20.0]),
+            )
+        )
+
+        np.testing.assert_allclose(zero_offset, baseline, rtol=0.0, atol=0.0)
+        substrate_index = 3.6 + 0.7j
+        clean = scalar_coherent_transmission(
+            1000.0,
+            [(2.0 + 0.0j, 125.0 + 10.0)],
+            substrate_index,
+        )
+        coated = scalar_coherent_transmission(
+            1000.0,
+            [(1.25 + 0.0j, 50.0), (2.0 + 0.0j, 125.0 + 10.0)],
+            substrate_index,
+        )
+        expected = np.asarray([[0.0, np.log(coated / clean)]])
+        np.testing.assert_allclose(shifted, expected, rtol=1e-10, atol=1e-10)
+
+    def test_prediction_broadcasts_sca_ar_opd_by_row_sca(self):
+        context = {
+            "wavelengths": np.asarray([1000.0]),
+            "model_weights": np.ones((2, 6, 1)),
+            "outside_output": np.zeros((2, 6)),
+            "clean_output": np.ones((2, 6)),
+        }
+        data = {
+            "n_scas": 2,
+            "sca_index": np.asarray([0, 1]),
+            "led": np.asarray([1, 1]),
+            "first_by_led": np.zeros(6, dtype=int),
+            "step_design": np.zeros(2),
+        }
+        jax, jnp, _, _, _, _, _ = require_numpyro()
+        jax.config.update("jax_enable_x64", True)
+        predictor = build_prediction_function(data, context)
+        ar_parameters = jnp.asarray([[1.25, 2.0, 0.0], [1.25, 2.0, 0.0]])
+        thickness = jnp.asarray([0.0, 50.0])
+        baseline = np.asarray(predictor(thickness, ar_parameters, jnp.asarray(0.0)))
+        shifted = np.asarray(
+            predictor(
+                thickness,
+                ar_parameters,
+                jnp.asarray(0.0),
+                sca_ar_opd_nm=jnp.asarray([0.0, 20.0]),
+            )
+        )
+
+        np.testing.assert_allclose(shifted[0], baseline[0], rtol=0.0, atol=0.0)
+        self.assertFalse(np.allclose(shifted[1], baseline[1]))
+
+        cone_predictor = build_prediction_function(
+            data,
+            context,
+            incidence_cone_half_angle_deg=20.0,
+            share_polarization_work=True,
+        )
+        cone_shifted = np.asarray(
+            cone_predictor(
+                thickness,
+                ar_parameters,
+                jnp.asarray(0.0),
+                sca_ar_opd_nm=jnp.asarray([0.0, 20.0]),
+            )
+        )
+        self.assertTrue(np.all(np.isfinite(cone_shifted)))
+        self.assertFalse(np.allclose(cone_shifted[1], shifted[1]))
+
+    def test_model_samples_optional_sca_ar_opd_per_sca(self):
+        jax, _, _, _, _, _, _ = require_numpyro()
+        from numpyro.handlers import seed, trace
+
+        data = {
+            "counts": np.ones((2, 2)),
+            "sums": np.zeros((2, 2)),
+            "sum_squared": np.ones((2, 2)),
+            "days": np.asarray([0.0, 1.0]),
+            "repeat_index": np.asarray([0, 1]),
+            "node_days": np.asarray([0.0, 1.0]),
+            "led": np.asarray([1, 1]),
+            "first_by_led": np.zeros(6, dtype=int),
+            "step_design": np.zeros(2),
+            "n_scas": 2,
+            "n_tiles": 1,
+            "tile_ids": np.asarray([0]),
+            "sca_index": np.asarray([0, 1]),
+            "repeat_values": np.asarray([0, 1]),
+        }
+        context = {
+            "wavelengths": np.asarray([1000.0]),
+            "model_weights": np.ones((2, 6, 1)),
+            "outside_output": np.zeros((2, 6)),
+            "clean_output": np.ones((2, 6)),
+        }
+        model = build_model(
+            data,
+            context,
+            log_noise_sigma=0.005,
+            likelihood_weight=1.0e-8,
+            ar_layers=1,
+            shared_ar_optical_properties=True,
+            fit_sca_ar_opd=True,
+            sca_ar_opd_prior_sigma_nm=2.0,
+        )
+        sites = trace(seed(model, jax.random.PRNGKey(91))).get_trace()
+        self.assertEqual(sites["sca_ar_opd_nm"]["value"].shape, (2,))
 
     def test_prediction_accepts_fitted_hgcdte_parameters(self):
         context = {
@@ -2336,6 +3234,70 @@ class TestTmmTileData(unittest.TestCase):
                 jnp.concatenate(
                     (jnp.full(zero_modulation.shape[0] // 2, 0.5),
                      jnp.full(zero_modulation.shape[0] // 2, -0.5))
+                ),
+            )
+        )
+        self.assertFalse(np.allclose(changed, reference))
+
+    def test_zero_ice_modulation_matches_asw_reference_constants(self):
+        wavelengths = np.asarray([1000.0, 1600.0, 2200.0])
+        ice_n = np.asarray([1.30, 1.28, 1.26])
+        ice_k = np.asarray([0.01, 0.02, 0.03])
+        context = {
+            "wavelengths": wavelengths,
+            "ice_n": ice_n,
+            "ice_k": ice_k,
+            "ice_modulation_basis": ice_modulation_basis(wavelengths),
+            "model_weights": np.ones((6, 3)) / 3.0,
+            "outside_output": np.zeros(6),
+            "clean_output": np.ones(6),
+        }
+        data = {
+            "n_scas": 1,
+            "sca_index": np.zeros(1, dtype=int),
+            "led": np.asarray([1, 1]),
+            "first_by_led": np.zeros(6, dtype=int),
+            "step_design": np.zeros(2),
+        }
+        jax, jnp, _, _, _, _, _ = require_numpyro()
+        jax.config.update("jax_enable_x64", True)
+        predictor = build_prediction_function(
+            data,
+            context,
+            fit_ice_optical_modulation=True,
+            use_asw_optical_constants=True,
+        )
+        zero_modulation = jnp.zeros(2 * context["ice_modulation_basis"].shape[1])
+        modulated = np.asarray(
+            predictor(
+                jnp.asarray([0.0, 50.0]),
+                jnp.asarray([[1.25, 2.0, 0.0]]),
+                jnp.asarray(0.0),
+                ice_modulation_parameters=zero_modulation,
+            )
+        )
+        reference_predictor = build_prediction_function(
+            data, context, use_asw_optical_constants=True
+        )
+        reference = np.asarray(
+            reference_predictor(
+                jnp.asarray([0.0, 50.0]),
+                jnp.asarray([[1.25, 2.0, 0.0]]),
+                jnp.asarray(0.0),
+            )
+        )
+        np.testing.assert_allclose(modulated, reference, rtol=1e-10, atol=1e-10)
+
+        changed = np.asarray(
+            predictor(
+                jnp.asarray([0.0, 50.0]),
+                jnp.asarray([[1.25, 2.0, 0.0]]),
+                jnp.asarray(0.0),
+                ice_modulation_parameters=jnp.concatenate(
+                    (
+                        jnp.full(zero_modulation.shape[0] // 2, 0.1),
+                        jnp.full(zero_modulation.shape[0] // 2, -0.1),
+                    )
                 ),
             )
         )

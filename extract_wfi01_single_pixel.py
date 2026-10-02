@@ -47,7 +47,7 @@ def extract_pixel(observations, row, column):
         for item in led_values:
             if item["dq"] != 0 or not np.isfinite(item["value"]) or item["value"] <= 0.0:
                 raise ValueError(
-                    f"Pixel ({row}, {column}) has invalid LED {led}, repeat "
+                    f"Pixel ({row}, {column}) has invalid LED {led}, epoch "
                     f"{item['repeat']}: value={item['value']}, dq={item['dq']}"
                 )
             item["baseline_value"] = baseline["value"]

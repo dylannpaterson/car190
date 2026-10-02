@@ -1,6 +1,8 @@
 import argparse
+import csv
 import os
 from pathlib import Path
+import tempfile
 
 from astropy.table import vstack
 from astroquery.mast import MastMissions
@@ -37,6 +39,7 @@ select_cols = [
     "target_aperture",
     "access",
 ]
+INDEX_FIELDS = [*select_cols, "cal_uri"]
 
 
 def parse_args():
@@ -68,6 +71,14 @@ def parse_args():
         default=DEFAULT_PROGRAM,
         help=f"MAST program to query (default: {DEFAULT_PROGRAM})",
     )
+    parser.add_argument(
+        "--update-existing",
+        action="store_true",
+        help=(
+            "Merge the fresh MAST query into the existing output indexed by "
+            "fileSetName instead of overwriting it"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -94,6 +105,101 @@ def query_detector(missions, detector, page_size, program):
     return vstack(rows, metadata_conflicts="silent")
 
 
+def table_to_index_rows(table):
+    """Convert a MAST table to the stable CSV index schema."""
+    rows = []
+    for row in table:
+        file_set = str(row["fileSetName"])
+        rows.append(
+            {
+                **{column: str(row[column]) for column in select_cols},
+                "cal_uri": f"{file_set}/{file_set}_cal.asdf",
+            }
+        )
+    return rows
+
+
+def read_index_rows(path):
+    """Read an existing index while preserving its CSV values."""
+    with Path(path).open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = reader.fieldnames or []
+        missing = set(INDEX_FIELDS).difference(fieldnames)
+        if missing:
+            raise ValueError(f"Existing index is missing columns: {sorted(missing)}")
+        rows = []
+        seen = set()
+        for row in reader:
+            file_set = row["fileSetName"].strip()
+            if not file_set:
+                raise ValueError("Existing index contains an empty fileSetName")
+            if file_set in seen:
+                raise ValueError(f"Existing index contains duplicate fileSetName: {file_set}")
+            seen.add(file_set)
+            rows.append({column: row.get(column, "") for column in INDEX_FIELDS})
+    return rows
+
+
+def merge_index_rows(existing_rows, fresh_rows):
+    """Replace refreshed products and append products not in the existing index."""
+    merged = {}
+    for row in existing_rows:
+        file_set = row["fileSetName"].strip()
+        if file_set in merged:
+            raise ValueError(f"Existing index contains duplicate fileSetName: {file_set}")
+        merged[file_set] = row
+
+    added = 0
+    updated = 0
+    for row in fresh_rows:
+        file_set = row["fileSetName"].strip()
+        if not file_set:
+            raise ValueError("Fresh MAST query contains an empty fileSetName")
+        previous = merged.get(file_set)
+        if previous is None:
+            added += 1
+        elif previous != row:
+            updated += 1
+        merged[file_set] = row
+
+    rows = list(merged.values())
+    rows.sort(
+        key=lambda row: (
+            row["exposure_start_time"],
+            row["detector"],
+            row["led"],
+            row["fileSetName"],
+        )
+    )
+    return rows, added, updated
+
+
+def write_index_rows_atomic(path, rows):
+    """Write an updated index without leaving a partially written target."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            newline="",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            writer = csv.DictWriter(handle, fieldnames=INDEX_FIELDS)
+            writer.writeheader()
+            writer.writerows(rows)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+
 def main():
     args = parse_args()
     if args.page_size <= 0:
@@ -107,6 +213,11 @@ def main():
         detectors = [args.detector]
         output_path = args.output or DEFAULT_OUTPUT
 
+    if args.update_existing and not output_path.exists():
+        raise ValueError(
+            f"--update-existing requires an existing index: {output_path}"
+        )
+
     token = token_path.read_text().strip()
     missions = MastMissions(mission="roman")
     missions.login(token=token)
@@ -119,6 +230,20 @@ def main():
         print(f"Found {0 if table is None else len(table)} {detector} L2 flat candidates")
     if not tables:
         raise RuntimeError("MAST returned no WFI L2 dark-flat candidates")
+
+    if args.update_existing:
+        fresh_rows = []
+        for table in tables:
+            fresh_rows.extend(table_to_index_rows(table))
+        existing_rows = read_index_rows(output_path)
+        rows, added, updated = merge_index_rows(existing_rows, fresh_rows)
+        write_index_rows_atomic(output_path, rows)
+        print(
+            f"Checked {len(fresh_rows)} current MAST rows; added {added}, "
+            f"updated {updated}, retained {len(rows) - added - updated} unchanged"
+        )
+        print(f"Wrote {len(rows)} rows to {output_path}")
+        return
 
     flats = vstack(tables, metadata_conflicts="silent")
     flats.sort("exposure_start_time")

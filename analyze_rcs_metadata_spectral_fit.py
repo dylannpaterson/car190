@@ -1,8 +1,8 @@
 """Fit a conservative spectral interaction to all-detector RCS metadata.
 
 The metadata file contains one calibrated image median for each detector,
-LED, and repeat. This script fits log median changes with a free source term
-for every LED/repeat and a detector offset. The only common time-dependent
+LED, and observation epoch. This script fits log median changes with a free source term
+for every LED/epoch and a detector offset. The only common time-dependent
 terms are response-weighted wavelength slope and curvature proxies from
 ``assess_rcs_spectral_identifiability.py``.
 
@@ -81,12 +81,12 @@ def load_metadata(path):
             key=parse_mast_time,
         )
         if len(led_times) != 13:
-            raise ValueError(f"LED {led} has {len(led_times)} repeats, expected 13")
+            raise ValueError(f"LED {led} has {len(led_times)} epochs, expected 13")
         first_group = groups[(led, led_times[0])]
         for repeat, time_value in enumerate(led_times):
             group = groups[(led, time_value)]
             if set(group) != set(detectors):
-                raise ValueError(f"LED {led}, repeat {repeat} does not contain all detectors")
+                raise ValueError(f"LED {led}, epoch {repeat} does not contain all detectors")
             days = (
                 parse_mast_time(time_value) - global_start
             ).total_seconds() / 86400.0
@@ -216,8 +216,8 @@ def write_report(path, metadata_path, fits, mapping, global_start):
         f"- Sequence start: `{global_start.isoformat()}`",
         "- Detector mapping assumption: `WFI01` through `WFI18` correspond to SCU 1 through 18.",
         f"- Public SCU 1 maps to SCA `{mapping[1]}`; see the response summary for all mappings.",
-        "- Model: log image median = free LED/repeat source term + detector offset + time x spectral interaction.",
-        "- Source terms are completely free for each LED/repeat, so source-output drift is not interpreted as ice.",
+        "- Model: log image median = free LED/epoch source term + detector offset + time x spectral interaction.",
+        "- Source terms are completely free for each LED/epoch, so source-output drift is not interpreted as ice.",
         "- Reported standard errors are nominal OLS residual errors; they do not include correlated calibration systematics.",
         "",
         "| SED mode | Basis | Coefficient per day | Standard error | t statistic | Null RMS | Fit RMS | RMS improvement |",
