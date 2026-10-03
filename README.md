@@ -106,6 +106,9 @@ repository as comparison tools. They are not the default production model.
 The pinned base dependencies are in `requirements-wfi01-ice.txt`. The
 NumPyro fit additionally requires working `jax`, `numpyro`, and `corner`
 installations. The current development environment is named `bulge_env`.
+`roman-mast-tools` 0.9.1 is not published on PyPI, so it is intentionally not
+in the requirements file; install it separately from the supplied local source
+archive after extracting it.
 
 The production TMM computes its own transfer-matrix response and generates a
 480--2700 nm wavelength grid from the public QE support. The historical
@@ -114,7 +117,14 @@ the production TMM; older SOC/effective-boundary tools still use that table.
 
 ```bash
 python -m pip install -r requirements-wfi01-ice.txt
+python -m pip install /path/to/roman-mast-tools-master
+python -c 'import roman_telem; print(roman_telem.__file__)'
 ```
+
+The final command must succeed before running the RRN pipeline. If a previous
+build of the local checkout installed metadata without the module, remove its
+`build/`, `dist/`, and `roman_mast_tools.egg-info/` directories and reinstall
+from the cleaned checkout.
 
 ## Inputs
 
@@ -183,10 +193,11 @@ below a UTC `YYYYMMDD` directory. Image products are streamed into memory only;
 the pipeline does not create an S3 image cache.
 
 The RRN deployment needs only `run_wfi_reduction_pipeline.py` and the
-repository-root `mast_api_token.txt`; install the packages in
-`requirements-wfi01-ice.txt` separately. The standalone script does not import
-the other reduction modules or require local ASDF products, index files,
-telemetry CSVs, or correction CSVs.
+repository-root `mast_api_token.txt`; install the base packages in
+`requirements-wfi01-ice.txt` and the local `roman-mast-tools` checkout
+separately. The standalone script does not import the other reduction modules
+or require local ASDF products, index files, telemetry CSVs, or correction
+CSVs.
 
 ```bash
 ./run_wfi_reduction_pipeline.py
