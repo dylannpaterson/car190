@@ -176,11 +176,17 @@ The MAST token is read from `mast_api_token.txt` in the repository root.
 ### 1a. Nexus S3 reduction and correction pipeline
 
 On the Nexus, use the one-step pipeline instead of copying products from a
-user-owned CAR190 directory. It synchronizes only calibrated ASDF products
-from the CAR190 S3 prefix, refreshes the all-detector MAST index, fetches the
-PD1 photodiode telemetry, uses the MAST supplement by default, and writes each
-run below a UTC `YYYYMMDD` directory. The S3 cache is persistent, so a later
-run downloads only new or changed calibrated products.
+user-owned CAR190 directory. It lists calibrated ASDF products under the
+CAR190 S3 prefix, refreshes the all-detector MAST index, fetches the PD1
+photodiode telemetry, uses the MAST supplement by default, and writes each run
+below a UTC `YYYYMMDD` directory. Image products are streamed into memory only;
+the pipeline does not create an S3 image cache.
+
+The RRN deployment needs only `run_wfi_reduction_pipeline.py` and the
+repository-root `mast_api_token.txt`; install the packages in
+`requirements-wfi01-ice.txt` separately. The standalone script does not import
+the other reduction modules or require local ASDF products, index files,
+telemetry CSVs, or correction CSVs.
 
 ```bash
 ./run_wfi_reduction_pipeline.py
@@ -189,8 +195,10 @@ run downloads only new or changed calibrated products.
 There are no setup arguments. The source, output root, detector list, MAST
 token path, MAST supplement, PD1 telemetry channel, tile sizes, and correction
 settings are fixed production defaults. Existing raw statistics are reused by
-file-set name; newly discovered products are reduced, and changed or removed
-source products trigger a safe full rebuild.
+file-set name; newly discovered products are streamed and reduced, and changed
+or removed source products trigger a safe full rebuild. At most the
+baseline/current image pair for the active LED is held in memory. The only
+statistics output is the `512x512` tile grid, which is 64 tiles per detector.
 
 Each dated directory contains:
 
@@ -198,7 +206,9 @@ Each dated directory contains:
 - `corrections/`: fitted count-space gain/ACM correction tables and summaries;
 - `corrected_statistics/`: the same 512-tile statistics with the fitted count
   correction applied;
-- `telemetry/photodiode_pd1.csv`: raw PD1 telemetry queried before reduction;
+- `telemetry/photodiode_pd1_ice_monitor.csv`: dark-subtracted per-exposure PD1
+  summary produced by `roman-telem --ice-monitor` before reduction;
+- `pipeline.log`: timestamped phase, detector, and product progress;
 - `all_wfi_rcs_flat_index.csv`: refreshed MAST supplement index;
 - `*_rrn_inventory.csv`: the source products and timestamps used;
 - `pipeline_manifest.json`: source, command, detector, correction, and output
@@ -467,7 +477,7 @@ override only when intentionally plotting a compatible posterior subset.
 ## Code Map
 
 - `build_wfi01_tile_statistics.py`: tile sufficient-statistic calculation;
-- `run_wfi_reduction_pipeline.py`: Nexus S3 synchronization, dated reduction,
+- `run_wfi_reduction_pipeline.py`: Nexus S3/MAST streaming, dated reduction,
   and count-space correction application;
 - `build_wfi_tile_statistics_stream.py`: resumable MAST downloader;
 - `fit_wfi_tmm_numpyro.py`: single- and all-SCA TMM model and output writer;
