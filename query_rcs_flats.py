@@ -9,11 +9,10 @@ from astroquery.mast import MastMissions
 
 
 ROOT = Path(__file__).resolve().parent
-token_path = Path(
-    os.environ.get("MAST_TOKEN_FILE", Path.home() / "Downloads/mast_api_token.txt")
-)
+DEFAULT_TOKEN_PATH = ROOT / "mast_api_token.txt"
 DEFAULT_OUTPUT = ROOT / "wfi01_rcs_flat_index.csv"
 DEFAULT_PROGRAM = "1039"
+DEFAULT_DETECTORS = tuple(f"WFI{index:02d}" for index in range(1, 19))
 
 select_cols = [
     "fileSetName",
@@ -200,6 +199,54 @@ def write_index_rows_atomic(path, rows):
             temporary_path.unlink()
 
 
+def refresh_index(
+    output_path,
+    token_path=DEFAULT_TOKEN_PATH,
+    detectors=DEFAULT_DETECTORS,
+    page_size=5000,
+    program=DEFAULT_PROGRAM,
+):
+    """Refresh the persistent all-detector MAST index and return its rows."""
+    if page_size <= 0:
+        raise ValueError("Page size must be positive")
+    output_path = Path(output_path)
+    token_path = Path(token_path)
+    if not token_path.exists():
+        raise ValueError(f"MAST token file does not exist: {token_path}")
+    token = token_path.read_text().strip()
+    if token.startswith("MAST_API_TOKEN="):
+        token = token.split("=", 1)[1].strip()
+    if not token:
+        raise ValueError(f"MAST token file is empty: {token_path}")
+
+    missions = MastMissions(mission="roman")
+    missions.login(token=token)
+    tables = []
+    for detector in detectors:
+        table = query_detector(missions, detector, page_size, program)
+        if table is not None:
+            tables.append(table)
+        print(f"Found {0 if table is None else len(table)} {detector} L2 flat candidates")
+    if not tables:
+        raise RuntimeError("MAST returned no WFI L2 dark-flat candidates")
+
+    fresh_rows = []
+    for table in tables:
+        fresh_rows.extend(table_to_index_rows(table))
+    if output_path.exists():
+        existing_rows = read_index_rows(output_path)
+        rows, added, updated = merge_index_rows(existing_rows, fresh_rows)
+    else:
+        rows, added, updated = merge_index_rows([], fresh_rows)
+    write_index_rows_atomic(output_path, rows)
+    print(
+        f"Checked {len(fresh_rows)} current MAST rows; added {added}, "
+        f"updated {updated}, retained {len(rows) - added - updated} unchanged"
+    )
+    print(f"Wrote {len(rows)} rows to {output_path}")
+    return rows
+
+
 def main():
     args = parse_args()
     if args.page_size <= 0:
@@ -218,7 +265,11 @@ def main():
             f"--update-existing requires an existing index: {output_path}"
         )
 
-    token = token_path.read_text().strip()
+    token = DEFAULT_TOKEN_PATH.read_text().strip()
+    if token.startswith("MAST_API_TOKEN="):
+        token = token.split("=", 1)[1].strip()
+    if not token:
+        raise ValueError(f"MAST token file is empty: {DEFAULT_TOKEN_PATH}")
     missions = MastMissions(mission="roman")
     missions.login(token=token)
 

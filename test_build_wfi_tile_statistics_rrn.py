@@ -18,6 +18,7 @@ from build_wfi_tile_statistics_rrn import (
     resolve_record_times,
     scan_products,
     tile_sufficient_statistics,
+    update_detector_statistics_incremental,
     write_detector_statistics,
     write_inventory,
 )
@@ -316,6 +317,63 @@ class RrnFilenameTests(unittest.TestCase):
                 ],
             )
             self.assertIn("optional_index", inventory.read_text())
+
+    def test_incremental_writer_reuses_existing_file_sets(self):
+        def observations(repeats):
+            rows = []
+            for led in range(1, 7):
+                for repeat in repeats:
+                    name = f"led{led}_repeat{repeat}"
+                    rows.append(
+                        {
+                            "led": led,
+                            "repeat": repeat,
+                            "group": len(rows),
+                            "file_set_name": name,
+                            "baseline_file_set_name": f"led{led}_repeat0",
+                            "exposure_start_time": (
+                                f"2026-01-01T{repeat:02d}:00:00Z"
+                            ),
+                            "days": float(repeat),
+                            "path": Path(name),
+                        }
+                    )
+            return rows
+
+        image = np.ones((4, 4), dtype=float)
+        dq = np.zeros((4, 4), dtype=np.uint32)
+
+        def load_image(observation, fetch_image=None):
+            repeat = int(observation["repeat"])
+            return image + 0.1 * repeat, dq
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "statistics.csv"
+            initial = observations((0, 1))
+            all_rows = observations((0, 1, 2))
+            with patch(
+                "build_wfi_tile_statistics_rrn.load_observation_image",
+                side_effect=load_image,
+            ):
+                write_detector_statistics(initial, output, tile_size=2, resume=False)
+                update_detector_statistics_incremental(
+                    all_rows,
+                    output,
+                    tile_size=2,
+                )
+            with output.open(newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(len(rows), 6 * 3 * 4)
+        added = [
+            row
+            for row in rows
+            if row["file_set_name"] == "led1_repeat2"
+        ]
+        self.assertEqual(len(added), 4)
+        self.assertAlmostEqual(
+            float(added[-1]["sum_log_change"]), 4.0 * np.log(1.2), places=12
+        )
 
 if __name__ == "__main__":
     unittest.main()

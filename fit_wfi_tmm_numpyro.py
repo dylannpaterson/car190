@@ -1265,8 +1265,11 @@ def load_map_warm_start(path, initial_values, data, value_converters=None):
         for name, current_value in initial_values.items():
             source_name = name
             converter = None
-            if name not in samples and name in value_converters:
-                source_name, converter = value_converters[name]
+            if name in value_converters:
+                converted_source_name, converted_value = value_converters[name]
+                if converted_source_name in samples:
+                    source_name = converted_source_name
+                    converter = converted_value
             if source_name not in samples:
                 warmed_values[name] = np.asarray(current_value).copy()
                 continue
@@ -1665,6 +1668,179 @@ def run_jax_map_optimization(
         f"gradient_inf_norm={gradient_norm:.3g}; "
         f"projected_gradient_inf_norm={projected_gradient_norm:.3g}; "
         f"converged={diagnostics['converged']}"
+    )
+    return map_values, diagnostics
+
+
+def run_trust_exact_map_optimization(
+    model,
+    initial_values,
+    jax,
+    maxiter,
+    tolerance=1.0e-9,
+    parameter_scales=None,
+):
+    """Polish a warm MAP state with an exact-Hessian trust-region solve."""
+    from numpyro.infer.util import log_density
+    from scipy.optimize import minimize
+
+    flat_initial, unravel, flat_lower, flat_upper = map_parameter_bounds(
+        initial_values, jax
+    )
+    if parameter_scales is not None:
+        raise ValueError(
+            "Trust-Exact MAP optimization requires raw sample-site coordinates; "
+            "use --map-parameter-scaling none"
+        )
+    flat_scales = np.ones_like(np.asarray(flat_initial, dtype=float))
+
+    flat_initial = np.asarray(flat_initial, dtype=float)
+    flat_lower = np.asarray(flat_lower, dtype=float)
+    flat_upper = np.asarray(flat_upper, dtype=float)
+    scaled_initial = np.zeros_like(flat_initial)
+    scaled_lower = (flat_lower - flat_initial) / flat_scales
+    scaled_upper = (flat_upper - flat_initial) / flat_scales
+    flat_initial_jax = jax.numpy.asarray(flat_initial)
+    flat_scales_jax = jax.numpy.asarray(flat_scales)
+    scaled_initial_jax = jax.numpy.asarray(scaled_initial)
+
+    bound_tolerance = 1.0e-10 * (1.0 + np.abs(flat_initial))
+    fixed = (
+        np.isfinite(flat_lower)
+        & (flat_initial <= flat_lower + bound_tolerance)
+    ) | (
+        np.isfinite(flat_upper)
+        & (flat_initial >= flat_upper - bound_tolerance)
+    )
+    free_indices = np.flatnonzero(~fixed)
+    free_indices_jax = jax.numpy.asarray(free_indices)
+
+    def full_scaled_values(free_values):
+        return scaled_initial_jax.at[free_indices_jax].set(free_values)
+
+    def negative_log_joint(scaled_values):
+        flat_values = flat_initial_jax + flat_scales_jax * scaled_values
+        log_joint, _ = log_density(model, (), {}, unravel(flat_values))
+        return -log_joint
+
+    value_and_gradient = jax.jit(jax.value_and_grad(negative_log_joint))
+    hessian = jax.jit(jax.hessian(negative_log_joint))
+    initial_objective = float(
+        negative_log_joint(jax.numpy.asarray(scaled_initial))
+    )
+    map_start_time = time.perf_counter()
+
+    if free_indices.size:
+
+        def scipy_objective(free_values):
+            value, gradient = value_and_gradient(
+                full_scaled_values(jax.numpy.asarray(free_values))
+            )
+            return float(value), np.asarray(gradient, dtype=float)[free_indices]
+
+        def scipy_hessian(free_values):
+            full_hessian = np.asarray(
+                hessian(full_scaled_values(jax.numpy.asarray(free_values))),
+                dtype=float,
+            )
+            return full_hessian[np.ix_(free_indices, free_indices)]
+
+        optimization_start = time.perf_counter()
+        result = minimize(
+            scipy_objective,
+            np.asarray(scaled_initial[free_indices], dtype=float),
+            jac=True,
+            hess=scipy_hessian,
+            method="trust-exact",
+            options={"gtol": float(tolerance), "maxiter": int(maxiter)},
+        )
+        optimization_seconds = time.perf_counter() - optimization_start
+        optimized_scaled = np.asarray(scaled_initial, dtype=float)
+        optimized_scaled[free_indices] = np.asarray(result.x, dtype=float)
+        status = int(result.status)
+        message = str(result.message)
+        iterations = int(result.nit)
+        function_evaluations = int(result.nfev)
+        optimizer_success = bool(result.success)
+    else:
+        optimization_seconds = 0.0
+        optimized_scaled = np.asarray(scaled_initial, dtype=float)
+        status = 0
+        message = "All MAP coordinates were fixed at active bounds."
+        iterations = 0
+        function_evaluations = 1
+        optimizer_success = True
+
+    optimized_values = flat_initial + flat_scales * optimized_scaled
+    if np.any(optimized_values < flat_lower) or np.any(optimized_values > flat_upper):
+        raise ValueError("Trust-region MAP optimization left a parameter bound")
+    final_objective, scaled_gradient = value_and_gradient(
+        jax.numpy.asarray(optimized_scaled)
+    )
+    scaled_gradient = np.asarray(scaled_gradient, dtype=float)
+    raw_gradient = scaled_gradient / flat_scales
+
+    def projected_gradient(values, gradient, lower, upper):
+        gradient = np.asarray(gradient, dtype=float).copy()
+        bound_tolerance = 1.0e-10 * (1.0 + np.abs(values))
+        lower_active = np.isfinite(lower) & (values <= lower + bound_tolerance)
+        upper_active = np.isfinite(upper) & (values >= upper - bound_tolerance)
+        gradient[lower_active] = np.minimum(gradient[lower_active], 0.0)
+        gradient[upper_active] = np.maximum(gradient[upper_active], 0.0)
+        return gradient
+
+    projected = projected_gradient(optimized_values, raw_gradient, flat_lower, flat_upper)
+    scaled_projected = projected_gradient(
+        optimized_scaled, scaled_gradient, scaled_lower, scaled_upper
+    )
+    gradient_norm = float(np.max(np.abs(raw_gradient)))
+    projected_gradient_norm = float(np.max(np.abs(projected)))
+    scaled_projected_gradient_norm = float(np.max(np.abs(scaled_projected)))
+    gradient_converged = scaled_projected_gradient_norm <= tolerance
+    diagnostics = {
+        "optimizer": "Trust-Exact",
+        "converged": bool(optimizer_success and gradient_converged),
+        "gradient_converged": bool(gradient_converged),
+        "status": status,
+        "message": message,
+        "iterations": iterations,
+        "function_evaluations": function_evaluations,
+        "gradient_norm": gradient_norm,
+        "projected_gradient_norm": projected_gradient_norm,
+        "scaled_gradient_norm": float(np.max(np.abs(scaled_gradient))),
+        "scaled_projected_gradient_norm": scaled_projected_gradient_norm,
+        "parameter_scale_min": float(np.min(flat_scales)),
+        "parameter_scale_max": float(np.max(flat_scales)),
+        "function_tolerance": np.nan,
+        "objective": float(final_objective),
+        "initial_objective": initial_objective,
+        "parameter_step_norm": float(
+            np.linalg.norm(optimized_values - flat_initial)
+        ),
+        "scaled_parameter_step_norm": float(
+            np.linalg.norm(optimized_scaled - scaled_initial)
+        ),
+        "objective_history": np.asarray(
+            [initial_objective, float(final_objective)], dtype=float
+        ),
+        "initial_evaluation_seconds": float(
+            time.perf_counter() - map_start_time - optimization_seconds
+        ),
+        "optimization_seconds": float(optimization_seconds),
+    }
+    map_values = {
+        name: np.asarray(value)
+        for name, value in unravel(jax.numpy.asarray(optimized_values)).items()
+    }
+    print(
+        f"{diagnostics['optimizer']} MAP: "
+        f"iterations={diagnostics['iterations']}; "
+        f"objective={diagnostics['objective']:.6g}; "
+        f"gradient_inf_norm={diagnostics['gradient_norm']:.3g}; "
+        f"scaled_projected_gradient_inf_norm="
+        f"{diagnostics['scaled_projected_gradient_norm']:.3g}; "
+        f"converged={diagnostics['converged']}",
+        flush=True,
     )
     return map_values, diagnostics
 
@@ -8557,8 +8733,15 @@ def write_outputs(
                 f"projected-gradient tolerance: `{args.map_tolerance}`; "
                 "JAXopt line-search stopping is used."
                 if args.map_optimizer == "jax-lbfgsb"
-                else f"MAP optimizer/steps/learning rate: `{args.map_optimizer}` / "
-                f"`{args.map_steps}` / `{args.map_learning_rate}`."
+                else (
+                    f"MAP optimizer/maximum iterations: `{args.map_optimizer}` / `{args.map_steps}`; "
+                    f"parameter scaling: `{args.map_parameter_scaling}`; "
+                    f"projected-gradient tolerance: `{args.map_tolerance}`; "
+                    "exact-Hessian trust-region stopping is used."
+                    if args.map_optimizer == "trust-exact"
+                    else f"MAP optimizer/steps/learning rate: `{args.map_optimizer}` / "
+                    f"`{args.map_steps}` / `{args.map_learning_rate}`."
+                )
             )
         ),
         f"Ice trajectory: `{trajectory_label}`.",
@@ -8693,7 +8876,17 @@ def write_outputs(
                     f"- Function-reduction tolerance: `{map_diagnostics.get('function_tolerance', np.nan):.10g}`; "
                     f"projected-gradient tolerance: `{args.map_tolerance:.10g}`."
                     if args.map_optimizer == "lbfgs"
-                    else f"- Projected-gradient tolerance: `{args.map_tolerance:.10g}`; JAXopt line-search stopping was used."
+                    else (
+                        f"- Projected-gradient tolerance: `{args.map_tolerance:.10g}`; "
+                        "JAXopt line-search stopping was used."
+                        if args.map_optimizer == "jax-lbfgsb"
+                        else (
+                            f"- Projected-gradient tolerance: `{args.map_tolerance:.10g}`; "
+                            "exact-Hessian trust-region stopping was used."
+                            if args.map_optimizer == "trust-exact"
+                            else f"- MAP steps/learning rate: `{args.map_steps}` / `{args.map_learning_rate}`."
+                        )
+                    )
                 ),
                 f"- Parameter step norm: `{map_diagnostics['parameter_step_norm']:.10g}`.",
             ]
@@ -9840,18 +10033,19 @@ def parse_args():
     )
     parser.add_argument(
         "--map-optimizer",
-        choices=("jax-lbfgsb", "lbfgs", "adam"),
+        choices=("jax-lbfgsb", "lbfgs", "trust-exact", "adam"),
         default="lbfgs",
         help=(
             "Optimizer for --map-steps; SciPy L-BFGS-B is the default, with "
-            "JAX-native bounded L-BFGS-B and Adam available as alternatives."
+            "JAX-native bounded L-BFGS-B, exact-Hessian trust-region polishing, "
+            "and Adam available as alternatives."
         ),
     )
     parser.add_argument(
         "--map-tolerance",
         type=float,
         default=1.0e-9,
-        help="Projected-gradient tolerance for the L-BFGS-B MAP optimizer.",
+        help="Projected-gradient tolerance for the selected MAP optimizer.",
     )
     parser.add_argument(
         "--map-ftol",
@@ -10357,6 +10551,11 @@ def main():
             "Prior-width parameter scaling is not supported by the Adam MAP optimizer; "
             "use --map-parameter-scaling none with Adam"
         )
+    if args.map_optimizer == "trust-exact" and args.map_parameter_scaling != "none":
+        raise ValueError(
+            "Trust-Exact MAP optimization requires raw sample-site coordinates; "
+            "use --map-parameter-scaling none"
+        )
     if args.map_init_from is not None and args.map_init_max_tiles is not None:
         raise ValueError("--map-init-from cannot be combined with --map-init-max-tiles")
     if args.map_trajectory_rate_nm_day is not None and (
@@ -10800,6 +10999,14 @@ def main():
                 args.map_tolerance,
                 parameter_scales=reduced_scales,
             )
+        elif args.map_optimizer == "trust-exact":
+            reduced_map_values, _ = run_trust_exact_map_optimization(
+                reduced_model,
+                reduced_initial_values,
+                jax,
+                args.map_steps,
+                args.map_tolerance,
+            )
         else:
             reduced_map_values, _ = run_map_initialization(
                 reduced_model,
@@ -10842,6 +11049,14 @@ def main():
                 args.map_steps,
                 args.map_tolerance,
                 parameter_scales=parameter_scales,
+            )
+        elif args.map_optimizer == "trust-exact":
+            initial_values, map_diagnostics = run_trust_exact_map_optimization(
+                model,
+                initial_values,
+                jax,
+                args.map_steps,
+                args.map_tolerance,
             )
         else:
             initial_values, map_diagnostics = run_map_initialization(

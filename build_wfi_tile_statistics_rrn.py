@@ -29,6 +29,7 @@ import ast
 import bisect
 import csv
 import io
+import os
 from datetime import date, datetime, timedelta, timezone
 import json
 from numbers import Real
@@ -90,7 +91,7 @@ FILE_NAME_PATTERN = re.compile(
 )
 DEFAULT_TILE_SIZES = (512, 64)
 DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024
-DEFAULT_MAST_TOKEN = Path.home() / "Downloads" / "mast_api_token.txt"
+DEFAULT_MAST_TOKEN = Path(__file__).resolve().parent / "mast_api_token.txt"
 RCS_PROGRAM = "1039"
 PHOTODIODE_DATA_URI = (
     "https://mast.stsci.edu/edp/api/v0.1/mnemonics/spa/roman/data"
@@ -148,6 +149,8 @@ def scan_products(input_dir, detector=None, allow_empty=False):
                 f"Duplicate file-set name for {record['file_set_name']}: "
                 f"{previous} and {path}"
             )
+        stat = path.stat()
+        record["source_signature"] = f"{stat.st_size}:{stat.st_mtime_ns}"
         seen[record["file_set_name"]] = path
         records.append(record)
     if not records and not allow_empty:
@@ -200,7 +203,7 @@ def read_optional_index(path):
     return metadata
 
 
-def mast_records_from_index(rows, detector=None):
+def mast_records_from_index(rows, detector=None, allow_empty=False):
     """Create remote product records for the MAST side of a combined run."""
     records = []
     seen = {}
@@ -237,7 +240,7 @@ def mast_records_from_index(rows, detector=None):
             raise ValueError(f"Duplicate MAST product {file_set_name} in supplement index")
         seen[file_set_name] = record
         records.append(record)
-    if detector is not None and not records:
+    if detector is not None and not records and not allow_empty:
         raise ValueError(f"No MAST supplement products found for {detector}")
     return records
 
@@ -825,6 +828,7 @@ def write_inventory(path, records, observations):
     fields = (
         "file_name",
         "file_path",
+        "source_signature",
         "file_set_name",
         "detector",
         "source",
@@ -856,6 +860,7 @@ def write_inventory(path, records, observations):
                 {
                     "file_name": record["file_name"],
                     "file_path": str(record["path"]) if record.get("path") else "",
+                    "source_signature": record.get("source_signature", ""),
                     "file_set_name": record["file_set_name"],
                     "detector": record["detector"],
                     "source": record.get("source", "rrn"),
@@ -1189,6 +1194,242 @@ def write_detector_statistics(
             with detector_part_path(parts_dir, observation["group"]).open(newline="") as part:
                 writer.writerows(csv.DictReader(part))
     temporary_path.replace(output_path)
+
+
+def incremental_part_path(parts_dir, file_set_name):
+    """Return a safe checkpoint path keyed by the source file-set name."""
+    if not file_set_name or Path(file_set_name).name != file_set_name:
+        raise ValueError(f"Unsafe file-set name: {file_set_name!r}")
+    return parts_dir / f"{file_set_name}.csv"
+
+
+def read_statistics_rows(path, return_fieldnames=False):
+    """Read a complete statistics CSV for file-set keyed incremental updates."""
+    path = Path(path)
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = tuple(reader.fieldnames or ())
+        missing = set(FIELDS).difference(fieldnames)
+        if missing:
+            raise ValueError(
+                f"Statistics file is missing fields {sorted(missing)}: {path}"
+            )
+        rows = list(reader)
+    if not rows:
+        raise ValueError(f"Statistics file has no rows: {path}")
+    if return_fieldnames:
+        return rows, fieldnames
+    return rows
+
+
+def write_statistics_rows(output_path, rows, fieldnames=FIELDS):
+    """Atomically write an incrementally rebuilt statistics CSV."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = output_path.with_name(output_path.name + ".partial")
+    try:
+        with temporary_path.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(output_path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+
+def update_statistics_metadata(row, observation):
+    """Refresh chronological metadata while preserving computed tile moments."""
+    updated = dict(row)
+    for field in (
+        "led",
+        "repeat",
+        "group",
+        "file_set_name",
+        "baseline_file_set_name",
+        "exposure_start_time",
+        "days",
+    ):
+        updated[field] = observation[field]
+    return updated
+
+
+def update_detector_statistics_incremental(
+    observations, output_path, tile_size, fetch_image=None
+):
+    """Reuse existing file-set statistics and reduce only newly discovered files.
+
+    Existing observations must retain their per-LED baseline file. If a new
+    earlier baseline appears, the caller should rebuild the detector output
+    because the old ratios were formed against a different image.
+    """
+    output_path = Path(output_path)
+    if not output_path.exists():
+        raise ValueError(
+            f"Incremental update requires an existing statistics file: {output_path}"
+        )
+    existing_rows, existing_fieldnames = read_statistics_rows(
+        output_path, return_fieldnames=True
+    )
+    existing_by_file_set = {}
+    existing_baselines = {}
+    for row in existing_rows:
+        file_set_name = row["file_set_name"]
+        tile_rows = existing_by_file_set.setdefault(file_set_name, {})
+        tile_id = row["tile_id"]
+        if tile_id in tile_rows:
+            raise ValueError(
+                f"Duplicate tile {tile_id} for {file_set_name} in {output_path}"
+            )
+        tile_rows[tile_id] = row
+        led = int(row["led"])
+        baseline = row["baseline_file_set_name"]
+        previous = existing_baselines.setdefault(led, baseline)
+        if previous != baseline:
+            raise ValueError(
+                f"Existing statistics have inconsistent LED {led} baselines: "
+                f"{previous!r} and {baseline!r}"
+            )
+
+    current_by_file_set = {row["file_set_name"]: row for row in observations}
+    if len(current_by_file_set) != len(observations):
+        raise ValueError("The source contains duplicate file-set names")
+    removed = set(existing_by_file_set).difference(current_by_file_set)
+    if removed:
+        raise ValueError(
+            "Incremental update refuses to discard existing observations: "
+            + ", ".join(sorted(removed)[:3])
+        )
+    current_baselines = {}
+    for observation in observations:
+        current_baselines.setdefault(
+            int(observation["led"]), observation["baseline_file_set_name"]
+        )
+    for led, baseline in existing_baselines.items():
+        if current_baselines.get(led) != baseline:
+            raise ValueError(
+                f"Incremental update cannot change LED {led} baseline from "
+                f"{baseline!r} to {current_baselines.get(led)!r}"
+            )
+
+    new_observations = [
+        row
+        for row in observations
+        if row["file_set_name"] not in existing_by_file_set
+    ]
+    parts_dir = output_path.with_name(output_path.name + ".incremental.parts")
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    new_rows_by_file_set = {}
+    for observation in new_observations:
+        part_path = incremental_part_path(parts_dir, observation["file_set_name"])
+        if part_path.exists():
+            new_rows_by_file_set[observation["file_set_name"]] = read_statistics_rows(
+                part_path
+            )
+
+    for led in range(1, 7):
+        pending_rows = [
+            row
+            for row in new_observations
+            if int(row["led"]) == led
+            and row["file_set_name"] not in new_rows_by_file_set
+        ]
+        if not pending_rows:
+            continue
+        led_rows = [row for row in observations if int(row["led"]) == led]
+        baseline_data, baseline_dq = load_observation_image(led_rows[0], fetch_image)
+        try:
+            for observation in pending_rows:
+                part_path = incremental_part_path(
+                    parts_dir, observation["file_set_name"]
+                )
+                current_data = current_dq = None
+                if (
+                    observation["file_set_name"]
+                    == observation["baseline_file_set_name"]
+                ):
+                    current_data, current_dq = baseline_data, baseline_dq
+                else:
+                    current_data, current_dq = load_observation_image(
+                        observation, fetch_image
+                    )
+                temporary_part = part_path.with_name(part_path.name + ".partial")
+                try:
+                    with temporary_part.open("w", newline="") as handle:
+                        writer = csv.DictWriter(handle, fieldnames=FIELDS)
+                        writer.writeheader()
+                        last_tile = None
+                        for tile in tile_sufficient_statistics(
+                            baseline_data,
+                            baseline_dq,
+                            current_data,
+                            current_dq,
+                            tile_size,
+                            current_scale=float(
+                                observation.get("photodiode_scale", 1.0)
+                            ),
+                        ):
+                            last_tile = tile
+                            writer.writerow(
+                                {
+                                    "led": observation["led"],
+                                    "repeat": observation["repeat"],
+                                    "group": observation["group"],
+                                    "file_set_name": observation["file_set_name"],
+                                    "baseline_file_set_name": observation[
+                                        "baseline_file_set_name"
+                                    ],
+                                    "exposure_start_time": observation[
+                                        "exposure_start_time"
+                                    ],
+                                    "days": observation["days"],
+                                    **tile,
+                                }
+                            )
+                        if last_tile is None:
+                            raise RuntimeError(
+                                "Tile statistic generator returned no tiles"
+                            )
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    temporary_part.replace(part_path)
+                finally:
+                    if temporary_part.exists():
+                        temporary_part.unlink()
+                    if current_data is not baseline_data and current_data is not None:
+                        del current_data, current_dq
+                new_rows_by_file_set[observation["file_set_name"]] = (
+                    read_statistics_rows(part_path)
+                )
+                print(
+                    f"{observation['file_set_name']}: wrote "
+                    f"{last_tile['tile_id'] + 1} tiles"
+                )
+        finally:
+            del baseline_data, baseline_dq
+
+    output_rows = []
+    for observation in observations:
+        file_set_name = observation["file_set_name"]
+        if file_set_name in existing_by_file_set:
+            rows = existing_by_file_set[file_set_name].values()
+        else:
+            rows = new_rows_by_file_set.get(file_set_name)
+            if rows is None:
+                raise RuntimeError(f"Missing incremental statistics for {file_set_name}")
+        for row in rows:
+            output_rows.append(update_statistics_metadata(row, observation))
+    output_rows = [
+        {field: row[field] for field in existing_fieldnames} for row in output_rows
+    ]
+    write_statistics_rows(output_path, output_rows, existing_fieldnames)
+    print(
+        f"Updated {output_path} with {len(new_observations)} new observations; "
+        f"reused {len(observations) - len(new_observations)} existing observations"
+    )
+    return output_path
 
 
 def choose_detectors(records, requested, all_detectors):

@@ -171,8 +171,48 @@ The MAST query defaults to RCS program `1039`; the statistics builder rejects
 indices containing other programs because their partial LED sequences are not
 compatible with the RCS time series.
 
-The MAST token is read from `~/Downloads/mast_api_token.txt` by default. Keep
-the token outside the repository.
+The MAST token is read from `mast_api_token.txt` in the repository root.
+
+### 1a. Nexus S3 reduction and correction pipeline
+
+On the Nexus, use the one-step pipeline instead of copying products from a
+user-owned CAR190 directory. It synchronizes only calibrated ASDF products
+from the CAR190 S3 prefix, refreshes the all-detector MAST index, fetches the
+PD1 photodiode telemetry, uses the MAST supplement by default, and writes each
+run below a UTC `YYYYMMDD` directory. The S3 cache is persistent, so a later
+run downloads only new or changed calibrated products.
+
+```bash
+./run_wfi_reduction_pipeline.py
+```
+
+There are no setup arguments. The source, output root, detector list, MAST
+token path, MAST supplement, PD1 telemetry channel, tile sizes, and correction
+settings are fixed production defaults. Existing raw statistics are reused by
+file-set name; newly discovered products are reduced, and changed or removed
+source products trigger a safe full rebuild.
+
+Each dated directory contains:
+
+- `statistics/`: raw tile sufficient statistics, including count moments;
+- `corrections/`: fitted count-space gain/ACM correction tables and summaries;
+- `corrected_statistics/`: the same 512-tile statistics with the fitted count
+  correction applied;
+- `telemetry/photodiode_pd1.csv`: raw PD1 telemetry queried before reduction;
+- `all_wfi_rcs_flat_index.csv`: refreshed MAST supplement index;
+- `*_rrn_inventory.csv`: the source products and timestamps used;
+- `pipeline_manifest.json`: source, command, detector, correction, and output
+  provenance.
+
+The raw statistics plus the correction table remain the canonical TMM fit
+inputs. Do not pass `*_count_corrected.csv` together with that same correction
+table, or the count correction will be applied twice. The pipeline's
+`*_count_corrected.csv` files are provided as explicitly corrected products for
+inspection and downstream tools that do not apply the table themselves.
+
+The pipeline stops if the root token, MAST index query, telemetry query, or
+MAST supplement cannot be refreshed; it does not silently fall back to a
+partial local-only reduction.
 
 ### 2. Fit the TMM model
 
@@ -343,7 +383,15 @@ Use `--map-only` with `--map-steps` to archive and plot the deterministic MAP
 solution without starting NUTS; this is useful for fast basin comparisons.
 The deterministic MAP optimizer defaults to bounded L-BFGS-B; use
 `--map-optimizer adam` only for the legacy AutoDelta initializer path, and use
-`--map-tolerance` to set the L-BFGS-B stopping tolerance.
+`--map-tolerance` to set the selected MAP optimizer's projected-gradient
+stopping tolerance. `--map-optimizer trust-exact` is an optional exact-Hessian
+trust-region polisher for small, warm-started fits; it holds coordinates already
+at active bounds fixed, requires `--map-parameter-scaling none`, and is not
+intended for full production tile fits.
+For a difficult one-tile fit, first archive a good `lbfgs` MAP state, then pass
+its output directory to `--map-init-from` with `--map-optimizer trust-exact`.
+The reparameterized AR and whitened-trajectory sites are converted from their
+saved physical deterministic sites when loading such a warm start.
 Use `--map-trajectory-rate-nm-day` for a deliberately dispersed MAP start when
 checking for separate trajectory basins; it does not alter the posterior prior.
 For a staged start, `--map-init-max-tiles 1` runs those MAP steps first on one
@@ -419,6 +467,8 @@ override only when intentionally plotting a compatible posterior subset.
 ## Code Map
 
 - `build_wfi01_tile_statistics.py`: tile sufficient-statistic calculation;
+- `run_wfi_reduction_pipeline.py`: Nexus S3 synchronization, dated reduction,
+  and count-space correction application;
 - `build_wfi_tile_statistics_stream.py`: resumable MAST downloader;
 - `fit_wfi_tmm_numpyro.py`: single- and all-SCA TMM model and output writer;
 - `plot_wfi_tmm_numpyro.py`: posterior prediction and plotting;

@@ -44,6 +44,7 @@ from fit_wfi_tmm_numpyro import (
     require_numpyro,
     qe_rbf_configuration,
     run_map_optimization,
+    run_trust_exact_map_optimization,
     statistics_fingerprint,
     tile_neighbor_edges,
     rate_curvature_matrix,
@@ -1663,6 +1664,32 @@ class TestTmmTileData(unittest.TestCase):
                     warm_start_path, {"value": np.zeros(2)}, changed_data
                 )
 
+    def test_map_warm_start_prefers_reparameterized_source_site(self):
+        data = load_tile_statistics(DEFAULT_SINGLE_SCA_TILE_STATISTICS, max_tiles=1)
+        with tempfile.TemporaryDirectory() as directory:
+            warm_start_path = Path(directory) / "posterior_samples.npz"
+            np.savez(
+                warm_start_path,
+                map_only=np.asarray(1),
+                statistics_fingerprint=np.asarray(statistics_fingerprint(data)),
+                latent=np.asarray([99.0, 98.0]),
+                constrained=np.asarray([1.5, -0.25]),
+            )
+
+            values = load_map_warm_start(
+                warm_start_path,
+                {"latent": np.zeros(2)},
+                data,
+                value_converters={
+                    "latent": (
+                        "constrained",
+                        lambda value, _: np.asarray(value) + 2.0,
+                    )
+                },
+            )
+
+        np.testing.assert_array_equal(values["latent"], [3.5, 1.75])
+
     def test_lbfgs_map_optimization_bounds_hgcdte_sites(self):
         jax, _, _, _, _, _, _ = require_numpyro()
         import numpyro
@@ -1692,6 +1719,34 @@ class TestTmmTileData(unittest.TestCase):
         self.assertLessEqual(float(map_values["hgcdte_n"]), 6.0)
         self.assertGreaterEqual(float(map_values["hgcdte_k"]), 0.0)
         self.assertLessEqual(float(map_values["hgcdte_k"]), 3.0)
+
+    def test_trust_exact_map_optimization_reaches_interior_solution(self):
+        jax, _, _, _, _, _, _ = require_numpyro()
+        import numpyro
+        import numpyro.distributions as dist
+
+        def model():
+            x = numpyro.sample("x", dist.Normal(0.0, 1.0))
+            numpyro.factor("target", -0.5 * ((x - 2.0) / 0.1) ** 2)
+
+        map_values, diagnostics = run_trust_exact_map_optimization(
+            model,
+            {"x": np.asarray(0.0)},
+            jax,
+            maxiter=20,
+            tolerance=1.0e-6,
+        )
+
+        self.assertTrue(diagnostics["converged"])
+        self.assertAlmostEqual(float(map_values["x"]), 1.980198, places=5)
+        with self.assertRaisesRegex(ValueError, "raw sample-site coordinates"):
+            run_trust_exact_map_optimization(
+                model,
+                {"x": np.asarray(0.0)},
+                jax,
+                maxiter=20,
+                parameter_scales={"x": np.asarray(1.0)},
+            )
 
     def test_hierarchy_labels_follow_active_ar_parameter_width(self):
         self.assertEqual(
