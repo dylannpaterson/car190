@@ -235,51 +235,33 @@ The pipeline stops if the root token, MAST index query, telemetry query, or
 MAST supplement cannot be refreshed; it does not silently fall back to a
 partial local-only reduction.
 
-### 2. Fit the TMM model
+### 2. Fixed production TMM fit
 
-After all 18 statistics files are complete, run the following command once per
-detector, sequentially. Only the detector name, statistics path, and output
-directory change between runs:
+The production copy is `fit_wfi_tmm_production.py`. It has no command-line
+arguments. Its constants point at the current production input directory and
+output root, and it processes every pre-corrected
+`*_tile_log_statistics_512_count_corrected.csv` file sequentially.
 
 ```bash
-for detector in WFI{01..18}; do
-  detector_lower=${detector,,}
-  python -u fit_wfi_tmm_numpyro.py \
-    --single-sca \
-    --tile-statistics "wfi_tile_log_statistics_512/${detector_lower}_tile_log_statistics_512.csv" \
-    --fixed-corrections refit_corrections_tile/wfi_all_tile_fixed_led3_gain_acm_corrections.csv \
-    --absolute-substrate-power \
-    --sed-weighting energy \
-    --tile-initial-thickness-lognormal \
-    --tile-initial-thickness-log-median-nm 10 \
-    --tile-initial-thickness-log-sigma 1.5 \
-    --trajectory-rate-prior-mean-nm-day 5 \
-    --trajectory-rate-prior-sigma-log 1.5 \
-    --ar-mean-prior-sigma 10 \
-    --ar-sca-sigma-prior 1 \
-    --ar-tile-sigma-prior 1 \
-    --map-trajectory-rate-nm-day 10.2 \
-    --map-parameter-scaling prior \
-    --map-optimizer lbfgs \
-    --tile-rate-variation \
-    --tile-rate-trajectory-variation \
-    --no-tile-rate-neighbor-smoothness \
-    --fit-incidence-angle \
-    --incidence-angle-prior-uniform \
-    --incidence-angle-init-deg 7.5 \
-    --prediction-row-chunk-size 64 \
-    --map-steps 10000 \
-    --map-only \
-    --no-progress-bar \
-    --output-dir "${detector_lower}_absolute_substrate_power_weak_priors_map10000_tile_corrections_x64"
-done
+python -u fit_wfi_tmm_production.py
 ```
+
+The production copy does not accept raw statistics or a fixed-correction CSV.
+Gain, ACM, late-ACM, additional-ACM, and pre-reset ACM corrections are already
+included in the input statistics and none of those terms is fitted again. The
+model retains the post-reset per-tile grey log offset, separate pre/post-reset
+complex ice indices, shared positive HgCdTe scales, centered tile-rate
+variation, and deterministic 10,000-step MAP settings from the latest runs.
+
+The original `fit_wfi_tmm_numpyro.py` remains the exploratory/reproduction
+implementation and is not the production entrypoint.
 
 ### WFI01 reset validation
 
-The validated WFI01 pre/post complex-index reset fit is a separate reproduction
-from the general production loop above. It uses the raw RRN tile statistics and
-the grey-corrected count-space correction table. Do not substitute
+The validated WFI01 pre/post complex-index reset fit below is a raw-input
+reproduction, separate from the zero-argument production copy above. It uses
+the raw RRN tile statistics and the grey-corrected count-space correction
+table. Do not substitute
 `wfi01_tile_log_statistics_512_count_corrected.csv`: the fixed table already
 contains the `count_log_correction` applied to the raw statistics.
 
