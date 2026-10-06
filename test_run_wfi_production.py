@@ -8,7 +8,7 @@ import numpy as np
 import run_wfi_production as runner
 
 
-class IndependentProductionRunnerTests(unittest.TestCase):
+class ProductionRunnerTests(unittest.TestCase):
     def write_statistics(self, path, scale=1.0):
         fieldnames = [
             "tile_id",
@@ -46,6 +46,7 @@ class IndependentProductionRunnerTests(unittest.TestCase):
             np.savez(
                 fit_dir / "posterior_samples.npz",
                 statistics_row_fingerprints=runner.statistics_row_fingerprints(paths[0]),
+                statistics_fingerprint=runner.statistics_row_fingerprints(paths[0]),
             )
             self.assertTrue(runner.archive_matches_statistics(fit_dir, paths[0]))
 
@@ -53,25 +54,21 @@ class IndependentProductionRunnerTests(unittest.TestCase):
             runner.tile_statistics_paths("WFI01", source, split_root)
             self.assertFalse(runner.archive_matches_statistics(fit_dir, paths[0]))
 
-    def test_detector_paths_accept_custom_pattern_and_emcee_steps(self):
+    def test_detector_paths_use_fixed_production_layout(self):
         statistics, output, split, fits, emcee = runner.detector_paths(
-            "WFI03",
-            Path("corrected"),
-            Path("results"),
-            "{detector}_stats.csv",
-            750,
+            "WFI03", Path("corrected")
         )
-        self.assertEqual(statistics, Path("corrected/WFI03_stats.csv"))
+        self.assertEqual(
+            statistics,
+            Path("corrected/wfi03_tile_log_statistics_512_count_corrected.csv"),
+        )
         self.assertEqual(
             output,
-            Path(
-                "results/wfi03_absolute_substrate_power_hgcdte_prior025_"
-                "independent_tiles_least_squares"
-            ),
+            Path("corrected") / "production" / "wfi03",
         )
         self.assertEqual(split.parent, output)
         self.assertEqual(fits.parent, output)
-        self.assertEqual(emcee, output / "one_tile_emcee750")
+        self.assertEqual(emcee, output / "emcee")
 
 
 if __name__ == "__main__":

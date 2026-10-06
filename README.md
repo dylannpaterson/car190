@@ -5,101 +5,34 @@ primary workflow converts calibrated MAST products into compact tile
 sufficient statistics, then fits an air/ice/AR/HgCdTe transfer-matrix model
 to the statistics with NumPyro.
 
-The current production model is designed for all 18 WFI SCAs, fitted as
-fresh-EMCEE-initialized independent per-tile MAP-only runs:
+The production model is intentionally fixed and is run through
+`run_wfi_production.py` as fresh-EMCEE-initialized independent per-tile MAP fits:
 
+- corrected `*_tile_log_statistics_512_count_corrected.csv` inputs, with no correction table reapplied;
 - absolute-substrate-power response with semi-infinite HgCdTe;
-- positive free HgCdTe n/k nuisance scales;
-- fully non-parametric ice trajectories with independent tile-level rate variation;
-- independent AR parameters for each tile;
-- lognormal initial-thickness priors centered at 10 nm;
-- selectable one-, two-, or three-layer dielectric AR stack;
-- no neighboring-tile rate smoothing.
+- independent positive HgCdTe n/k log scales with prior sigma `0.25`;
+- energy-weighted core SED integration using the pinned local reference files;
+- exactly three independent lossless AR layers and a fitted incidence angle;
+- fixed lossless ice index `n=1.25`, with reset day `15.064405023148149`;
+- independent per-tile lognormal initial and reset thickness priors, median `10` nm and log sigma `1.5`;
+- fully non-parametric, unwhitened per-tile trajectories with a `5` nm/day lognormal rate prior;
+- one fitted post-reset log offset per tile, with prior sigma `0.1`;
+- deterministic least-squares MAP optimization in prior-width coordinates for up to `10000` evaluations.
 
-The opt-in `--use-hgcdte-optical-constants` mode replaces the constant HgCdTe
-boundary with a fixed 80 K, `x=0.445` wavelength-dependent sensitivity model.
-It interpolates the 80 K real-index table in Mouzali (tel-01281981) between
-the `x=0.397` and `x=0.459` columns and uses that source's absorption laws for
-the imaginary index. The real-index table is held at its 1.6 um edge across
-the shorter WFI wavelengths, so this mode is a documented sensitivity test,
-not a detector-specific calibration. It is mutually exclusive with
-`--fit-hgcdte`. Mouzali models a finite active HgCdTe layer; this workflow
-reuses the constants only as an effective terminal boundary. The `x=0.445`
-low-temperature extrapolation is outside the stated composition range of the
-source's gap formula.
+The initializer is fixed at 52 walkers, 1,000 steps, seed `20261004`, no
+complex-q parameters, and a constant-in-time accumulation rate. Its best state
+is expanded across the non-parametric rate nodes for the MAP stage. Production
+has no model-selection CLI: conductive or
+finite HgCdTe, fitted optical-index branches, QE/ice modulation, ACM refits,
+shared or hierarchical tile trajectories, neighboring-tile smoothing, NUTS,
+and alternate MAP optimizers are not production features.
 
-The opt-in `--fit-hgcdte-modulation` mode fits seven shared smooth log-space
-multiplier nodes for each of `n(lambda)` and `k(lambda)` around that
-wavelength-dependent baseline. Exponentiation keeps both optical constants
-positive. This is a spectral-flexibility diagnostic shared across tiles, not
-an independent detector calibration.
+The exploratory `fit_wfi_tmm_numpyro.py` workflow retains additional optical
+sensitivity branches. Those branches are not accepted by the production
+entrypoint or production output contract.
 
-The opt-in `--fit-conductive-layer` mode inserts a global thin Drude-like layer
-between the AR stack and HgCdTe. Its positive log-thickness, plasma-strength,
-and damping-ratio parameters provide a low-dimensional physical boundary
-perturbation without replacing the transfer-matrix model.
-
-The opt-in `--fit-qe-rbf` mode applies normalized Gaussian RBF corrections to
-the ground-measured QE weighting. Its default four nodes are at 650, 950,
-1250, and 1600 nm; `--qe-rbf-node-wavelengths-nm`, `--qe-rbf-width-nm`, and
-`--qe-rbf-prior-sigma-log` provide basis sensitivity controls. Use it with
-`--np-modulation` to fit QE shape and the ice-rate trajectory jointly.
-
-The opt-in `--use-asw-optical-constants` mode replaces the constant lossless
-ice index with the wavelength-dependent 100 K amorphous-H2O n/k table from the
-Mastrapa laboratory data set. The table is used as a physical sensitivity test,
-not as a claim that the flight ice phase and temperature are known exactly.
-Use `--ice-optical-constants-source` to point this sensitivity test at a local
-copy instead of the pinned public URL.
-
-The opt-in `--fit-ice-optical-modulation` mode fits six shared smooth log-space
-multiplier nodes, placed at the six RCS SED maxima, for each of the Mastrapa
-baseline `n(lambda)` and `k(lambda)` spectra. The default node prior sigma is
-0.05. `--ice-n-modulation-prior-sigma-log` can broaden only the refractive-index
-prior for porosity sensitivity tests. This mode is global across tiles and epochs
-and is mutually exclusive with the scalar pre/post-reset ice-index modes; the
-reset is represented by the shared thickness trajectory.
-
-With `--fit-post-reset-tile-log-offset`, the fixed correction remains the
-baseline while one zero-centered additive log correction is fitted per tile for
-groups on or after `--ice-reset-day`. Positive values use the same convention as
-the correction CSV and add to the observed corrected log ratios. The default
-prior sigma is 0.1 and posterior values are written to
-`post_reset_tile_log_offset_posterior.csv`.
-
-The opt-in `--incidence-pupil-half-angle-deg` mode evaluates oblique s and p
-responses over a two-dimensional circular pupil with uniform pupil-area
-weighting. Roman's documented f/8 beam corresponds to a 3.576 degree
-marginal-ray half-angle. Global chief-ray x/y tilts or a per-SCA/tile
-`--incidence-chief-ray-map` can represent field-dependent geometry. The older
-`--incidence-cone-half-angle-deg` solid-angle sensitivity remains available for
-archive compatibility. Zero pupil size and chief-ray tilt retain the exact
-normal-incidence calculation. `--fit-incidence-angle` instead fits one global
-non-negative chief-ray polar angle relative to normal with a truncated-Normal
-prior (default sigma 3 degrees) and a hard 15 degree upper bound. Its positive
-initialization avoids the zero-angle symmetry point; it cannot be combined with
-fixed chief-ray geometry or the legacy solid-angle cone. Use
-`--incidence-angle-prior-uniform` for a flat 0--15 degree sensitivity run.
-
-The production response uses `--sed-weighting energy`, treating the table values
-as photon-rate weights. The `photon` interpretation remains available as a
-sensitivity mode.
-
-The production command fixes detector/tile/group gain and ACM corrections from
-`refit_corrections_tile/wfi_all_tile_fixed_led3_gain_acm_corrections.csv`.
-The table contains 18 detectors x 64 tiles x 215 groups; the loader selects the
-matching detector and tile rows. ACM and early-time gain terms are therefore
-not refit.
-
-The production `--fully-np-trajectory` mode replaces the square-root accumulation law
-with a positive instantaneous rate at every observation-epoch node. Rates are log-linearly
-interpolated and integrated to preserve monotonic ice thickness; the existing
-time-aware log-rate curvature penalty remains active. The node-rate prior is
-centered on the historical initial-rate scale, but no square-root time dependence
-is imposed. It is mutually exclusive with `--np-modulation`.
-
-The older WFI01-only analyses and effective-boundary diagnostics remain in the
-repository as comparison tools. They are not the default production model.
+The reset-validation workflow below is deliberately separate and retains its
+own raw-input, fixed-correction, and complex-index configuration.
 
 ## Environment
 
@@ -110,10 +43,10 @@ installations. The current development environment is named `bulge_env`.
 in the requirements file; install it separately from the supplied local source
 archive after extracting it.
 
-The production TMM computes its own transfer-matrix response and generates a
-480--2700 nm wavelength grid from the public QE support. The historical
-`--model-path` option is retained for command compatibility but is not read by
-the production TMM; older SOC/effective-boundary tools still use that table.
+The production TMM computes its own transfer-matrix response on the exact
+wavelength nodes in the pinned SED tables, covering approximately 480--2700 nm.
+Older SOC/effective-boundary tools still use their separate model tables; the
+production TMM has no model-path compatibility option.
 
 ```bash
 python -m pip install -r requirements-wfi01-ice.txt
@@ -246,18 +179,17 @@ Point it at a directory containing corrected per-detector tile-statistics files:
   --statistics-dir /path/to/corrected_statistics
 ```
 
-The default filename pattern is
-`{detector_lower}_tile_log_statistics_512_count_corrected.csv`. Use
-`--statistics-pattern` for a different corrected-file naming convention. All
-WFI01-WFI18 detectors are processed by default; repeat `--detector WFI##` to
-select a subset. Use `--output-dir` to place detector outputs in another
-repository directory, and `--dry-run` to validate all input files and paths
-without fitting.
+Each input directory must contain files named
+`{detector_lower}_tile_log_statistics_512_count_corrected.csv`. All WFI01-WFI18
+detectors are processed by default; repeat `--detector WFI##` to select a
+subset. Use `--tile-id 1` for a focused tile regression, and `--force` to
+refit a tile whose matching archive already exists.
 
-Each detector starts with a fresh 52-walker, 1,000-step EMCEE basin search
-(seed `20261004`, no complex-q parameters). Its result initializes 64
-independent tile fits using deterministic least-squares MAP optimization for up
-to 10,000 steps. The fits use absolute semi-infinite HgCdTe power with free
+Each detector starts with a fresh 52-walker, 1,000-step constant-rate EMCEE
+basin search (seed `20261004`, no complex-q parameters). Its best state is
+expanded across the non-parametric rate nodes and initializes 64 independent
+tile fits using deterministic least-squares MAP optimization for up to 10,000
+evaluations. The fits use absolute semi-infinite HgCdTe power with free
 positive n/k nuisance scales, independent tile AR parameters, lognormal initial
 thickness priors (median 10 nm, log sigma 1.5), the 5 nm/day trajectory prior,
 tile-rate and trajectory variation, and no neighboring-tile rate smoothing.
@@ -265,20 +197,35 @@ Corrections are expected to be already included in the input statistics; no
 fixed-correction CSV is passed to the model. Existing tile archives are reused
 only when their sufficient-statistics fingerprint matches the current input.
 
-`fit_wfi_tmm_production.py` remains the underlying production TMM model and
-configuration library. The independent runner is the supported entrypoint for
-the current cold-EMCEE plus per-tile least-squares production configuration.
+All production outputs are written below the input directory, not the
+repository root:
 
-Generate matching detector and all-detector plots from a non-default output
+```text
+<statistics-dir>/production/<detector>/
+  emcee/                    # one constant-rate initializer
+  tile_statistics/          # one split CSV per tile
+  fits/tile_000/            # one deterministic MAP archive per tile
+  tile_rate_posterior.csv   # detector-level aggregation
+```
+
+`fit_wfi_tmm_production.py` contains only the fixed production TMM model and
+MAP writer. The independent runner is the supported entrypoint for the current
+cold-EMCEE plus per-tile least-squares production configuration.
+
+Generate matching detector and all-detector plots from the same statistics
 directory with:
 
 ```bash
-.venv/bin/python -u plot_wfi_independent_production.py --root /path/to/outputs
+.venv/bin/python -u plot_wfi_independent_production.py --root /path/to/corrected_statistics
 .venv/bin/python -u plot_wfi_all_detector_trajectories.py \
-  --root /path/to/outputs \
-  --fit-suffix absolute_substrate_power_hgcdte_prior025_independent_tiles_least_squares \
+  --root /path/to/corrected_statistics \
   --reset-day 15.064405023148149
+.venv/bin/python -u plot_wfi_fitted_incidence_angle_mosaic.py \
+  --root /path/to/corrected_statistics
 ```
+
+The incidence-angle command writes
+`production/wfi_fitted_incidence_angle_mosaic.png` below the statistics directory.
 
 The original `fit_wfi_tmm_numpyro.py` remains the exploratory/reproduction
 implementation and is not the production entrypoint.
@@ -344,6 +291,11 @@ Generate matching plots with the same raw statistics:
 
 All reset-validation outputs and logs stay inside the repository workspace.
 
+### Legacy NumPyro comparison workflow
+
+The following options apply only to `fit_wfi_tmm_numpyro.py` comparison runs.
+They are not supported by the fixed production entrypoint.
+
 Use `--ar-layers 1` or `--ar-layers 2` for comparison models. If the default
 output path is used, they are written to paths ending in `_ar1layer` and
 `_ar2layer` rather than overwriting the three-layer fit. Layer order is from
@@ -355,10 +307,8 @@ hierarchical tile-to-tile thickness variation. The dielectric model fixes
 `k=0` by default; `--fit-ar-absorption` is an explicit sensitivity option.
 
 The general CLI settings include a three-layer dielectric AR stack, NUTS
-sampling, all available tiles, exact SED wavelength nodes and stride 1,
-log-noise sigma 0.005, and AR population-mean prior sigma 2.0. The current
-production command above intentionally overrides this with deterministic
-MAP-only fitting. The likelihood pixel weight defaults to the inverse median
+sampling, all available tiles, exact SED wavelength nodes and stride 1, and
+log-noise sigma 0.005. The likelihood pixel weight defaults to the inverse median
 valid-pixel count, converting each tile/group pixel SSE to approximately one
 effective datum before the selected-tile average. The aggregate SSE is then
 normalized by the number of selected tiles so adding tiles does not make NUTS
@@ -366,9 +316,8 @@ geometrically intractable. Use `--likelihood-weight` only for an explicit
 sensitivity run.
 
 Use `--fixed-corrections PATH` to apply fixed gain and first/late ACM
-corrections to the log-ratio statistics. The production path is the
-detector/tile-aware table above; this mode disables fitting the ACM and
-early-time gain terms, preventing the same corrections from being fitted twice.
+corrections to raw comparison statistics. The fixed production workflow does
+not pass this option because its corrected input already includes those terms.
 
 For a prior-sensitivity run, `--ar-mean-prior-sigma 5` makes the global AR raw
 parameter prior much broader than the default. This is useful for the focused
@@ -382,7 +331,7 @@ multipliers modulate the instantaneous rate before integration.
 Use `--tile-rate-variation` to give each selected SCA/tile its own log-rate
 offset around the shared trajectory. Add `--tile-rate-trajectory-variation`
 to give every tile independent log-rate deviations at each observation node;
-the production command uses both options. Neighboring selected tiles receive a
+comparison runs may use both options. Neighboring selected tiles receive a
 Gaussian smoothness prior based on their row/column coordinates unless
 `--no-tile-rate-neighbor-smoothness` is supplied. The tile rate prior, neighbor
 prior, and time-curvature scales are controlled by
@@ -477,22 +426,19 @@ tile fit diagnostics, and observed-versus-modeled residual plots.
 
 ## Outputs
 
-The fit directory contains:
+Each production tile directory contains:
 
-- `posterior_samples.npz`: NumPyro posterior arrays, tile IDs, SCA names, and
-  the selected AR layer count, archived response/statistics settings, and a
-  sufficient-statistics fingerprint;
-- `posterior_samples.npz` also records the public QE column selected for each SCA;
-- `tile_ar_posterior.csv`: 16th/50th/84th percentile AR parameters per SCA/tile;
-- `sca_ar_posterior.csv`: SCA-level AR population summaries for all-SCA fits;
-- `np_node_posterior.csv`: epoch-node rate-multiplier and instantaneous-rate summaries when NP modulation is enabled;
-- `tile_rate_posterior.csv`: per-SCA/tile rate offsets and instantaneous-rate summaries when tile-rate variation is enabled;
-- `numpyro_summary.md`: settings and posterior percentile summary;
-- PNG diagnostics generated by `plot_wfi_tmm_numpyro.py`.
+- `posterior_samples.npz`: deterministic MAP sites, fixed production settings,
+  and sufficient-statistics fingerprints;
+- `tile_group_predictions.csv`: observed and modeled group log changes;
+- `tile_ar_posterior.csv`: AR parameter summaries per tile;
+- `tile_hgcdte_posterior.csv`: independent HgCdTe n/k log-scale summaries;
+- `tile_rate_posterior.csv`: initial, final, and mean trajectory-rate summaries;
+- `map_summary.md`: optimizer diagnostics and the fixed production settings.
 
-The plotter uses the archived statistics path, SED mode, wavelength settings,
-tile selection, and observation fingerprint by default. Pass an explicit
-override only when intentionally plotting a compatible posterior subset.
+The detector directory also contains the one-tile EMCEE archive and summary
+used to initialize its MAP fits. The older NumPyro plotter documents and plots
+the separate legacy output format.
 
 ## Code Map
 
@@ -500,6 +446,9 @@ override only when intentionally plotting a compatible posterior subset.
 - `run_wfi_reduction_pipeline.py`: Nexus S3/MAST streaming, dated reduction,
   and count-space correction application;
 - `build_wfi_tile_statistics_stream.py`: resumable MAST downloader;
+- `run_wfi_production.py`: fixed all-detector independent-tile production runner;
+- `run_wfi_tmm_emcee_warmup.py`: fixed one-tile EMCEE initializer;
+- `fit_wfi_tmm_production.py`: fixed production TMM model and MAP writer;
 - `fit_wfi_tmm_numpyro.py`: single- and all-SCA TMM model and output writer;
 - `plot_wfi_tmm_numpyro.py`: posterior prediction and plotting;
 - `analyze_rcs_soc_ice_model.py`: shared trajectory and sufficient-statistic utilities;
@@ -512,8 +461,9 @@ override only when intentionally plotting a compatible posterior subset.
 Run the tests from the project root:
 
 ```bash
+python -m unittest test_fit_wfi_tmm_production.py test_run_wfi_production.py
+python -m py_compile fit_wfi_tmm_production.py run_wfi_tmm_emcee_warmup.py run_wfi_production.py
 python -m pytest -q
-python -m py_compile fit_wfi_tmm_numpyro.py plot_wfi_tmm_numpyro.py
 ```
 
 The tests do not require raw MAST products. The MAST streaming tests use
@@ -524,22 +474,11 @@ injected image fetchers and the tracked index/statistics fixtures.
 - The all-SCA implementation selects `SCU 1` through `SCU 18` from the public
   QE table for `WFI01` through `WFI18`, respectively. The official SCU-to-SCA
   serial mapping identifies WFI01/SCU 1 with SCA serial 22081.
-- The production model generates its wavelength grid from public QE support;
-  the external SCA1 response table is not used. It uses nominal fixed HgCdTe
-  constants for every SCA by default because detector-specific constants are
-  not currently available. The wavelength-dependent HgCdTe mode is an
-  extrapolated 80 K composition sensitivity model, applied as an effective
-  terminal boundary, and should not be treated as measured detector optical
-  constants.
-- The one-, two-, and three-layer models use the same broad per-layer AR
-  bounds and hierarchical priors. They are effective dielectric-stack models,
-  not claims about the proprietary physical coating recipe.
-- The conductive-interlayer mode is a sensitivity model. It uses a fixed
-  `epsilon_inf=1` and a reference wavelength of 1600 nm; the fitted Drude
-  parameters are not detector-material measurements without external priors.
-- The QE RBF mode is likewise a calibration sensitivity model. Its correction
-  coefficients are global and prior-regularized; grey QE changes cancel under
-  the per-LED reference normalization.
+- The production response uses the pinned SED nodes and an effective 80 K,
+  `x=0.445` HgCdTe boundary; those constants are not detector-specific
+  measurements.
+- The three-layer AR stack is an effective dielectric model, not a claim about
+  the proprietary physical coating recipe.
 - The exact external effective-boundary equation is not available, so the
   effective-boundary scripts remain sensitivity diagnostics.
 - Short smoke chains are useful for exercising code paths but are not

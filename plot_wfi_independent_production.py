@@ -22,23 +22,23 @@ from plot_wfi_tmm_numpyro import (
 
 
 ROOT = Path(__file__).resolve().parent
-FIT_SUFFIX = "absolute_substrate_power_hgcdte_prior025_independent_tiles_least_squares"
+PRODUCTION_DIR_NAME = "production"
 DETECTORS = tuple(f"WFI{index:02d}" for index in range(1, 19))
 TILE_COUNT = 64
 
 
 def detector_root(detector, root=ROOT):
-    return root / f"{detector.lower()}_{FIT_SUFFIX}"
+    return root / PRODUCTION_DIR_NAME / detector.lower()
 
 
 def tile_fit_dirs(output_root):
-    paths = sorted((output_root / "fits").glob("tile_*_least_squares"))
+    paths = sorted((output_root / "fits").glob("tile_*"))
     if len(paths) != TILE_COUNT:
         raise ValueError(
             f"Expected {TILE_COUNT} independent tile fits in {output_root / 'fits'}, "
             f"found {len(paths)}"
         )
-    expected = [f"tile_{tile_id:03d}_least_squares" for tile_id in range(TILE_COUNT)]
+    expected = [f"tile_{tile_id:03d}" for tile_id in range(TILE_COUNT)]
     if [path.name for path in paths] != expected:
         raise ValueError(f"Independent tile fit IDs are incomplete in {output_root / 'fits'}")
     return paths

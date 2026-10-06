@@ -15,6 +15,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent
 SCAS = tuple(f"WFI{index:02d}" for index in range(1, 19))
+DEFAULT_FIT_SUFFIX = "production"
 METRICS = (
     ("Initial rate", "initial_rate_nm_day_median"),
     ("Final rate", "final_rate_nm_day_median"),
@@ -65,9 +66,7 @@ def load_rate_map(path, expected_sca):
     if rows is None:
         fit_root = path.parent / "fits"
         rows = []
-        for tile_path in sorted(
-            fit_root.glob("tile_*_least_squares/tile_rate_posterior.csv")
-        ):
+        for tile_path in sorted(fit_root.glob("tile_*/tile_rate_posterior.csv")):
             tile_rows = load_tile_rows(tile_path, expected_sca)
             if tile_rows is not None:
                 rows.extend(tile_rows)
@@ -172,7 +171,7 @@ def load_reset_rate_map(output_dir, expected_sca):
 
     # Independent MAP runs archive one posterior per tile rather than one
     # detector-level posterior. Reconstruct the detector map from those files.
-    tile_fit_dirs = sorted((output_dir / "fits").glob("tile_*_least_squares"))
+    tile_fit_dirs = sorted((output_dir / "fits").glob("tile_*"))
     if len(tile_fit_dirs) != 64:
         return None
     maps = {field: np.full((8, 8), np.nan) for _, field in RESET_METRICS}
@@ -202,14 +201,21 @@ def load_reset_rate_map(output_dir, expected_sca):
     return maps, reset_days[0]
 
 
+def detector_output_dirs(root, sca, fit_suffix):
+    root = Path(root)
+    if fit_suffix == DEFAULT_FIT_SUFFIX:
+        return (root / DEFAULT_FIT_SUFFIX / sca.lower(),)
+    return (
+        root / f"{sca.lower()}_{fit_suffix}_prod",
+        root / f"{sca.lower()}_{fit_suffix}",
+        root / f"wfi_{fit_suffix}_{sca}_map10000_emcee1000",
+    )
+
+
 def load_all_maps(root, fit_suffix):
     maps = {}
     for sca in SCAS:
-        output_dirs = (
-            root / f"{sca.lower()}_{fit_suffix}_prod",
-            root / f"{sca.lower()}_{fit_suffix}",
-            root / f"wfi_{fit_suffix}_{sca}_map10000_emcee1000",
-        )
+        output_dirs = detector_output_dirs(root, sca, fit_suffix)
         maps[sca] = next(
             (
                 rate_map
@@ -226,11 +232,7 @@ def load_all_reset_maps(root, fit_suffix):
     maps = {}
     reset_days = []
     for sca in SCAS:
-        output_dirs = (
-            root / f"{sca.lower()}_{fit_suffix}_prod",
-            root / f"{sca.lower()}_{fit_suffix}",
-            root / f"wfi_{fit_suffix}_{sca}_map10000_emcee1000",
-        )
+        output_dirs = detector_output_dirs(root, sca, fit_suffix)
         loaded = next(
             (
                 reset_map
@@ -434,8 +436,8 @@ def parse_args():
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument(
         "--fit-suffix",
-        default="rcs1039_full64_rate_5nm_np_ledacm_5000",
-        help="Suffix after the lower-case SCA name in each fit directory.",
+        default=DEFAULT_FIT_SUFFIX,
+        help="Use 'production' for the fixed input-directory layout or a legacy suffix.",
     )
     parser.add_argument(
         "--tile-statistics",
@@ -449,14 +451,18 @@ def parse_args():
 
 def main():
     args = parse_args()
-    output = args.output or args.root / "wfi_rcs1039_full_focal_plane_rate_maps.png"
+    output = args.output or (
+        args.root / DEFAULT_FIT_SUFFIX / "wfi_full_focal_plane_rate_maps.png"
+    )
     maps = load_all_maps(args.root, args.fit_suffix)
     reset_maps, reset_day = load_all_reset_maps(args.root, args.fit_suffix)
-    statistics_path = args.tile_statistics or args.root / "wfi_tile_log_statistics_512"
+    statistics_path = args.tile_statistics or args.root
     if not statistics_path.is_absolute():
         statistics_path = args.root / statistics_path
     pass_label = latest_pass_label(statistics_path)
-    if "production_sharedAR_tileRate_twoCommonACM" in args.fit_suffix:
+    if args.fit_suffix == DEFAULT_FIT_SUFFIX:
+        model_label = "independent per-tile non-parametric MAP fits"
+    elif "production_sharedAR_tileRate_twoCommonACM" in args.fit_suffix:
         model_label = (
             "constant-rate modulation; tile-specific rate scales; "
             "shared AR and common ACM steps"

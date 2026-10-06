@@ -15,10 +15,7 @@ from matplotlib.lines import Line2D
 
 ROOT = Path(__file__).resolve().parent
 SCAS = tuple(f"WFI{index:02d}" for index in range(1, 19))
-DEFAULT_FIT_SUFFIX = (
-    "production_sharedAR_tileRate_twoCommonACM_"
-    "map2000_warm100_sample500_depth4_5nm"
-)
+DEFAULT_FIT_SUFFIX = "production"
 DEFAULT_RESET_DAY = 15.064405023148149
 
 
@@ -31,9 +28,16 @@ def _one_tile_series(samples, key):
     return values.reshape(-1)
 
 
+def detector_output_dir(root, detector, fit_suffix):
+    root = Path(root)
+    if fit_suffix == DEFAULT_FIT_SUFFIX:
+        return root / DEFAULT_FIT_SUFFIX / detector.lower()
+    return root / f"{detector.lower()}_{fit_suffix}"
+
+
 def load_independent_trajectory(output_dir):
     fit_dirs = sorted(
-        (Path(output_dir) / "fits").glob("tile_*_least_squares")
+        (Path(output_dir) / "fits").glob("tile_*")
     )
     if not fit_dirs:
         raise FileNotFoundError(f"No independent tile fits found in {output_dir}")
@@ -186,15 +190,17 @@ def main():
     args = parse_args()
     trajectories = {}
     for detector in SCAS:
-        output_dir = args.root / f"{detector.lower()}_{args.fit_suffix}"
+        output_dir = detector_output_dir(args.root, detector, args.fit_suffix)
         posterior_path = output_dir / "posterior_samples.npz"
-        independent_paths = (output_dir / "fits").glob("tile_*_least_squares/posterior_samples.npz")
+        independent_paths = (output_dir / "fits").glob("tile_*/posterior_samples.npz")
         if not posterior_path.is_file() and not any(independent_paths):
             raise FileNotFoundError(f"Missing production posterior: {posterior_path}")
         trajectories[detector] = load_trajectory(output_dir)
-    output = args.output or args.root / "wfi_all_detector_ice_rate_trajectories.png"
+    output = args.output or (
+        args.root / DEFAULT_FIT_SUFFIX / "wfi_all_detector_ice_rate_trajectories.png"
+    )
     quantile_path = output.with_name(output.stem + "_quantiles.csv")
-    independent_fit = "independent_tiles" in args.fit_suffix
+    independent_fit = args.fit_suffix == DEFAULT_FIT_SUFFIX
     plot_all_detector_trajectories(
         output,
         trajectories,
