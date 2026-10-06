@@ -6,15 +6,15 @@ sufficient statistics, then fits an air/ice/AR/HgCdTe transfer-matrix model
 to the statistics with NumPyro.
 
 The current production model is designed for all 18 WFI SCAs, fitted as
-sequential single-SCA MAP-only runs:
+fresh-EMCEE-initialized independent per-tile MAP-only runs:
 
+- absolute-substrate-power response with semi-infinite HgCdTe;
+- positive free HgCdTe n/k nuisance scales;
 - fully non-parametric ice trajectories with independent tile-level rate variation;
-- independent ACM throughput steps for the six LEDs;
-- a global AR population mean;
-- SCA-level AR offsets with shrinkage;
-- tile-level AR deviations within each SCA;
+- independent AR parameters for each tile;
+- lognormal initial-thickness priors centered at 10 nm;
 - selectable one-, two-, or three-layer dielectric AR stack;
-- nominal fixed HgCdTe optical constants.
+- no neighboring-tile rate smoothing.
 
 The opt-in `--use-hgcdte-optical-constants` mode replaces the constant HgCdTe
 boundary with a fixed 80 K, `x=0.445` wavelength-dependent sensitivity model.
@@ -235,23 +235,50 @@ The pipeline stops if the root token, MAST index query, telemetry query, or
 MAST supplement cannot be refreshed; it does not silently fall back to a
 partial local-only reduction.
 
-### 2. Fixed production TMM fit
+### 2. Production TMM fit
 
-The production copy is `fit_wfi_tmm_production.py`. It has no command-line
-arguments. Its constants point at the current production input directory and
-output root, and it processes every pre-corrected
-`*_tile_log_statistics_512_count_corrected.csv` file sequentially.
+The production orchestration entrypoint is `run_wfi_production.py`.
+Point it at a directory containing corrected per-detector tile-statistics files:
 
 ```bash
-python -u fit_wfi_tmm_production.py
+.venv/bin/python -u \
+  run_wfi_production.py \
+  --statistics-dir /path/to/corrected_statistics
 ```
 
-The production copy does not accept raw statistics or a fixed-correction CSV.
-Gain, ACM, late-ACM, additional-ACM, and pre-reset ACM corrections are already
-included in the input statistics and none of those terms is fitted again. The
-model retains the post-reset per-tile grey log offset, separate pre/post-reset
-complex ice indices, shared positive HgCdTe scales, centered tile-rate
-variation, and deterministic 10,000-step MAP settings from the latest runs.
+The default filename pattern is
+`{detector_lower}_tile_log_statistics_512_count_corrected.csv`. Use
+`--statistics-pattern` for a different corrected-file naming convention. All
+WFI01-WFI18 detectors are processed by default; repeat `--detector WFI##` to
+select a subset. Use `--output-dir` to place detector outputs in another
+repository directory, and `--dry-run` to validate all input files and paths
+without fitting.
+
+Each detector starts with a fresh 52-walker, 1,000-step EMCEE basin search
+(seed `20261004`, no complex-q parameters). Its result initializes 64
+independent tile fits using deterministic least-squares MAP optimization for up
+to 10,000 steps. The fits use absolute semi-infinite HgCdTe power with free
+positive n/k nuisance scales, independent tile AR parameters, lognormal initial
+thickness priors (median 10 nm, log sigma 1.5), the 5 nm/day trajectory prior,
+tile-rate and trajectory variation, and no neighboring-tile rate smoothing.
+Corrections are expected to be already included in the input statistics; no
+fixed-correction CSV is passed to the model. Existing tile archives are reused
+only when their sufficient-statistics fingerprint matches the current input.
+
+`fit_wfi_tmm_production.py` remains the underlying production TMM model and
+configuration library. The independent runner is the supported entrypoint for
+the current cold-EMCEE plus per-tile least-squares production configuration.
+
+Generate matching detector and all-detector plots from a non-default output
+directory with:
+
+```bash
+.venv/bin/python -u plot_wfi_independent_production.py --root /path/to/outputs
+.venv/bin/python -u plot_wfi_all_detector_trajectories.py \
+  --root /path/to/outputs \
+  --fit-suffix absolute_substrate_power_hgcdte_prior025_independent_tiles_least_squares \
+  --reset-day 15.064405023148149
+```
 
 The original `fit_wfi_tmm_numpyro.py` remains the exploratory/reproduction
 implementation and is not the production entrypoint.
@@ -259,7 +286,7 @@ implementation and is not the production entrypoint.
 ### WFI01 reset validation
 
 The validated WFI01 pre/post complex-index reset fit below is a raw-input
-reproduction, separate from the zero-argument production copy above. It uses
+reproduction, separate from the corrected-statistics production workflow above. It uses
 the raw RRN tile statistics and the grey-corrected count-space correction
 table. Do not substitute
 `wfi01_tile_log_statistics_512_count_corrected.csv`: the fixed table already

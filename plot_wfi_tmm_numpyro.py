@@ -24,6 +24,11 @@ from assess_rcs_spectral_identifiability import QE_URL, load_qe
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_SINGLE_SCA_OUTPUT = ROOT / "wfi01_tmm_numpyro_tile_pilot"
+DEFAULT_MODEL_PATH = Path(
+    "/Users/paterson.35/Documents/"
+    "rgespit-comissioning-ice-simulations/data/ice_optical_constants/"
+    "spectral_response_model_SCA1.ecsv"
+)
 
 
 def scope_label(sca_names):
@@ -2207,11 +2212,7 @@ def parse_args():
     parser.add_argument(
         "--model-path",
         type=Path,
-        default=Path(
-            "/Users/paterson.35/Documents/"
-            "rgespit-comissioning-ice-simulations/data/ice_optical_constants/"
-            "spectral_response_model_SCA1.ecsv"
-        ),
+        default=DEFAULT_MODEL_PATH,
     )
     parser.add_argument("--sed-mode", choices=("signed", "clipped", "core"), default=None)
     parser.add_argument(
@@ -2231,8 +2232,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
+def _make_plots(args):
     posterior_path = args.output_dir / "posterior_samples.npz"
     tile_posterior_path = args.output_dir / "tile_ar_posterior.csv"
     if not posterior_path.exists() or not tile_posterior_path.exists():
@@ -2382,6 +2382,39 @@ def main():
     print(f"Wrote {fit_path}")
     print(f"Wrote {time_fit_path}")
     print(f"Wrote {scatter_path}")
+
+
+def make_plots(
+    output_dir,
+    tile_statistics=None,
+    model_path=None,
+    sed_mode=None,
+    wavelength_stride=None,
+    wavelength_step_nm=None,
+    max_tiles=None,
+    seed=20260922,
+):
+    """Generate the canonical production plots for an archived fit."""
+    return _make_plots(
+        argparse.Namespace(
+            output_dir=Path(output_dir),
+            tile_statistics=(
+                None if tile_statistics is None else Path(tile_statistics)
+            ),
+            model_path=(
+                DEFAULT_MODEL_PATH if model_path is None else Path(model_path)
+            ),
+            sed_mode=sed_mode,
+            wavelength_stride=wavelength_stride,
+            wavelength_step_nm=wavelength_step_nm,
+            max_tiles=max_tiles,
+            seed=seed,
+        )
+    )
+
+
+def main():
+    _make_plots(parse_args())
 
 
 if __name__ == "__main__":

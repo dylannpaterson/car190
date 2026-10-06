@@ -29,10 +29,19 @@ from fit_wfi01_joint_complex_q_soc import prepare_response_integration
 
 ROOT = Path(__file__).resolve().parent
 PRODUCTION_INPUT_ROOT = ROOT / "rrn_reduction_20261002"
-PRODUCTION_OUTPUT_ROOT = ROOT / "production_tmm_corrected_data"
-PRODUCTION_STATISTICS_PATTERN = "wfi*_tile_log_statistics_512_count_corrected.csv"
+PRODUCTION_OUTPUT_ROOT = ROOT / "wfi01_warm500_fixed_ar_ordered_hgcdte_free_trajectory_n125_per_tile_hgcdte"
+PRODUCTION_STATISTICS_PATTERN = "wfi01_tile_log_statistics_512_count_corrected.csv"
 PRODUCTION_RESET_DAY = 15.064405023148149
 PRODUCTION_SEED = 20260922
+WARMUP_FIXED_RATE_NM_DAY = 10.0
+WARMUP_MAP_STEPS = 500
+WARMUP_FIXED_HGCDTE_SCALES = False
+WARMUP_SHARED_HGCDTE_SCALES = True
+WARMUP_FIXED_AR_INDICES = np.asarray([1.31, 1.73, 2.27], dtype=float)
+PRODUCTION_NP_SMOOTHNESS_WEIGHT = 0.1
+PRODUCTION_SHARED_HGCDTE_SCALES = True
+PRODUCTION_TILE_RATE_PRIOR_SIGMA_LOG = 10.0
+PRODUCTION_TILE_RATE_TRAJECTORY_SMOOTHNESS_WEIGHT = 0.001
 _PRODUCTION_STATISTICS_PATH = None
 DEFAULT_SINGLE_SCA_TILE_STATISTICS = (
     ROOT / "wfi_tile_log_statistics_512" / "wfi01_tile_log_statistics_512.csv"
@@ -87,6 +96,24 @@ HGCDTE_PRIOR_SIGMA = np.asarray([1.0, 1.0], dtype=float)
 DETECTOR_THICKNESS_DEFAULT_NM = 2500.0
 DETECTOR_THICKNESS_PRIOR_SIGMA_LOG = 1.0
 DETECTOR_THICKNESS_NEIGHBOR_SIGMA_LOG = 0.5
+COMPLEX_Q_PARAMETER_NAMES = (
+    "log_q_magnitude",
+    "q_magnitude_slope",
+    "q_phase_offset_rad",
+    "q_optical_path_nm",
+    "q_absorption_per_nm",
+)
+COMPLEX_Q_LOWER = np.asarray(
+    [np.log(1.0e-5), -1.0, -np.pi, -2000.0, 0.0], dtype=float
+)
+COMPLEX_Q_UPPER = np.asarray(
+    [np.log(0.2), 1.0, np.pi, 2000.0, 0.02], dtype=float
+)
+COMPLEX_Q_INITIAL = np.asarray(
+    [-5.806160724, 0.628387402, -2.029580405, -235.622729, 6.486e-5],
+    dtype=float,
+)
+COMPLEX_Q_MAP_SCALES = np.asarray([1.0, 1.0, np.pi, 500.0, 0.005], dtype=float)
 HGCDTE_N_TABLE_WAVELENGTHS_NM = np.arange(1600.0, 6600.1, 200.0)
 HGCDTE_N_TABLE_X0397 = np.asarray(
     [
@@ -595,6 +622,101 @@ def ar_prior_arrays(ar_layers):
     )
 
 
+def validate_fixed_ar_indices(ar_layers, fixed_ar_indices):
+    if fixed_ar_indices is None:
+        return None
+    fixed_ar_indices = np.asarray(fixed_ar_indices, dtype=float).reshape(-1)
+    if fixed_ar_indices.shape != (ar_layers,) or not np.all(
+        np.isfinite(fixed_ar_indices)
+    ):
+        raise ValueError("Fixed AR indices must have one finite value per layer")
+    if np.any(fixed_ar_indices <= AR_LOWER[1]) or np.any(
+        fixed_ar_indices >= AR_UPPER[1]
+    ):
+        raise ValueError("Fixed AR indices must lie strictly inside the AR index bounds")
+    return fixed_ar_indices
+
+
+def ar_active_parameter_indices(ar_layers, fit_ar_absorption, fixed_ar_indices=None):
+    active_parameter_indices = np.arange(3 * ar_layers, dtype=int)
+    if not fit_ar_absorption:
+        active_parameter_indices = active_parameter_indices[
+            active_parameter_indices % 3 != 2
+        ]
+    fixed_ar_indices = validate_fixed_ar_indices(ar_layers, fixed_ar_indices)
+    if fixed_ar_indices is not None:
+        fixed_index_positions = 3 * np.arange(ar_layers, dtype=int) + 1
+        active_parameter_indices = active_parameter_indices[
+            ~np.isin(active_parameter_indices, fixed_index_positions)
+        ]
+    return active_parameter_indices
+
+
+def ar_reference_raw(
+    ar_reference,
+    ar_lower,
+    ar_upper,
+    active_parameter_indices,
+    ordered_ar_indices=False,
+):
+    """Convert physical AR references into the selected raw coordinates."""
+    ar_reference = np.asarray(ar_reference, dtype=float)
+    ar_lower = np.asarray(ar_lower, dtype=float)
+    ar_upper = np.asarray(ar_upper, dtype=float)
+    active_parameter_indices = np.asarray(active_parameter_indices, dtype=int)
+    raw = np.empty(active_parameter_indices.size, dtype=float)
+    for position, parameter_index in enumerate(active_parameter_indices):
+        lower = ar_lower[parameter_index]
+        if ordered_ar_indices and parameter_index % 3 == 1:
+            layer = parameter_index // 3
+            lower = (
+                ar_lower[parameter_index]
+                if layer == 0
+                else ar_reference[parameter_index - 3]
+            )
+        upper = ar_upper[parameter_index]
+        probability = (ar_reference[parameter_index] - lower) / (upper - lower)
+        if not 0.0 < probability < 1.0:
+            raise ValueError("AR reference is outside the selected raw-coordinate bounds")
+        raw[position] = np.log(probability / (1.0 - probability))
+    return raw
+
+
+def ordered_ar_indices_from_raw(
+    ar_raw,
+    active_parameter_indices,
+    ar_lower,
+    ar_upper,
+    ar_parameter_count,
+    jax_module,
+    jnp_module,
+):
+    """Map raw AR coordinates to layer indices with strict layer ordering."""
+    active_parameter_indices = np.asarray(active_parameter_indices, dtype=int)
+    active_index_positions = {
+        int(parameter_index): position
+        for position, parameter_index in enumerate(active_parameter_indices)
+    }
+    values = jnp_module.zeros(
+        ar_raw.shape[:-1] + (ar_parameter_count,), dtype=ar_raw.dtype
+    )
+    active_lower = jnp_module.asarray(np.asarray(ar_lower)[active_parameter_indices])
+    active_upper = jnp_module.asarray(np.asarray(ar_upper)[active_parameter_indices])
+    values = values.at[..., active_parameter_indices].set(
+        active_lower
+        + (active_upper - active_lower) * jax_module.nn.sigmoid(ar_raw)
+    )
+    previous = jnp_module.asarray(ar_lower[1], dtype=ar_raw.dtype)
+    for layer in range(ar_parameter_count // 3):
+        parameter_index = 3 * layer + 1
+        position = active_index_positions[parameter_index]
+        previous = previous + (
+            ar_upper[parameter_index] - previous
+        ) * jax_module.nn.sigmoid(ar_raw[..., position])
+        values = values.at[..., parameter_index].set(previous)
+    return values
+
+
 def ar_coordinate_rotation(active_parameter_indices, ar_parameter_count):
     """Return an orthogonal thickness/index rotation for each AR layer."""
     active_parameter_indices = np.asarray(active_parameter_indices, dtype=int)
@@ -1086,6 +1208,8 @@ def map_parameter_bounds(initial_values, jax):
             return np.full(shape, POST_RESET_ICE_INDEX_LOWER)
         if name == "sca_ar_opd_nm":
             return np.full(shape, -np.inf)
+        if name == "complex_q_parameters":
+            return np.broadcast_to(COMPLEX_Q_LOWER, shape).copy()
         if name in ("ar_sigma_raw", "ar_sca_sigma", "ar_tile_sigma"):
             return np.full(shape, 1.0e-8)
         return np.full(shape, -np.inf)
@@ -1108,6 +1232,8 @@ def map_parameter_bounds(initial_values, jax):
             return np.full(shape, HGCDTE_UPPER[1])
         if name == "sca_ar_opd_nm":
             return np.full(shape, np.inf)
+        if name == "complex_q_parameters":
+            return np.broadcast_to(COMPLEX_Q_UPPER, shape).copy()
         return np.full(shape, np.inf)
 
     flat_lower, _ = jax.flatten_util.ravel_pytree(
@@ -1129,6 +1255,7 @@ def map_parameter_scale_values(initial_values, args):
     """Return prior-width coordinate scales for MAP sample sites."""
     site_scales = {
         "ar_mu_raw": getattr(args, "ar_mean_prior_sigma", AR_MEAN_PRIOR_SIGMA),
+        "ar_tile_raw": getattr(args, "ar_mean_prior_sigma", AR_MEAN_PRIOR_SIGMA),
         "ar_mu_z": 1.0,
         "ar_sigma_raw": getattr(args, "ar_tile_sigma_prior", AR_TILE_SIGMA_PRIOR),
         "ar_sca_sigma": getattr(args, "ar_sca_sigma_prior", AR_SCA_SIGMA_PRIOR),
@@ -1209,6 +1336,7 @@ def map_parameter_scale_values(initial_values, args):
             "absolute_hgcdte_scale_prior_sigma_log",
             ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG,
         ),
+        "complex_q_parameters": COMPLEX_Q_MAP_SCALES,
         "incidence_angle_deg": getattr(
             args,
             "incidence_angle_prior_sigma_deg",
@@ -1254,7 +1382,57 @@ def map_parameter_scale_values(initial_values, args):
     }
 
 
-def load_map_warm_start(path, initial_values, data, value_converters=None):
+def _tile_axis_for_site(name):
+    return {
+        "ar_z": 0,
+        "ar_tile_raw": 1,
+        "ar_tile_z": 1,
+        "initial_thickness_log_nm": -1,
+        "reset_initial_thickness_log_nm": -1,
+        "post_reset_tile_log_offset": -1,
+        "absolute_hgcdte_n_log_scale": -1,
+        "absolute_hgcdte_k_log_scale": -1,
+        "detector_log_thickness_nm": -1,
+        "trajectory_rate_tile_offsets": -1,
+        "trajectory_rate_tile_node_offsets": 1,
+        "trajectory_rate_tile_node_log_rates": 1,
+    }.get(name)
+
+
+def warm_start_value_can_transfer(
+    name, value, target, source_tile_ids=None, target_tile_ids=None
+):
+    """Return whether a source site can populate the target site shape."""
+    value = np.asarray(value)
+    target = np.asarray(target)
+    if value.shape == target.shape:
+        return True
+    if source_tile_ids is None or target_tile_ids is None:
+        return False
+    axis = _tile_axis_for_site(name)
+    if axis is None or value.ndim != target.ndim:
+        return False
+    axis %= value.ndim
+    if value.shape[axis] != len(source_tile_ids) or target.shape[axis] != len(
+        target_tile_ids
+    ):
+        return False
+    return all(
+        value.shape[index] == target.shape[index]
+        for index in range(value.ndim)
+        if index != axis
+    )
+
+
+def load_map_warm_start(
+    path,
+    initial_values,
+    data,
+    value_converters=None,
+    allow_tile_subset=False,
+    broadcast_tile_subset=False,
+    allow_tile_template=False,
+):
     """Load compatible MAP sites, retaining fresh defaults for new sites."""
     path = Path(path)
     samples_path = path / "posterior_samples.npz" if path.is_dir() else path
@@ -1268,8 +1446,66 @@ def load_map_warm_start(path, initial_values, data, value_converters=None):
         archived_fingerprint = str(
             np.asarray(samples["statistics_fingerprint"]).reshape(-1)[0]
         )
+        source_tile_ids = None
+        target_tile_ids = None
         if archived_fingerprint != statistics_fingerprint(data):
-            raise ValueError("MAP warm-start tile statistics do not match this fit")
+            if not allow_tile_subset:
+                raise ValueError("MAP warm-start tile statistics do not match this fit")
+            required_metadata = {
+                "tile_ids",
+                "sca_names",
+                "statistics_row_fingerprints",
+            }
+            missing_metadata = required_metadata.difference(samples.files)
+            if missing_metadata:
+                raise ValueError(
+                    "Tile-subset MAP warm starts require metadata: "
+                    f"{sorted(missing_metadata)}"
+                )
+            source_tile_ids = np.asarray(samples["tile_ids"], dtype=int).reshape(-1)
+            target_tile_ids = np.asarray(data["tile_ids"], dtype=int).reshape(-1)
+            source_sca_names = np.asarray(samples["sca_names"]).astype(str).reshape(-1)
+            target_sca_names = np.asarray(data["sca_names"]).astype(str).reshape(-1)
+            if source_tile_ids.size == 0 or target_tile_ids.size == 0:
+                raise ValueError("Tile-subset MAP warm starts require tile metadata")
+            tile_template = (
+                allow_tile_template
+                and broadcast_tile_subset
+                and source_tile_ids.size == 1
+            )
+            if not set(source_tile_ids).issubset(set(target_tile_ids)) and not tile_template:
+                raise ValueError("MAP warm-start tiles are not a subset of the target tiles")
+            target_sca_positions = {
+                name: index for index, name in enumerate(target_sca_names)
+            }
+            if not set(source_sca_names).issubset(target_sca_positions):
+                raise ValueError("MAP warm-start SCAs are not a subset of the target SCAs")
+            source_row_fingerprints = np.asarray(
+                samples["statistics_row_fingerprints"]
+            ).astype(str).reshape(-1)
+            target_row_fingerprints = statistics_row_fingerprints(data)
+            source_row_count = source_sca_names.size * source_tile_ids.size
+            target_row_count = target_sca_names.size * target_tile_ids.size
+            if source_row_fingerprints.size != source_row_count:
+                raise ValueError("MAP warm-start row metadata has an unexpected shape")
+            if target_row_fingerprints.size != target_row_count:
+                raise ValueError("Target tile statistics row metadata has an unexpected shape")
+            target_tile_positions = {
+                int(tile_id): index for index, tile_id in enumerate(target_tile_ids)
+            }
+            if not tile_template:
+                for source_sca_index, sca_name in enumerate(source_sca_names):
+                    target_sca_index = target_sca_positions[sca_name]
+                    for source_tile_index, tile_id in enumerate(source_tile_ids):
+                        source_row = source_sca_index * source_tile_ids.size + source_tile_index
+                        target_row = (
+                            target_sca_index * target_tile_ids.size
+                            + target_tile_positions[int(tile_id)]
+                        )
+                        if source_row_fingerprints[source_row] != target_row_fingerprints[target_row]:
+                            raise ValueError(
+                                "MAP warm-start tile statistics do not match the target rows"
+                            )
 
         warmed_values = {}
         value_converters = value_converters or {}
@@ -1277,10 +1513,18 @@ def load_map_warm_start(path, initial_values, data, value_converters=None):
             source_name = name
             converter = None
             if name in value_converters:
-                converted_source_name, converted_value = value_converters[name]
-                if converted_source_name in samples:
-                    source_name = converted_source_name
-                    converter = converted_value
+                converter_candidates = value_converters[name]
+                if (
+                    isinstance(converter_candidates, tuple)
+                    and len(converter_candidates) == 2
+                    and isinstance(converter_candidates[0], str)
+                ):
+                    converter_candidates = [converter_candidates]
+                for converted_source_name, converted_value in converter_candidates:
+                    if converted_source_name in samples:
+                        source_name = converted_source_name
+                        converter = converted_value
+                        break
             if source_name not in samples:
                 warmed_values[name] = np.asarray(current_value).copy()
                 continue
@@ -1295,7 +1539,13 @@ def load_map_warm_start(path, initial_values, data, value_converters=None):
                     value = np.asarray(np.mean(value))
                 elif target_shape == (6,) and value.size == 1:
                     value = np.full(6, float(value.reshape(-1)[0]))
-            if value.shape != target_shape:
+            if not warm_start_value_can_transfer(
+                name,
+                value,
+                np.asarray(current_value),
+                source_tile_ids,
+                target_tile_ids,
+            ):
                 raise ValueError(
                     f"MAP warm-start site {name} has shape {value.shape}; "
                     f"expected {target_shape}"
@@ -1303,7 +1553,13 @@ def load_map_warm_start(path, initial_values, data, value_converters=None):
             if np.any(~np.isfinite(value)):
                 raise ValueError(f"MAP warm-start site {name} is non-finite")
             warmed_values[name] = value.copy()
-    return warmed_values
+    return transfer_map_initial_values(
+        warmed_values,
+        initial_values,
+        source_tile_ids=source_tile_ids,
+        target_tile_ids=target_tile_ids,
+        broadcast_tile_values=broadcast_tile_subset,
+    )
 
 
 def jitter_unconstrained_initial_params(initial_params, jax, seed, chains, scale):
@@ -1348,6 +1604,18 @@ def build_nuts_initial_params(
         chains,
         jitter,
     )
+
+
+def interior_nuts_initial_values(initial_values):
+    """Move bounded scalar starts off exact Uniform support boundaries."""
+    interior = dict(initial_values)
+    if "incidence_angle_deg" in interior:
+        interior["incidence_angle_deg"] = np.clip(
+            np.asarray(interior["incidence_angle_deg"], dtype=float),
+            1.0e-6,
+            INCIDENCE_ANGLE_MAX_DEG - 1.0e-6,
+        )
+    return interior
 
 
 def run_map_optimization(
@@ -1534,6 +1802,297 @@ def run_map_optimization(
         f"converged={diagnostics['converged']}; "
         f"first_evaluation_s={initial_evaluation_seconds:.2f}; "
         f"optimization_s={optimization_seconds:.2f}",
+        flush=True,
+    )
+    return map_values, diagnostics
+
+
+def _least_squares_prior_residuals(values, data, args, ar_prior_reference, jnp):
+    """Return production prior and curvature residuals for the LS MAP path."""
+    ar_reference, ar_lower, ar_upper = ar_prior_arrays(args.ar_layers)
+    active_indices = ar_active_parameter_indices(
+        args.ar_layers,
+        args.fit_ar_absorption,
+        getattr(args, "fixed_ar_indices", None),
+    )
+    ar_reference_raw_values = jnp.asarray(
+        ar_reference_raw(
+            ar_prior_reference,
+            ar_lower,
+            ar_upper,
+            active_indices,
+            ordered_ar_indices=getattr(args, "ordered_ar_indices", False),
+        )
+    )
+    residuals = []
+
+    def add_normal(name, center, scale):
+        if name in values:
+            residuals.append(
+                ((jnp.asarray(values[name]) - jnp.asarray(center)) / float(scale)).reshape(-1)
+            )
+
+    if "ar_tile_raw" in values:
+        add_normal(
+            "ar_tile_raw",
+            ar_reference_raw_values,
+            args.ar_mean_prior_sigma,
+        )
+    if "ar_mu_raw" in values:
+        add_normal("ar_mu_raw", ar_reference_raw_values, args.ar_mean_prior_sigma)
+    if "ar_mu_z" in values:
+        add_normal("ar_mu_z", 0.0, 1.0)
+    if "ar_tile_z" in values:
+        add_normal("ar_tile_z", 0.0, 1.0)
+    if "initial_thickness_log_nm" in values:
+        add_normal(
+            "initial_thickness_log_nm",
+            np.log(args.tile_initial_thickness_log_median_nm),
+            args.tile_initial_thickness_log_sigma,
+        )
+    if "reset_initial_thickness_log_nm" in values:
+        add_normal(
+            "reset_initial_thickness_log_nm",
+            np.log(args.tile_initial_thickness_log_median_nm),
+            args.tile_initial_thickness_log_sigma,
+        )
+    if "absolute_hgcdte_n_log_scale" in values:
+        add_normal(
+            "absolute_hgcdte_n_log_scale",
+            0.0,
+            args.absolute_hgcdte_scale_prior_sigma_log,
+        )
+    if "absolute_hgcdte_k_log_scale" in values:
+        add_normal(
+            "absolute_hgcdte_k_log_scale",
+            0.0,
+            args.absolute_hgcdte_scale_prior_sigma_log,
+        )
+    if "post_reset_tile_log_offset" in values:
+        add_normal(
+            "post_reset_tile_log_offset",
+            0.0,
+            args.post_reset_tile_log_offset_prior_sigma,
+        )
+    if "incidence_angle_deg" in values and not args.incidence_angle_prior_uniform:
+        add_normal(
+            "incidence_angle_deg",
+            0.0,
+            args.incidence_angle_prior_sigma_deg,
+        )
+    trajectory_prior_rate = trajectory_prior_rate_for_data(data, args)
+    trajectory_log_center = np.log(trajectory_prior_rate)
+    if "log_trajectory_scale" in values:
+        add_normal(
+            "log_trajectory_scale",
+            trajectory_log_center,
+            args.trajectory_rate_prior_sigma_log,
+        )
+    if "np_log_rate_nodes" in values:
+        add_normal(
+            "np_log_rate_nodes",
+            trajectory_log_center,
+            args.trajectory_rate_prior_sigma_log,
+        )
+    if "trajectory_rate_tile_node_log_rates" in values:
+        add_normal(
+            "trajectory_rate_tile_node_log_rates",
+            trajectory_log_center,
+            args.trajectory_rate_prior_sigma_log,
+        )
+    if "np_log_rate_z" in values:
+        add_normal("np_log_rate_z", 0.0, 1.0)
+    if "np_node_raw" in values:
+        add_normal("np_node_raw", 0.0, 1.0)
+    if "acm_step_log_offset" in values:
+        add_normal("acm_step_log_offset", 0.0, args.acm_step_prior_sigma)
+    if "late_acm_step_log_offset" in values:
+        add_normal("late_acm_step_log_offset", 0.0, args.late_acm_step_prior_sigma)
+    if "additional_acm_step_log_offset" in values:
+        add_normal(
+            "additional_acm_step_log_offset",
+            0.0,
+            args.additional_acm_step_prior_sigma,
+        )
+
+    likelihood_scale = trajectory_rate_likelihood_scale(data, args)
+    if "np_log_rate_nodes" in values and args.np_smoothness_weight > 0.0:
+        curvature = jnp.asarray(rate_curvature_matrix(data["node_days"])) @ jnp.asarray(
+            values["np_log_rate_nodes"]
+        ).reshape(-1)
+        residuals.append(
+            curvature
+            * jnp.sqrt(
+                2.0
+                * likelihood_scale
+                * args.np_smoothness_weight
+                / curvature.size
+            )
+        )
+    if (
+        "trajectory_rate_tile_node_log_rates" in values
+        and args.tile_rate_trajectory_smoothness_weight > 0.0
+    ):
+        profiles = jnp.asarray(values["trajectory_rate_tile_node_log_rates"])
+        curvature_matrix = jnp.asarray(rate_curvature_matrix(data["node_days"]))
+        curvature = jnp.einsum("ij,...j->...i", curvature_matrix, profiles).reshape(-1)
+        residuals.append(
+            curvature
+            * jnp.sqrt(
+                2.0
+                * likelihood_scale
+                * args.tile_rate_trajectory_smoothness_weight
+                / curvature.size
+            )
+        )
+    if not residuals:
+        return jnp.zeros(0)
+    return jnp.concatenate(residuals)
+
+
+def run_least_squares_map_optimization(
+    model,
+    initial_values,
+    data,
+    args,
+    ar_prior_reference,
+    jax,
+    maxiter,
+    tolerance=1.0e-9,
+    parameter_scales=None,
+):
+    """Optimize the production SSE and Normal priors with trust-region LS."""
+    from numpyro.handlers import substitute, trace
+    from numpyro.infer.util import log_density
+    from scipy.optimize import least_squares
+
+    jnp = jax.numpy
+    flat_initial, unravel, flat_lower, flat_upper = map_parameter_bounds(
+        initial_values, jax
+    )
+    if parameter_scales is None:
+        flat_scales = np.ones_like(np.asarray(flat_initial, dtype=float))
+    else:
+        scale_pytree = {
+            name: jax.numpy.asarray(
+                np.broadcast_to(
+                    np.asarray(parameter_scales[name], dtype=float),
+                    np.asarray(value).shape,
+                )
+            )
+            for name, value in initial_values.items()
+        }
+        flat_scales, _ = jax.flatten_util.ravel_pytree(scale_pytree)
+        flat_scales = np.asarray(flat_scales, dtype=float)
+    flat_initial = np.asarray(flat_initial, dtype=float)
+    flat_lower = np.asarray(flat_lower, dtype=float)
+    flat_upper = np.asarray(flat_upper, dtype=float)
+    scaled_lower = (flat_lower - flat_initial) / flat_scales
+    scaled_upper = (flat_upper - flat_initial) / flat_scales
+    likelihood_scale = jnp.asarray(
+        np.sqrt(float(args.likelihood_weight) / data["n_tiles"])
+        / float(args.log_noise_sigma)
+    )
+    counts = jnp.asarray(data["counts"])
+    observed = jnp.asarray(data["sums"]) / jnp.maximum(counts, 1.0)
+
+    def residuals(scaled_values):
+        flat_values = jax.numpy.asarray(flat_initial) + jax.numpy.asarray(
+            flat_scales
+        ) * scaled_values
+        values = unravel(flat_values)
+        model_trace = trace(substitute(model, data=values)).get_trace()
+        prediction = model_trace["_map_least_squares_prediction"]["value"]
+        observed_values = observed
+        if "post_reset_tile_log_offset" in values:
+            if args.ice_reset_day is None:
+                raise ValueError(
+                    "Post-reset tile offsets require an ice reset day for LS MAP"
+                )
+            post_reset_mask = jnp.asarray(data["days"] >= args.ice_reset_day)
+            observed_values = observed + (
+                jnp.asarray(values["post_reset_tile_log_offset"]).reshape(-1, 1)
+                * post_reset_mask[None, :]
+            )
+        likelihood_residual = (
+            likelihood_scale
+            * jnp.sqrt(counts)
+            * (prediction - observed_values)
+        ).reshape(-1)
+        prior_residual = _least_squares_prior_residuals(
+            values, data, args, ar_prior_reference, jax.numpy
+        )
+        return jnp.concatenate((likelihood_residual, prior_residual))
+
+    residual_jit = jax.jit(residuals)
+    jacobian_jit = jax.jit(jax.jacfwd(residuals))
+    initial_scaled = np.zeros_like(flat_initial)
+    initial_residual = np.asarray(residual_jit(initial_scaled), dtype=float)
+
+    def scipy_residual(scaled_values):
+        return np.asarray(residual_jit(jax.numpy.asarray(scaled_values)), dtype=float)
+
+    def scipy_jacobian(scaled_values):
+        return np.asarray(
+            jacobian_jit(jax.numpy.asarray(scaled_values)), dtype=float
+        )
+
+    result = least_squares(
+        scipy_residual,
+        initial_scaled,
+        jac=scipy_jacobian,
+        bounds=(scaled_lower, scaled_upper),
+        method="trf",
+        x_scale=1.0,
+        ftol=None,
+        xtol=None,
+        gtol=float(tolerance),
+        max_nfev=int(maxiter),
+        verbose=1,
+    )
+    optimized_scaled = np.asarray(result.x, dtype=float)
+    optimized_values = flat_initial + flat_scales * optimized_scaled
+    map_values = {
+        name: np.asarray(value)
+        for name, value in unravel(jax.numpy.asarray(optimized_values)).items()
+    }
+    final_residual = scipy_residual(optimized_scaled)
+    scaled_gradient = scipy_jacobian(optimized_scaled).T @ final_residual
+    raw_gradient = scaled_gradient / flat_scales
+    objective = lambda values: -log_density(model, (), {}, unravel(values))[0]
+    initial_objective = float(objective(jax.numpy.asarray(flat_initial)))
+    final_objective = float(objective(jax.numpy.asarray(optimized_values)))
+    gradient_norm = float(np.max(np.abs(raw_gradient)))
+    scaled_gradient_norm = float(np.max(np.abs(scaled_gradient)))
+    diagnostics = {
+        "optimizer": "Trust-Region Least-Squares",
+        "converged": bool(result.success and scaled_gradient_norm <= tolerance),
+        "gradient_converged": bool(scaled_gradient_norm <= tolerance),
+        "status": int(result.status),
+        "message": str(result.message),
+        "iterations": int(result.nfev),
+        "function_evaluations": int(result.nfev),
+        "gradient_norm": gradient_norm,
+        "projected_gradient_norm": gradient_norm,
+        "scaled_gradient_norm": scaled_gradient_norm,
+        "scaled_projected_gradient_norm": scaled_gradient_norm,
+        "parameter_scale_min": float(np.min(flat_scales)),
+        "parameter_scale_max": float(np.max(flat_scales)),
+        "function_tolerance": np.nan,
+        "objective": final_objective,
+        "initial_objective": initial_objective,
+        "parameter_step_norm": float(
+            np.linalg.norm(optimized_values - flat_initial)
+        ),
+        "objective_history": np.asarray(
+            [initial_objective, final_objective], dtype=float
+        ),
+    }
+    print(
+        f"{diagnostics['optimizer']}: evaluations={diagnostics['function_evaluations']}; "
+        f"objective={final_objective:.6g}; "
+        f"scaled_gradient_inf_norm={scaled_gradient_norm:.3g}; "
+        f"success={result.success}",
         flush=True,
     )
     return map_values, diagnostics
@@ -2821,6 +3380,7 @@ def build_prediction_function(
     post_reset_ice_reset_day=None,
     post_reset_log_offset_day=None,
     pre_reset_ice_index=None,
+    fit_complex_q=False,
 ):
     jax, jnp, _, _, _, _, _ = require_numpyro()
     if absolute_substrate_power is None:
@@ -3982,6 +4542,59 @@ def build_prediction_function(
             phase_offset_nm,
         )
 
+    def complex_q_factor(ice_thickness, ice_index_for_groups, parameters):
+        """Return the effective complex-boundary multiplier for each group."""
+        if parameters is None:
+            raise ValueError("Complex-q parameters are required when q fitting is active")
+        parameters = jnp.asarray(parameters)
+        log_magnitude, magnitude_slope, phase_offset, optical_path_nm, absorption = (
+            parameters
+        )
+        wavelength_coordinate = (wavelengths - 1400.0) / 1000.0
+        magnitude = jnp.exp(log_magnitude + magnitude_slope * wavelength_coordinate)
+        phase_offset = phase_offset + 2.0 * jnp.pi * optical_path_nm * (
+            1.0 / wavelengths - 1.0 / 1400.0
+        )
+        q = magnitude * jnp.exp(1j * phase_offset)
+        thickness = jnp.asarray(ice_thickness)
+        if thickness.ndim == 1:
+            thickness = thickness[None, :]
+        elif thickness.ndim != 2:
+            raise ValueError("Complex-q thickness must be one or two dimensional")
+        phase_index = jnp.real(jnp.asarray(ice_index_for_groups))
+        if phase_index.ndim == 0:
+            phase = (
+                4.0
+                * jnp.pi
+                * phase_index
+                * thickness[..., None]
+                / wavelengths
+            )
+        elif phase_index.ndim == 1 and phase_index.shape[0] == wavelengths.shape[0]:
+            phase = (
+                4.0
+                * jnp.pi
+                * thickness[..., None]
+                * phase_index[None, None, :]
+                / wavelengths
+            )
+        elif phase_index.ndim == 1 and phase_index.shape[0] == thickness.shape[-1]:
+            phase = (
+                4.0
+                * jnp.pi
+                * thickness[..., None]
+                * phase_index[None, :, None]
+                / wavelengths
+            )
+        else:
+            raise ValueError("Complex-q ice-index shape does not match the response grid")
+        numerator = jnp.abs(1.0 - q)[None, None, :] ** 2
+        denominator = jnp.abs(
+            1.0 - q[None, None, :] * jnp.exp(1j * phase)
+        ) ** 2
+        factor = jnp.exp(-absorption * thickness[..., None]) * numerator / denominator
+        return factor[0] if jnp.asarray(ice_thickness).ndim == 1 else factor
+
     def response_curves(
         ice_thickness,
         response_terms_value,
@@ -3995,6 +4608,7 @@ def build_prediction_function(
         post_reset_ice_index=None,
         pre_reset_ice_index=None,
         ice_modulation_parameters=None,
+        complex_q_parameters=None,
     ):
         custom_segment_ice_index = (
             pre_reset_ice_index is not None or post_reset_ice_index is not None
@@ -4248,7 +4862,11 @@ def build_prediction_function(
                 substrate_factor = jnp.real(substrate_index)
                 if substrate_factor.ndim == 2:
                     substrate_factor = substrate_factor[:, None, :]
-                coated = substrate_factor * jnp.abs(normalization) ** 2
+            coated = substrate_factor * jnp.abs(normalization) ** 2
+        if fit_complex_q:
+            coated = coated * complex_q_factor(
+                ice_thickness, ice_index_for_groups, complex_q_parameters
+            )
         if fit_qe_rbf:
             qe_multiplier = jnp.exp(qe_rbf_basis @ qe_rbf_parameters)
             if model_weights_value.ndim == 2:
@@ -4296,6 +4914,7 @@ def build_prediction_function(
         pre_reset_ice_index=None,
         ice_modulation_parameters=None,
         sca_ar_opd_nm=None,
+        complex_q_parameters=None,
     ):
         if sca_ar_opd_nm is not None:
             sca_ar_opd_nm = jnp.asarray(sca_ar_opd_nm).reshape(-1)
@@ -4377,6 +4996,7 @@ def build_prediction_function(
             post_reset_ice_index,
             pre_reset_ice_index,
             ice_modulation_parameters,
+            complex_q_parameters,
         )
         current = response
         # The current response already contains every LED's reference group
@@ -4437,6 +5057,7 @@ def build_prediction_function(
         pre_reset_ice_index=None,
         ice_modulation_parameters=None,
         sca_ar_opd_nm=None,
+        complex_q_parameters=None,
     ):
         row_sca_ar_opd_nm = None
         if sca_ar_opd_nm is not None:
@@ -4464,7 +5085,128 @@ def build_prediction_function(
             pre_reset_ice_index,
             ice_modulation_parameters,
             row_sca_ar_opd_nm,
+            complex_q_parameters,
         )
+
+    def boundary_reflection(
+        ar_parameters,
+        hgcdte_parameters=None,
+        conductive_parameters=None,
+        detector_thickness_nm=None,
+        incidence_angle_deg=None,
+        sca_ar_opd_nm=None,
+        ice_index_override=None,
+    ):
+        """Return physical boundary reflections from the existing TMM terms."""
+        ar_parameters = jnp.asarray(ar_parameters)
+        if ar_parameters.ndim == 1:
+            ar_parameters = ar_parameters[None, :]
+        if ar_parameters.ndim != 2 or ar_parameters.shape[0] != len(row_indices):
+            raise ValueError("AR parameters must have one row per selected optical row")
+        row_sca_ar_opd_nm = None
+        if sca_ar_opd_nm is not None:
+            sca_ar_opd_nm = jnp.asarray(sca_ar_opd_nm).reshape(-1)
+            if sca_ar_opd_nm.shape[0] != n_scas:
+                raise ValueError("SCA AR OPD values must have one value per SCA")
+            row_sca_ar_opd_nm = sca_ar_opd_nm[sca_index]
+        substrate_index = substrate_index_for_parameters(hgcdte_parameters)
+        if fit_incidence_angle:
+            if incidence_angle_deg is None:
+                raise ValueError("A fitted incidence angle is required for reflection")
+            dynamic_incidence_sine = fitted_incidence_sines(incidence_angle_deg)
+            incidence_sine_rows = jnp.broadcast_to(
+                dynamic_incidence_sine,
+                (ar_parameters.shape[0], dynamic_incidence_sine.shape[1]),
+            )
+        else:
+            incidence_sine_rows = selected_incidence_sine
+        angle_sine = jnp.asarray(incidence_sine_rows).T
+        terms = response_terms(
+            ar_parameters,
+            substrate_index,
+            angle_sine,
+            conductive_parameters,
+            detector_thickness_nm,
+            row_sca_ar_opd_nm,
+        )
+        if ice_index_override is None:
+            ice_index_value = ice_index
+        else:
+            ice_index_value = jnp.asarray(ice_index_override)
+        if jnp.asarray(ice_index_value).ndim == 0:
+            ice_index_value = jnp.broadcast_to(ice_index_value, wavelengths.shape)
+        if jnp.asarray(ice_index_value).shape != wavelengths.shape:
+            raise ValueError("Ice index must be scalar or match the response wavelengths")
+
+        results = {}
+        if use_incidence_cone:
+            for polarization, polarization_terms in zip(("s", "p"), terms):
+                _, ar_first, ar_second, incident_admittance, _, _, _ = (
+                    polarization_terms
+                )
+                cosine = jnp.sqrt(
+                    1.0
+                    - (
+                        angle_sine[:, :, None]
+                        / ice_index_value[None, None, :]
+                    )
+                    ** 2
+                )
+                ice_admittance = (
+                    ice_index_value[None, None, :] * cosine
+                    if polarization == "s"
+                    else ice_index_value[None, None, :] / cosine
+                )
+                load_admittance = ar_second / ar_first
+                reflection = (
+                    incident_admittance[:, :, None] * ar_first - ar_second
+                ) / (
+                    incident_admittance[:, :, None] * ar_first + ar_second
+                )
+                bottom_reflection = (ice_admittance - load_admittance) / (
+                    ice_admittance + load_admittance
+                )
+                top_reflection = (
+                    ice_admittance - incident_admittance[:, :, None]
+                ) / (ice_admittance + incident_admittance[:, :, None])
+                results[polarization] = {
+                    "reflection": reflection,
+                    "load_admittance": load_admittance,
+                    "bottom_reflection": bottom_reflection,
+                    "top_reflection": top_reflection,
+                    "round_trip_reflection": top_reflection * bottom_reflection,
+                    "incident_admittance": incident_admittance[:, :, None],
+                    "ice_admittance": ice_admittance,
+                }
+        else:
+            ar_first = terms[1]
+            ar_second = terms[2]
+            load_admittance = ar_second / ar_first
+            reflection = (ar_first - ar_second) / (ar_first + ar_second)
+            ice_admittance = ice_index_value[None, :]
+            bottom_reflection = (ice_admittance - load_admittance) / (
+                ice_admittance + load_admittance
+            )
+            top_reflection = (ice_admittance - 1.0) / (ice_admittance + 1.0)
+            values = {
+                "reflection": reflection[None, ...],
+                "load_admittance": load_admittance[None, ...],
+                "bottom_reflection": bottom_reflection[None, ...],
+                "top_reflection": top_reflection[None, ...],
+                "round_trip_reflection": (top_reflection * bottom_reflection)[None, ...],
+                "incident_admittance": jnp.ones_like(ar_first)[None, ...],
+                "ice_admittance": ice_admittance[None, ...],
+            }
+            results["s"] = values
+            results["p"] = values
+        return {
+            "wavelengths": wavelengths,
+            "angle_sine": angle_sine,
+            "s": results["s"],
+            "p": results["p"],
+        }
+
+    prediction.boundary_reflection = boundary_reflection
 
     if all(key in data for key in ("counts", "sums", "sum_squared")):
         selected_counts = np.asarray(data["counts"])[row_indices]
@@ -4511,6 +5253,8 @@ def build_prediction_function(
             ice_modulation_parameters=None,
             post_reset_tile_log_offsets=None,
             sca_ar_opd_nm=None,
+            complex_q_parameters=None,
+            return_prediction=False,
         ):
             ar_rows = ar_parameters.reshape((n_rows, -1))
             padded_ar_rows = pad_rows(ar_rows)
@@ -4682,6 +5426,7 @@ def build_prediction_function(
                     pre_reset_ice_index,
                     ice_modulation_parameters,
                     sca_ar_opd_chunk,
+                    complex_q_parameters,
                 )
                 safe_counts = jnp.maximum(counts_chunk, 1.0)
                 observed_chunk = sums_chunk / safe_counts
@@ -4696,19 +5441,30 @@ def build_prediction_function(
                 residual_sse = within_group_sse + counts_chunk * (
                     fitted - observed_chunk
                 ) ** 2
-                return total_sse + jnp.sum(residual_sse), None
+                return (
+                    total_sse + jnp.sum(residual_sse),
+                    fitted if return_prediction else None,
+                )
 
             initial_sse = jnp.asarray(0.0, dtype=padded_counts.dtype)
             if n_chunks == 1:
                 # Avoid a loop and its reverse-mode scan machinery when the
                 # selected tiles already fit in a single prediction chunk.
-                total_sse, _ = scan_chunk(
+                total_sse, fitted_padded = scan_chunk(
                     initial_sse, tuple(values[0] for values in scan_values)
                 )
             else:
-                total_sse, _ = jax.lax.scan(
-                    scan_chunk, initial_sse, scan_values
-                )
+                if return_prediction:
+                    total_sse, fitted_chunks = jax.lax.scan(
+                        scan_chunk, initial_sse, scan_values
+                    )
+                    fitted_padded = fitted_chunks.reshape((padded_rows, -1))
+                else:
+                    total_sse, _ = jax.lax.scan(
+                        scan_chunk, initial_sse, scan_values
+                    )
+            if return_prediction:
+                return total_sse, fitted_padded[:n_rows]
             return total_sse
 
         prediction.residual_sum_squares = residual_sum_squares
@@ -4739,11 +5495,12 @@ def build_model(
     np_max_node_multiplier=NP_MAX_NODE_MULTIPLIER,
     ar_sca_sigma_prior=AR_SCA_SIGMA_PRIOR,
     ar_tile_sigma_prior=AR_TILE_SIGMA_PRIOR,
-    fit_sca_ar_opd=False,
-    sca_ar_opd_prior_sigma_nm=SCA_AR_OPD_PRIOR_SIGMA_NM,
-    shared_ar_optical_properties=False,
-    shared_ar_parameters_across_tiles=False,
-    fit_ar_absorption=False,
+        fit_sca_ar_opd=False,
+        sca_ar_opd_prior_sigma_nm=SCA_AR_OPD_PRIOR_SIGMA_NM,
+        shared_ar_optical_properties=False,
+        shared_ar_parameters_across_tiles=False,
+        independent_tile_ar_parameters=False,
+        fit_ar_absorption=False,
     fit_hgcdte=False,
     fit_hgcdte_modulation=False,
     hgcdte_modulation_prior_sigma_log=HGCDTE_MODULATION_PRIOR_SIGMA_LOG,
@@ -4777,11 +5534,15 @@ def build_model(
     fit_additional_acm_step=False,
     additional_acm_step_prior_sigma=0.02,
     trajectory_rate_prior_mean_nm_day=None,
+    fixed_trajectory_rate_nm_day=None,
+    constant_rate_trajectory=False,
+    fixed_ar_indices=None,
+    ordered_ar_indices=False,
     trajectory_rate_prior_sigma_log=0.75,
     tile_rate_variation=False,
     tile_rate_trajectory_variation=False,
     independent_tile_trajectories=False,
-    tile_rate_trajectory_smoothness_weight=0.01,
+    tile_rate_trajectory_smoothness_weight=0.001,
     tile_rate_prior_sigma_log=TRAJECTORY_TILE_RATE_PRIOR_SIGMA_LOG,
     tile_rate_neighbor_sigma_log=TRAJECTORY_TILE_RATE_NEIGHBOR_SIGMA_LOG,
     tile_rate_neighbor_smoothness=True,
@@ -4813,6 +5574,8 @@ def build_model(
     ice_index_upper=ICE_INDEX_UPPER,
     ice_extinction_prior_sigma=ICE_EXTINCTION_PRIOR_SIGMA,
     ice_extinction_upper=ICE_EXTINCTION_UPPER,
+    fit_complex_q=False,
+    include_map_prediction=False,
 ):
     jax, jnp, numpyro, dist, _, _, _ = require_numpyro()
     if absolute_substrate_power is None:
@@ -4825,17 +5588,29 @@ def build_model(
     )
     ar_reference, ar_lower, ar_upper = ar_prior_arrays(ar_layers)
     ar_parameter_count = len(ar_reference)
-    active_parameter_indices = np.arange(ar_parameter_count, dtype=int)
-    if not fit_ar_absorption:
-        active_parameter_indices = active_parameter_indices[
-            active_parameter_indices % 3 != 2
-        ]
+    fixed_ar_indices = validate_fixed_ar_indices(ar_layers, fixed_ar_indices)
+    ordered_ar_indices = bool(ordered_ar_indices)
+    if ordered_ar_indices and fixed_ar_indices is not None:
+        raise ValueError("Fixed and ordered AR indices are mutually exclusive")
+    active_parameter_indices = ar_active_parameter_indices(
+        ar_layers, fit_ar_absorption, fixed_ar_indices
+    )
+    fixed_ar_parameter_indices = (
+        3 * np.arange(ar_layers, dtype=int) + 1
+        if fixed_ar_indices is not None
+        else np.asarray([], dtype=int)
+    )
     active_parameter_count = len(active_parameter_indices)
     active_lower = jnp.asarray(ar_lower[active_parameter_indices])
     active_upper = jnp.asarray(ar_upper[active_parameter_indices])
     if sum(
         bool(mode)
-        for mode in (np_modulation, constant_rate_modulation, fully_np_trajectory)
+        for mode in (
+            np_modulation,
+            constant_rate_modulation,
+            fully_np_trajectory,
+            constant_rate_trajectory,
+        )
     ) > 1:
         raise ValueError(
             "Trajectory model modes are mutually exclusive"
@@ -4846,6 +5621,8 @@ def build_model(
         raise ValueError("Pivoted initial thickness currently requires a fully non-parametric trajectory")
     if rotate_ar_coordinates and not standardize_ar_mean:
         raise ValueError("AR coordinate rotation requires standardized AR mean coordinates")
+    if ordered_ar_indices and rotate_ar_coordinates:
+        raise ValueError("Ordered AR indices do not support coordinate rotation")
     if np_rate_likelihood_rotation is not None:
         if not (whiten_np_trajectory and fully_np_trajectory):
             raise ValueError(
@@ -5104,6 +5881,31 @@ def build_model(
         or trajectory_rate_prior_mean_nm_day <= 0.0
     ):
         raise ValueError("Trajectory rate prior mean must be positive and finite")
+    if fixed_trajectory_rate_nm_day is not None and (
+        not np.isfinite(fixed_trajectory_rate_nm_day)
+        or fixed_trajectory_rate_nm_day <= 0.0
+    ):
+        raise ValueError("Fixed trajectory rate must be positive and finite")
+    if fixed_trajectory_rate_nm_day is not None and (
+        np_modulation
+        or constant_rate_modulation
+        or fully_np_trajectory
+        or constant_rate_trajectory
+        or tile_rate_variation
+        or tile_rate_trajectory_variation
+        or independent_tile_trajectories
+    ):
+        raise ValueError(
+            "A fixed trajectory rate cannot be combined with rate modulation or variation"
+        )
+    if constant_rate_trajectory and (
+        tile_rate_variation
+        or tile_rate_trajectory_variation
+        or independent_tile_trajectories
+    ):
+        raise ValueError(
+            "A constant trajectory rate cannot be combined with tile-rate variation"
+        )
     if trajectory_rate_prior_sigma_log <= 0.0 or not np.isfinite(
         trajectory_rate_prior_sigma_log
     ):
@@ -5139,6 +5941,18 @@ def build_model(
         raise ValueError(
             "Independent tile trajectories do not use global trajectory whitening, "
             "rotation, or pivoted initial thickness"
+        )
+    if independent_tile_ar_parameters and (
+        shared_ar_optical_properties or shared_ar_parameters_across_tiles
+    ):
+        raise ValueError(
+            "Independent tile AR parameters cannot use shared AR parameter modes"
+        )
+    if independent_tile_ar_parameters and (
+        standardize_ar_mean or rotate_ar_coordinates
+    ):
+        raise ValueError(
+            "Independent tile AR parameters use direct raw coordinates, not global AR latents"
         )
     if tile_rate_neighbor_sigma_log <= 0.0 or not np.isfinite(
         tile_rate_neighbor_sigma_log
@@ -5218,15 +6032,15 @@ def build_model(
         ar_prior_reference <= ar_lower
     ) or np.any(ar_prior_reference >= ar_upper):
         raise ValueError("AR prior reference must match the parameter shape and bounds")
-    active_prior_reference = ar_prior_reference[active_parameter_indices]
-    reference_probability = jnp.asarray(
-        (active_prior_reference - ar_lower[active_parameter_indices])
-        / (
-            ar_upper[active_parameter_indices]
-            - ar_lower[active_parameter_indices]
+    reference_raw = jnp.asarray(
+        ar_reference_raw(
+            ar_prior_reference,
+            ar_lower,
+            ar_upper,
+            active_parameter_indices,
+            ordered_ar_indices=ordered_ar_indices,
         )
     )
-    reference_raw = jnp.log(reference_probability / (1.0 - reference_probability))
     active_index_positions = {
         int(parameter_index): position
         for position, parameter_index in enumerate(active_parameter_indices)
@@ -5287,6 +6101,7 @@ def build_model(
         post_reset_log_offset_day=(
             ice_reset_day if fit_post_reset_tile_log_offset else None
         ),
+        fit_complex_q=fit_complex_q,
     )
     residual_sum_squares = prediction.residual_sum_squares
     early_time_configuration = early_time_scale_configuration(
@@ -5325,13 +6140,28 @@ def build_model(
             )
 
     def physical_ar_parameters(ar_raw):
+        parameters = jnp.zeros(
+            ar_raw.shape[:-1] + (ar_parameter_count,), dtype=ar_raw.dtype
+        )
+        if fixed_ar_indices is not None:
+            parameters = parameters.at[..., fixed_ar_parameter_indices].set(
+                jnp.asarray(fixed_ar_indices)
+            )
         active_parameters = active_lower + (
             active_upper - active_lower
         ) * jax.nn.sigmoid(ar_raw)
-        parameters = jnp.zeros(
-            ar_raw.shape[:-1] + (ar_parameter_count,), dtype=active_parameters.dtype
-        )
-        return parameters.at[..., active_parameter_indices].set(active_parameters)
+        parameters = parameters.at[..., active_parameter_indices].set(active_parameters)
+        if ordered_ar_indices:
+            parameters = ordered_ar_indices_from_raw(
+                ar_raw,
+                active_parameter_indices,
+                ar_lower,
+                ar_upper,
+                ar_parameter_count,
+                jax,
+                jnp,
+            )
+        return parameters
 
     def rotate_ar_latents(values):
         rotated = jnp.asarray(values)
@@ -5358,7 +6188,20 @@ def build_model(
         return jnp.mean(node_curvature * node_curvature)
 
     def model():
-        if standardize_ar_mean:
+        if fit_complex_q:
+            complex_q_parameters = numpyro.sample(
+                "complex_q_parameters",
+                dist.Uniform(
+                    jnp.asarray(COMPLEX_Q_LOWER),
+                    jnp.asarray(COMPLEX_Q_UPPER),
+                ).to_event(1),
+            )
+        else:
+            complex_q_parameters = None
+        if independent_tile_ar_parameters:
+            ar_mu_raw = jnp.asarray(reference_raw)
+            ar_sca_raw = None
+        elif standardize_ar_mean:
             ar_mu_z = numpyro.sample(
                 "ar_mu_z",
                 dist.Normal(0.0, 1.0)
@@ -5380,7 +6223,24 @@ def build_model(
                     ar_mean_prior_sigma * jnp.ones(active_parameter_count),
                 ).to_event(1),
             )
-        if shared_ar_parameters_across_tiles:
+        if independent_tile_ar_parameters:
+            ar_tile_raw = numpyro.sample(
+                "ar_tile_raw",
+                dist.Normal(
+                    reference_raw,
+                    ar_mean_prior_sigma * jnp.ones(active_parameter_count),
+                )
+                .expand((n_scas, n_tiles, active_parameter_count))
+                .to_event(3),
+            )
+            ar_parameters_all = physical_ar_parameters(ar_tile_raw)
+            ar_parameters = (
+                ar_parameters_all[0] if n_scas == 1 else ar_parameters_all
+            )
+            ar_parameters_for_prediction = ar_parameters.reshape(
+                (-1, ar_parameter_count)
+            )
+        elif shared_ar_parameters_across_tiles:
             ar_raw_all = jnp.broadcast_to(
                 ar_mu_raw[None, None, :],
                 (n_scas, n_tiles, active_parameter_count),
@@ -5726,7 +6586,22 @@ def build_model(
             )
         else:
             early_time_scale = None
-        if independent_tile_trajectory_active:
+        if fixed_trajectory_rate_nm_day is not None:
+            log_scale = jnp.log(jnp.asarray(fixed_trajectory_rate_nm_day))
+            np_log_rate_nodes = None
+            log_node_multipliers = None
+            node_multipliers = None
+        elif constant_rate_trajectory:
+            log_scale = numpyro.sample(
+                "log_trajectory_scale",
+                dist.Normal(
+                    jnp.log(trajectory_prior_rate), trajectory_rate_prior_sigma_log
+                ),
+            )
+            np_log_rate_nodes = None
+            log_node_multipliers = None
+            node_multipliers = None
+        elif independent_tile_trajectory_active:
             log_scale = jnp.asarray(0.0)
             np_log_rate_nodes = None
             log_node_multipliers = None
@@ -6228,7 +7103,12 @@ def build_model(
                     integration_times,
                     0.0,
                     profile,
-                    use_square_root=not (fully_np_trajectory or constant_rate_modulation),
+                    use_square_root=not (
+                        fully_np_trajectory
+                        or constant_rate_modulation
+                        or constant_rate_trajectory
+                        or fixed_trajectory_rate_nm_day is not None
+                    ),
                     anchor_day=ice_reset_day,
                 )
             )(flat_tile_profiles)
@@ -6277,7 +7157,12 @@ def build_model(
                 np_log_rate_nodes
                 if fully_np_trajectory
                 else log_node_multipliers,
-                use_square_root=not (fully_np_trajectory or constant_rate_modulation),
+                use_square_root=not (
+                    fully_np_trajectory
+                    or constant_rate_modulation
+                    or constant_rate_trajectory
+                    or fixed_trajectory_rate_nm_day is not None
+                ),
                 anchor_day=ice_reset_day,
             )
             if ice_reset_day is None:
@@ -6445,24 +7330,47 @@ def build_model(
             instantaneous_rate = tile_instantaneous_rate[0]
             node_ice_thickness = tile_node_ice_thickness[0]
             node_instantaneous_rate = tile_node_instantaneous_rate[0]
-        total_sse = residual_sum_squares(
-            ice_thickness,
-            ar_parameters_for_prediction,
-            acm_step,
-            hgcdte_parameters,
-            conductive_parameters,
-            qe_rbf_parameters,
-            early_time_scale,
-            late_acm_step,
-            detector_thickness_for_prediction,
-            incidence_angle_deg,
-            additional_acm_step,
-            post_reset_ice_index,
-            pre_reset_ice_index,
-            ice_modulation_parameters,
-            post_reset_tile_log_offsets,
-            sca_ar_opd_nm,
-        )
+        if include_map_prediction:
+            total_sse, map_fitted_prediction = residual_sum_squares(
+                ice_thickness,
+                ar_parameters_for_prediction,
+                acm_step,
+                hgcdte_parameters,
+                conductive_parameters,
+                qe_rbf_parameters,
+                early_time_scale,
+                late_acm_step,
+                detector_thickness_for_prediction,
+                incidence_angle_deg,
+                additional_acm_step,
+                post_reset_ice_index,
+                pre_reset_ice_index,
+                ice_modulation_parameters,
+                post_reset_tile_log_offsets,
+                sca_ar_opd_nm,
+                complex_q_parameters,
+                return_prediction=True,
+            )
+        else:
+            total_sse = residual_sum_squares(
+                ice_thickness,
+                ar_parameters_for_prediction,
+                acm_step,
+                hgcdte_parameters,
+                conductive_parameters,
+                qe_rbf_parameters,
+                early_time_scale,
+                late_acm_step,
+                detector_thickness_for_prediction,
+                incidence_angle_deg,
+                additional_acm_step,
+                post_reset_ice_index,
+                pre_reset_ice_index,
+                ice_modulation_parameters,
+                post_reset_tile_log_offsets,
+                sca_ar_opd_nm,
+                complex_q_parameters,
+            )
         numpyro.factor(
             "tile_gaussian_log_likelihood",
             -0.5
@@ -6470,12 +7378,16 @@ def build_model(
             * total_sse
             / (log_noise_sigma**2),
         )
+        if include_map_prediction:
+            numpyro.deterministic(
+                "_map_least_squares_prediction", map_fitted_prediction
+            )
         numpyro.deterministic("ar_parameters", ar_parameters)
         numpyro.deterministic(
             "ar_mean",
             physical_ar_parameters(ar_mu_raw),
         )
-        if n_scas > 1:
+        if n_scas > 1 and ar_sca_raw is not None:
             numpyro.deterministic(
                 "ar_sca_mean",
                 physical_ar_parameters(ar_sca_raw),
@@ -6572,16 +7484,30 @@ def map_start_reference(args, ar_reference, ar_lower, ar_upper):
 def initial_values_for_data(data, args, ar_reference, ar_lower, ar_upper):
     """Build compatible sample-site starts for a selected tile subset."""
     start_reference = map_start_reference(args, ar_reference, ar_lower, ar_upper)
-    active_parameter_indices = np.arange(len(ar_reference), dtype=int)
-    if not getattr(args, "fit_ar_absorption", False):
-        active_parameter_indices = active_parameter_indices[
-            active_parameter_indices % 3 != 2
-        ]
-    reference_raw = np.log(
-        (start_reference[active_parameter_indices] - ar_lower[active_parameter_indices])
-        / (ar_upper[active_parameter_indices] - start_reference[active_parameter_indices])
+    active_parameter_indices = ar_active_parameter_indices(
+        args.ar_layers,
+        getattr(args, "fit_ar_absorption", False),
+        getattr(args, "fixed_ar_indices", None),
     )
-    if getattr(args, "standardize_ar_mean", False):
+    reference_raw = ar_reference_raw(
+        start_reference,
+        ar_lower,
+        ar_upper,
+        active_parameter_indices,
+        ordered_ar_indices=getattr(args, "ordered_ar_indices", False),
+    )
+    if getattr(args, "independent_tile_ar_parameters", False):
+        initial_values = {
+            "ar_tile_raw": np.broadcast_to(
+                reference_raw[None, None, :],
+                (
+                    data["n_scas"],
+                    data["n_tiles"],
+                    len(active_parameter_indices),
+                ),
+            ).copy()
+        }
+    elif getattr(args, "standardize_ar_mean", False):
         initial_values = {"ar_mu_z": np.zeros(len(active_parameter_indices))}
     else:
         initial_values = {"ar_mu_raw": reference_raw}
@@ -6610,6 +7536,11 @@ def initial_values_for_data(data, args, ar_reference, ar_lower, ar_upper):
         initial_values["incidence_angle_deg"] = getattr(
             args, "incidence_angle_init_deg", INCIDENCE_ANGLE_INIT_DEG
         )
+    if getattr(args, "fit_complex_q", False):
+        initial_values["complex_q_parameters"] = np.asarray(
+            getattr(args, "complex_q_initial_parameters", COMPLEX_Q_INITIAL),
+            dtype=float,
+        ).copy()
     if getattr(args, "fit_post_reset_ice_index", False):
         initial_values["post_reset_ice_index"] = getattr(
             args,
@@ -6636,7 +7567,12 @@ def initial_values_for_data(data, args, ar_reference, ar_lower, ar_upper):
                 early_time_node_count - 1,
                 EARLY_TIME_LOG_SCALE_PRIOR_MEAN,
             )
-    if getattr(args, "fully_np_trajectory", False):
+    if getattr(args, "fixed_trajectory_rate_nm_day", None) is not None:
+        pass
+    elif getattr(args, "constant_rate_trajectory", False):
+        trajectory_prior_rate = trajectory_prior_rate_for_data(data, args)
+        initial_values["log_trajectory_scale"] = np.log(trajectory_prior_rate)
+    elif getattr(args, "fully_np_trajectory", False):
         trajectory_prior_rate = trajectory_prior_rate_for_data(data, args)
         initial_log_rates = np.full(len(data["node_days"]), np.log(trajectory_prior_rate))
         if getattr(args, "independent_tile_trajectories", False):
@@ -6754,7 +7690,10 @@ def initial_values_for_data(data, args, ar_reference, ar_lower, ar_upper):
     if getattr(args, "fit_additional_acm_step", False):
         initial_values["additional_acm_step_log_offset"] = 0.0
     map_trajectory_rate_nm_day = getattr(args, "map_trajectory_rate_nm_day", None)
-    if map_trajectory_rate_nm_day is not None:
+    if (
+        map_trajectory_rate_nm_day is not None
+        and getattr(args, "fixed_trajectory_rate_nm_day", None) is None
+    ):
         if getattr(args, "fully_np_trajectory", False):
             map_log_rates = np.full(
                 len(data["node_days"]), np.log(map_trajectory_rate_nm_day)
@@ -6779,7 +7718,9 @@ def initial_values_for_data(data, args, ar_reference, ar_lower, ar_upper):
                 )
             else:
                 initial_values["np_log_rate_nodes"] = map_log_rates
-        elif getattr(args, "constant_rate_modulation", False):
+        elif getattr(args, "constant_rate_modulation", False) or getattr(
+            args, "constant_rate_trajectory", False
+        ):
             initial_values["log_trajectory_scale"] = np.log(
                 map_trajectory_rate_nm_day
             )
@@ -6804,8 +7745,12 @@ def initial_values_for_data(data, args, ar_reference, ar_lower, ar_upper):
     )
     if getattr(args, "fit_sca_ar_opd", False):
         initial_values["sca_ar_opd_nm"] = np.zeros(data["n_scas"])
-    if is_single_tile_data(data) or getattr(
+    if (
+        getattr(args, "independent_tile_ar_parameters", False)
+        or is_single_tile_data(data)
+        or getattr(
         args, "shared_ar_parameters_across_tiles", False
+        )
     ):
         pass
     elif data["n_scas"] == 1:
@@ -6836,7 +7781,10 @@ def initial_values_for_data(data, args, ar_reference, ar_lower, ar_upper):
                 ),
             }
         )
-    if args.np_modulation or getattr(args, "constant_rate_modulation", False):
+    if (
+        (args.np_modulation or getattr(args, "constant_rate_modulation", False))
+        and getattr(args, "fixed_trajectory_rate_nm_day", None) is None
+    ):
         initial_values["np_node_raw"] = np.zeros(len(data["repeat_values"]) - 1)
     if (
         getattr(args, "tile_rate_variation", False)
@@ -6860,16 +7808,307 @@ def initial_values_for_data(data, args, ar_reference, ar_lower, ar_upper):
     return initial_values
 
 
-def transfer_map_initial_values(map_values, full_initial_values):
-    """Transfer reduced-fit sites whose shapes match the full fit."""
+def transfer_map_initial_values(
+    map_values,
+    full_initial_values,
+    source_ar_parameter_indices=None,
+    target_ar_parameter_indices=None,
+    source_tile_ids=None,
+    target_tile_ids=None,
+    broadcast_tile_values=False,
+):
+    """Transfer compatible MAP sites, including AR sites with fixed indices."""
     transferred = dict(full_initial_values)
+    ar_site_names = {
+        "ar_mu_raw",
+        "ar_tile_raw",
+        "ar_sigma_raw",
+        "ar_sca_sigma",
+        "ar_tile_sigma",
+        "ar_z",
+        "ar_sca_z",
+        "ar_tile_z",
+    }
+    hgcdte_site_names = {
+        "absolute_hgcdte_n_log_scale",
+        "absolute_hgcdte_k_log_scale",
+    }
+    if (source_ar_parameter_indices is None) != (
+        target_ar_parameter_indices is None
+    ):
+        raise ValueError("Both AR source and target parameter indices are required")
+    if (source_tile_ids is None) != (target_tile_ids is None):
+        raise ValueError("Both source and target tile IDs are required")
+    if source_tile_ids is not None:
+        source_tile_ids = np.asarray(source_tile_ids, dtype=int).reshape(-1)
+        target_tile_ids = np.asarray(target_tile_ids, dtype=int).reshape(-1)
+        target_tile_positions = {
+            int(tile_id): position
+            for position, tile_id in enumerate(target_tile_ids)
+        }
+        if not set(source_tile_ids).issubset(target_tile_positions) and not (
+            broadcast_tile_values and len(source_tile_ids) == 1
+        ):
+            raise ValueError("Source tile IDs are not a subset of target tile IDs")
+    if source_ar_parameter_indices is not None:
+        source_ar_parameter_indices = np.asarray(
+            source_ar_parameter_indices, dtype=int
+        )
+        target_ar_parameter_indices = np.asarray(
+            target_ar_parameter_indices, dtype=int
+        )
+        target_positions = {
+            int(parameter_index): position
+            for position, parameter_index in enumerate(target_ar_parameter_indices)
+        }
     for name, value in map_values.items():
         if name not in transferred:
             continue
         value = np.asarray(value)
-        if value.shape == np.asarray(transferred[name]).shape:
+        target = np.asarray(transferred[name])
+        if (
+            name in ar_site_names
+            and source_ar_parameter_indices is not None
+            and value.ndim >= 1
+            and target.ndim >= 1
+            and value.shape[:-1] == target.shape[:-1]
+            and value.shape[-1] == source_ar_parameter_indices.size
+            and target.shape[-1] == target_ar_parameter_indices.size
+        ):
+            target = target.copy()
+            for source_position, parameter_index in enumerate(
+                source_ar_parameter_indices
+            ):
+                target_position = target_positions.get(int(parameter_index))
+                if target_position is not None:
+                    target[..., target_position] = value[..., source_position]
+            transferred[name] = target
+            continue
+        tile_axis = _tile_axis_for_site(name)
+        if (
+            source_tile_ids is not None
+            and tile_axis is not None
+            and value.shape != target.shape
+            and warm_start_value_can_transfer(
+                name, value, target, source_tile_ids, target_tile_ids
+            )
+        ):
+            axis = tile_axis % value.ndim
+            target = target.copy()
+            target_positions = (
+                range(len(target_tile_ids))
+                if broadcast_tile_values and len(source_tile_ids) == 1
+                else [target_tile_positions[int(tile_id)] for tile_id in source_tile_ids]
+            )
+            for target_position in target_positions:
+                source_position = 0 if broadcast_tile_values else source_tile_ids.tolist().index(
+                    int(target_tile_ids[target_position])
+                )
+                source_index = [slice(None)] * value.ndim
+                target_index = [slice(None)] * target.ndim
+                source_index[axis] = source_position
+                target_index[axis] = target_position
+                target[tuple(target_index)] = value[tuple(source_index)]
+            transferred[name] = target
+            continue
+        if (
+            name in hgcdte_site_names
+            and value.ndim + 1 == target.ndim
+            and value.shape == target.shape[:-1]
+        ):
+            transferred[name] = np.broadcast_to(
+                value[..., None], target.shape
+            ).copy()
+            continue
+        if value.shape == target.shape:
             transferred[name] = value
     return transferred
+
+
+def build_model_for_args(
+    data,
+    context,
+    args,
+    ar_prior_reference,
+    incidence_chief_ray_tilts_deg,
+):
+    """Build one model stage from its explicit production configuration."""
+    corrections_applied = bool(
+        getattr(args, "corrections_already_applied", False)
+        or args.fixed_corrections is not None
+    )
+    return build_model(
+        data,
+        context,
+        args.log_noise_sigma,
+        args.likelihood_weight,
+        ar_mean_prior_sigma=args.ar_mean_prior_sigma,
+        ar_prior_reference=ar_prior_reference,
+        ar_layers=args.ar_layers,
+        np_modulation=args.np_modulation,
+        constant_rate_modulation=args.constant_rate_modulation,
+        constant_rate_trajectory=getattr(args, "constant_rate_trajectory", False),
+        constant_rate_smoothness_weight=args.constant_rate_smoothness_weight,
+        fully_np_trajectory=args.fully_np_trajectory,
+        standardize_ar_mean=args.standardize_ar_mean,
+        rotate_ar_coordinates=args.rotate_ar_coordinates,
+        whiten_np_trajectory=args.whiten_np_trajectory,
+        np_rate_likelihood_rotation=getattr(
+            args, "np_rate_likelihood_rotation", None
+        ),
+        pivot_initial_thickness=args.pivot_initial_thickness,
+        map_safe_initial_thickness=bool(args.map_steps),
+        np_entropy_weight=args.np_entropy_weight,
+        np_smoothness_weight=args.np_smoothness_weight,
+        np_max_node_multiplier=args.np_max_node_multiplier,
+        ar_sca_sigma_prior=args.ar_sca_sigma_prior,
+        ar_tile_sigma_prior=args.ar_tile_sigma_prior,
+        fit_sca_ar_opd=args.fit_sca_ar_opd,
+        sca_ar_opd_prior_sigma_nm=args.sca_ar_opd_prior_sigma_nm,
+        shared_ar_optical_properties=args.shared_ar_optical_properties,
+        shared_ar_parameters_across_tiles=args.shared_ar_parameters_across_tiles,
+        independent_tile_ar_parameters=getattr(
+            args, "independent_tile_ar_parameters", False
+        ),
+        fit_ar_absorption=args.fit_ar_absorption,
+        fit_hgcdte=args.fit_hgcdte,
+        fit_hgcdte_modulation=args.fit_hgcdte_modulation,
+        hgcdte_modulation_prior_sigma_log=args.hgcdte_modulation_prior_sigma_log,
+        fit_ice_optical_modulation=args.fit_ice_optical_modulation,
+        ice_modulation_prior_sigma_log=args.ice_modulation_prior_sigma_log,
+        ice_n_modulation_prior_sigma_log=args.ice_n_modulation_prior_sigma_log,
+        fit_conductive_layer=args.fit_conductive_layer,
+        finite_hgcdte_detector=args.finite_hgcdte_detector,
+        detector_thickness_nm=args.detector_thickness_nm,
+        fit_detector_thickness=args.fit_detector_thickness,
+        detector_thickness_prior_sigma_log=args.detector_thickness_prior_sigma_log,
+        detector_thickness_neighbor_sigma_log=args.detector_thickness_neighbor_sigma_log,
+        detector_backside_index=args.detector_backside_index,
+        fit_qe_rbf=args.fit_qe_rbf,
+        qe_rbf_node_wavelengths_nm=args.qe_rbf_node_wavelengths_nm,
+        qe_rbf_width_nm=args.qe_rbf_width_nm,
+        qe_rbf_prior_sigma_log=args.qe_rbf_prior_sigma_log,
+        use_asw_optical_constants=args.use_asw_optical_constants,
+        use_hgcdte_optical_constants=(
+            args.use_hgcdte_optical_constants or args.fit_hgcdte_modulation
+        ),
+        incidence_cone_half_angle_deg=args.incidence_cone_half_angle_deg,
+        incidence_pupil_half_angle_deg=args.incidence_pupil_half_angle_deg,
+        incidence_chief_ray_tilts_deg=incidence_chief_ray_tilts_deg,
+        fit_incidence_angle=args.fit_incidence_angle,
+        incidence_angle_prior_sigma_deg=args.incidence_angle_prior_sigma_deg,
+        incidence_angle_prior_uniform=args.incidence_angle_prior_uniform,
+        led_dependent_acm_step=args.led_dependent_acm_step,
+        fit_acm_step=not corrections_applied,
+        acm_step_prior_sigma=args.acm_step_prior_sigma,
+        fit_late_acm_step=(
+            args.fit_late_acm_step if not corrections_applied else False
+        ),
+        late_acm_step_prior_sigma=args.late_acm_step_prior_sigma,
+        fit_additional_acm_step=(
+            args.fit_additional_acm_step if not corrections_applied else False
+        ),
+        additional_acm_step_prior_sigma=args.additional_acm_step_prior_sigma,
+        trajectory_rate_prior_mean_nm_day=args.trajectory_rate_prior_mean_nm_day,
+        fixed_trajectory_rate_nm_day=args.fixed_trajectory_rate_nm_day,
+        fixed_ar_indices=getattr(args, "fixed_ar_indices", None),
+        ordered_ar_indices=getattr(args, "ordered_ar_indices", False),
+        trajectory_rate_prior_sigma_log=args.trajectory_rate_prior_sigma_log,
+        tile_rate_variation=args.tile_rate_variation,
+        tile_rate_trajectory_variation=args.tile_rate_trajectory_variation,
+        independent_tile_trajectories=args.independent_tile_trajectories,
+        tile_rate_trajectory_smoothness_weight=(
+            args.tile_rate_trajectory_smoothness_weight
+        ),
+        tile_rate_prior_sigma_log=args.tile_rate_prior_sigma_log,
+        tile_rate_neighbor_sigma_log=args.tile_rate_neighbor_sigma_log,
+        tile_rate_neighbor_smoothness=args.tile_rate_neighbor_smoothness,
+        fixed_initial_thickness_nm=args.fixed_initial_thickness_nm,
+        initial_thickness_prior_mean_nm=args.initial_thickness_prior_mean_nm,
+        initial_thickness_prior_sigma_nm=args.initial_thickness_prior_sigma_nm,
+        early_time_cutoff_day=(
+            args.early_time_scale_cutoff_day if not corrections_applied else None
+        ),
+        early_time_scale_prior_sigma=args.early_time_scale_prior_sigma,
+        absolute_hgcdte_scale_prior_sigma_log=args.absolute_hgcdte_scale_prior_sigma_log,
+        fixed_absolute_hgcdte_scales=args.fixed_absolute_hgcdte_scales,
+        shared_absolute_hgcdte_scales=args.shared_absolute_hgcdte_scales,
+        initial_thickness_prior_uniform=args.initial_thickness_prior_uniform,
+        tile_initial_thickness_lognormal=args.tile_initial_thickness_lognormal,
+        tile_initial_thickness_log_median_nm=args.tile_initial_thickness_log_median_nm,
+        tile_initial_thickness_log_sigma=args.tile_initial_thickness_log_sigma,
+        ice_reset_day=args.ice_reset_day,
+        fit_post_reset_tile_log_offset=args.fit_post_reset_tile_log_offset,
+        post_reset_tile_log_offset_prior_sigma=args.post_reset_tile_log_offset_prior_sigma,
+        fit_post_reset_ice_index=args.fit_post_reset_ice_index,
+        post_reset_ice_index_prior_mean=args.post_reset_ice_index_prior_mean,
+        post_reset_ice_index_prior_sigma=args.post_reset_ice_index_prior_sigma,
+        post_reset_ice_index_lower=args.post_reset_ice_index_lower,
+        post_reset_ice_index_upper=args.post_reset_ice_index_upper,
+        fit_pre_post_ice_index=args.fit_pre_post_ice_index,
+        ice_index_prior_mean=args.ice_index_prior_mean,
+        ice_index_prior_sigma=args.ice_index_prior_sigma,
+        ice_index_lower=args.ice_index_lower,
+        ice_index_upper=args.ice_index_upper,
+        ice_extinction_prior_sigma=args.ice_extinction_prior_sigma,
+        ice_extinction_upper=args.ice_extinction_upper,
+        fit_complex_q=getattr(args, "fit_complex_q", False),
+        include_map_prediction=(
+            getattr(args, "map_optimizer", None) == "least-squares"
+        ),
+    )
+
+
+def run_map_stage(model, initial_values, args, jax, init_to_value, seed):
+    """Run one configured MAP stage and return values plus diagnostics."""
+    if not args.map_steps:
+        return initial_values, None
+    if args.map_optimizer == "lbfgs":
+        parameter_scales = (
+            map_parameter_scale_values(initial_values, args)
+            if args.map_parameter_scaling == "prior"
+            else None
+        )
+        return run_map_optimization(
+            model,
+            initial_values,
+            jax,
+            args.map_steps,
+            args.map_tolerance,
+            args.map_ftol,
+            parameter_scales=parameter_scales,
+        )
+    if args.map_optimizer == "jax-lbfgsb":
+        parameter_scales = (
+            map_parameter_scale_values(initial_values, args)
+            if args.map_parameter_scaling == "prior"
+            else None
+        )
+        return run_jax_map_optimization(
+            model,
+            initial_values,
+            jax,
+            args.map_steps,
+            args.map_tolerance,
+            parameter_scales=parameter_scales,
+        )
+    if args.map_optimizer == "trust-exact":
+        return run_trust_exact_map_optimization(
+            model,
+            initial_values,
+            jax,
+            args.map_steps,
+            args.map_tolerance,
+        )
+    return run_map_initialization(
+        model,
+        initial_values,
+        jax,
+        init_to_value,
+        seed,
+        args.map_steps,
+        args.map_learning_rate,
+    )
 
 
 def reparameterized_map_value_converters(
@@ -6879,15 +8118,18 @@ def reparameterized_map_value_converters(
     converters = {}
     if getattr(args, "standardize_ar_mean", False):
         start_reference = map_start_reference(args, ar_reference, ar_lower, ar_upper)
-        active_parameter_indices = np.arange(len(ar_reference), dtype=int)
-        if not getattr(args, "fit_ar_absorption", False):
-            active_parameter_indices = active_parameter_indices[
-                active_parameter_indices % 3 != 2
-            ]
-        reference_probability = (
-            start_reference[active_parameter_indices] - ar_lower[active_parameter_indices]
-        ) / (ar_upper[active_parameter_indices] - ar_lower[active_parameter_indices])
-        reference_raw = np.log(reference_probability / (1.0 - reference_probability))
+        active_parameter_indices = ar_active_parameter_indices(
+            args.ar_layers,
+            getattr(args, "fit_ar_absorption", False),
+            getattr(args, "fixed_ar_indices", None),
+        )
+        reference_raw = ar_reference_raw(
+            start_reference,
+            ar_lower,
+            ar_upper,
+            active_parameter_indices,
+            ordered_ar_indices=getattr(args, "ordered_ar_indices", False),
+        )
         ar_mean_prior_sigma = float(args.ar_mean_prior_sigma)
         ar_rotation = ar_coordinate_rotation(
             active_parameter_indices, len(ar_reference)
@@ -6911,17 +8153,84 @@ def reparameterized_map_value_converters(
             if getattr(args, "trajectory_rate_prior_mean_nm_day", None) is not None
             else trajectory_rate_per_scale(data["days"]) * TRAJECTORY_SCALE_INIT
         )
-        converters["np_log_rate_z"] = (
-            "np_log_rate_nodes",
-            lambda value, _: whiten_trajectory_rate_nodes(
-                value,
-                data["node_days"],
-                trajectory_prior_rate,
-                args.trajectory_rate_prior_sigma_log,
-                trajectory_rate_likelihood_scale(data, args),
-                args.np_smoothness_weight,
+        converters["np_log_rate_z"] = [
+            (
+                "np_log_rate_nodes",
+                lambda value, _: whiten_trajectory_rate_nodes(
+                    value,
+                    data["node_days"],
+                    trajectory_prior_rate,
+                    args.trajectory_rate_prior_sigma_log,
+                    trajectory_rate_likelihood_scale(data, args),
+                    args.np_smoothness_weight,
+                ),
+            ),
+            (
+                "log_trajectory_scale",
+                lambda value, _: whiten_trajectory_rate_nodes(
+                    np.full(len(data["node_days"]), float(np.asarray(value))),
+                    data["node_days"],
+                    trajectory_prior_rate,
+                    args.trajectory_rate_prior_sigma_log,
+                    trajectory_rate_likelihood_scale(data, args),
+                    args.np_smoothness_weight,
+                ),
+            ),
+        ]
+    elif getattr(args, "fully_np_trajectory", False):
+        converters["np_log_rate_nodes"] = (
+            "log_trajectory_scale",
+            lambda value, _: np.full(
+                len(data["node_days"]), float(np.asarray(value))
             ),
         )
+    if getattr(args, "independent_tile_ar_parameters", False):
+        converters["ar_tile_raw"] = (
+            "ar_mu_raw",
+            lambda value, _: np.broadcast_to(
+                np.asarray(value, dtype=float).reshape(1, 1, -1),
+                (
+                    data["n_scas"],
+                    data["n_tiles"],
+                    np.asarray(value).size,
+                ),
+            ).copy(),
+        )
+    if getattr(args, "independent_tile_trajectories", False):
+        converters["trajectory_rate_tile_node_log_rates"] = [
+            (
+                "trajectory_rate_tile_node_log_rates",
+                lambda value, _: np.asarray(value, dtype=float),
+            ),
+            (
+                "log_trajectory_scale",
+                lambda value, _: np.full(
+                    (
+                        data["n_scas"],
+                        data["n_tiles"],
+                        len(data["node_days"]),
+                    ),
+                    float(np.asarray(value)),
+                ),
+            ),
+        ]
+    if getattr(args, "absolute_substrate_power", False) and not getattr(
+        args, "shared_absolute_hgcdte_scales", False
+    ):
+        def tile_hgcdte_converter(value, _):
+            value = np.asarray(value, dtype=float)
+            target_shape = (data["n_scas"], data["n_tiles"])
+            if value.shape == target_shape:
+                return value.copy()
+            if value.size == data["n_scas"]:
+                return np.broadcast_to(value.reshape(data["n_scas"], 1), target_shape).copy()
+            raise ValueError("Cannot broadcast HgCdTe warm-start values to tile sites")
+
+        for name in (
+            "absolute_hgcdte_n_log_scale",
+            "absolute_hgcdte_k_log_scale",
+        ):
+            converters[name] = (name, tile_hgcdte_converter)
     if getattr(args, "pivot_initial_thickness", False):
         converters["initial_thickness_pivot_z"] = (
             "initial_thickness_nm",
@@ -6969,6 +8278,7 @@ def posterior_median_fit_diagnostics(
     post_reset_ice_reset_day=None,
     post_reset_log_offset_day=None,
     fit_pre_post_ice_index=False,
+    fit_complex_q=False,
 ):
     """Evaluate the posterior-median parameters against the tile means."""
     _, jnp, _, _, _, _, _ = require_numpyro()
@@ -7069,6 +8379,11 @@ def posterior_median_fit_diagnostics(
         qe_rbf_parameters = jnp.asarray(
             np.median(np.asarray(samples["qe_rbf_log_modulation"]), axis=0)
         )
+    complex_q_parameters = None
+    if fit_complex_q:
+        complex_q_parameters = jnp.asarray(
+            np.median(np.asarray(samples["complex_q_parameters"]), axis=0)
+        )
     early_time_scale = None
     if early_time_cutoff_day is not None:
         early_time_scale = jnp.asarray(
@@ -7148,9 +8463,10 @@ def posterior_median_fit_diagnostics(
                     early_time_cutoff_day=early_time_cutoff_day,
                     fit_late_acm_step=fit_late_acm_step,
                     fit_additional_acm_step=fit_additional_acm_step,
-                    absolute_substrate_power=absolute_substrate_power,
-                    post_reset_ice_reset_day=post_reset_ice_reset_day,
-                )(
+                     absolute_substrate_power=absolute_substrate_power,
+                     post_reset_ice_reset_day=post_reset_ice_reset_day,
+                     fit_complex_q=fit_complex_q,
+                 )(
                     jnp.asarray(
                         ice_thickness
                         if ice_thickness.ndim == 1
@@ -7172,7 +8488,8 @@ def posterior_median_fit_diagnostics(
                      pre_reset_ice_index,
                      ice_modulation_parameters,
                      sca_ar_opd_nm,
-                 )
+                     complex_q_parameters,
+                  )
             )
         )
     prediction = np.concatenate(prediction_chunks, axis=0)
@@ -7200,6 +8517,9 @@ def posterior_median_fit_diagnostics(
         ),
         "pixel_rms_log": float(np.sqrt(total_sse / total_count)),
         "correlation": float(np.corrcoef(observed.ravel(), prediction.ravel())[0, 1]),
+        "observed": np.asarray(observed),
+        "prediction": np.asarray(prediction),
+        "residual": np.asarray(residual),
         "led_rms_log": np.asarray(
             [
                 np.sqrt(np.mean(residual[:, data["led"] == led] ** 2))
@@ -7359,6 +8679,7 @@ def write_outputs(
     fit_diagnostics=None,
     sampler_diagnostics=None,
     map_diagnostics=None,
+    warmup_map_diagnostics=None,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
     ar_layers = int(args.ar_layers)
@@ -7373,6 +8694,12 @@ def write_outputs(
         "sca_names": data["sca_names"],
         "qe_columns": data["qe_columns"],
         "ar_layers": ar_layers,
+        "ordered_ar_indices": int(getattr(args, "ordered_ar_indices", False)),
+        "fixed_ar_indices": (
+            np.empty(0, dtype=float)
+            if getattr(args, "fixed_ar_indices", None) is None
+            else np.asarray(args.fixed_ar_indices, dtype=float)
+        ),
         "wavelength_step_nm": (
             np.nan if args.wavelength_step_nm is None else args.wavelength_step_nm
         ),
@@ -7470,6 +8797,9 @@ def write_outputs(
         "shared_ar_parameters_across_tiles": int(
             getattr(args, "shared_ar_parameters_across_tiles", False)
         ),
+        "independent_tile_ar_parameters": int(
+            getattr(args, "independent_tile_ar_parameters", False)
+        ),
         "fit_ar_absorption": int(args.fit_ar_absorption),
         "fit_sca_ar_opd": int(getattr(args, "fit_sca_ar_opd", False)),
         "sca_ar_opd_prior_sigma_nm": float(
@@ -7539,6 +8869,10 @@ def write_outputs(
             getattr(args, "detector_backside_index", 1.0)
         ),
         "fit_qe_rbf": int(getattr(args, "fit_qe_rbf", False)),
+        "fit_complex_q": int(getattr(args, "fit_complex_q", False)),
+        "complex_q_parameter_names": np.asarray(COMPLEX_Q_PARAMETER_NAMES),
+        "complex_q_lower": COMPLEX_Q_LOWER,
+        "complex_q_upper": COMPLEX_Q_UPPER,
         "use_asw_optical_constants": int(
             getattr(args, "use_asw_optical_constants", False)
         ),
@@ -7710,6 +9044,9 @@ def write_outputs(
         "constant_rate_modulation": int(
             getattr(args, "constant_rate_modulation", False)
         ),
+        "constant_rate_trajectory": int(
+            getattr(args, "constant_rate_trajectory", False)
+        ),
         "constant_rate_smoothness_weight": float(
             getattr(args, "constant_rate_smoothness_weight", 0.0)
         ),
@@ -7732,10 +9069,17 @@ def write_outputs(
             else args.trajectory_rate_prior_mean_nm_day
         ),
         "trajectory_rate_prior_sigma_log": args.trajectory_rate_prior_sigma_log,
+        "fixed_trajectory_rate_nm_day": (
+            np.nan
+            if getattr(args, "fixed_trajectory_rate_nm_day", None) is None
+            else args.fixed_trajectory_rate_nm_day
+        ),
         "trajectory_rate_definition": np.asarray(
             (
                 "fully non-parametric instantaneous rate at each observation-epoch node"
                 if getattr(args, "fully_np_trajectory", False)
+                else "free constant instantaneous rate"
+                if getattr(args, "constant_rate_trajectory", False)
                 else "constant instantaneous rate with observation-epoch modulation"
                 if getattr(args, "constant_rate_modulation", False)
                 else "unmodulated instantaneous rate at the first observed time"
@@ -7750,7 +9094,7 @@ def write_outputs(
             getattr(args, "independent_tile_trajectories", False)
         ),
         "tile_rate_trajectory_smoothness_weight": float(
-            getattr(args, "tile_rate_trajectory_smoothness_weight", 0.01)
+        getattr(args, "tile_rate_trajectory_smoothness_weight", 0.001)
         ),
         "tile_rate_prior_sigma_log": getattr(
             args, "tile_rate_prior_sigma_log", np.nan
@@ -7774,6 +9118,12 @@ def write_outputs(
         "map_init_from": np.asarray(
             "" if getattr(args, "map_init_from", None) is None
             else str(getattr(args, "map_init_from"))
+        ),
+        "map_init_allow_tile_subset": int(
+            getattr(args, "map_init_allow_tile_subset", False)
+        ),
+        "map_init_broadcast_tile_values": int(
+            getattr(args, "map_init_broadcast_tile_values", False)
         ),
         "observation_days": data["days"],
         "observation_led": data["led"],
@@ -7837,6 +9187,38 @@ def write_outputs(
                 ),
             }
         )
+    if warmup_map_diagnostics:
+        metadata.update(
+            {
+                "warmup_map_optimizer": np.asarray(
+                    warmup_map_diagnostics["optimizer"]
+                ),
+                "warmup_map_converged": int(
+                    warmup_map_diagnostics["converged"]
+                ),
+                "warmup_map_iterations": int(
+                    warmup_map_diagnostics["iterations"]
+                ),
+                "warmup_map_objective": float(
+                    warmup_map_diagnostics["objective"]
+                ),
+                "warmup_map_initial_objective": float(
+                    warmup_map_diagnostics["initial_objective"]
+                ),
+                "warmup_map_gradient_norm": float(
+                    warmup_map_diagnostics["gradient_norm"]
+                ),
+                "warmup_map_projected_gradient_norm": float(
+                    warmup_map_diagnostics.get(
+                        "projected_gradient_norm",
+                        warmup_map_diagnostics["gradient_norm"],
+                    )
+                ),
+                "warmup_map_objective_history": np.asarray(
+                    warmup_map_diagnostics["objective_history"], dtype=float
+                ),
+            }
+        )
     if sampler_diagnostics:
         metadata.update(
             {
@@ -7849,6 +9231,70 @@ def write_outputs(
         **{key: np.asarray(value) for key, value in samples.items()},
         **metadata,
     )
+    if fit_diagnostics is not None and "prediction" in fit_diagnostics:
+        with (output_dir / "tile_group_predictions.csv").open(
+            "w", newline=""
+        ) as handle:
+            fields = [
+                "detector",
+                "tile_id",
+                "group",
+                "days",
+                "led",
+                "repeat",
+                "observed_log_change",
+                "model_log_change",
+                "residual_log",
+            ]
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            observed = np.asarray(fit_diagnostics["observed"], dtype=float)
+            prediction = np.asarray(fit_diagnostics["prediction"], dtype=float)
+            residual = np.asarray(fit_diagnostics["residual"], dtype=float)
+            for row_index in range(observed.shape[0]):
+                sca_index, tile_index = divmod(row_index, data["n_tiles"])
+                for group_index in range(observed.shape[1]):
+                    writer.writerow(
+                        {
+                            "detector": str(data["sca_names"][sca_index]),
+                            "tile_id": int(data["tile_ids"][tile_index]),
+                            "group": int(data["groups"][group_index]),
+                            "days": float(data["days"][group_index]),
+                            "led": int(data["led"][group_index]),
+                            "repeat": int(data["repeat"][group_index]),
+                            "observed_log_change": observed[row_index, group_index],
+                            "model_log_change": prediction[row_index, group_index],
+                            "residual_log": residual[row_index, group_index],
+                        }
+                    )
+    if getattr(args, "fit_complex_q", False) and "complex_q_parameters" in samples:
+        q_quantiles = np.percentile(
+            np.asarray(samples["complex_q_parameters"], dtype=float),
+            [16, 50, 84],
+            axis=0,
+        )
+        with (output_dir / "complex_q_posterior.csv").open(
+            "w", newline=""
+        ) as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=[
+                    "parameter",
+                    "p16",
+                    "median",
+                    "p84",
+                ],
+            )
+            writer.writeheader()
+            for index, name in enumerate(COMPLEX_Q_PARAMETER_NAMES):
+                writer.writerow(
+                    {
+                        "parameter": name,
+                        "p16": q_quantiles[0, index],
+                        "median": q_quantiles[1, index],
+                        "p84": q_quantiles[2, index],
+                    }
+                )
     ar_samples = np.asarray(samples["ar_parameters"])
     if ar_samples.ndim == 3:
         ar_grid_samples = ar_samples[:, None, :, :]
@@ -8317,7 +9763,11 @@ def write_outputs(
                     )
 
     trajectory_label = (
-        "independent per-SCA/tile positive log-rate node trajectories"
+        "fixed positive instantaneous rate trajectory"
+        if getattr(args, "fixed_trajectory_rate_nm_day", None) is not None
+        else "free constant positive instantaneous rate trajectory"
+        if getattr(args, "constant_rate_trajectory", False)
+        else "independent per-SCA/tile positive log-rate node trajectories"
         if getattr(args, "independent_tile_trajectories", False)
         else "fully non-parametric positive log-rate trajectory"
         if getattr(args, "fully_np_trajectory", False)
@@ -8374,11 +9824,15 @@ def write_outputs(
             "AR optical properties: one full AR parameter vector is shared across all selected tiles."
             if getattr(args, "shared_ar_parameters_across_tiles", False)
             else (
+                "AR optical properties: one direct AR parameter vector is fitted independently per SCA/tile; no tile hierarchy."
+                if getattr(args, "independent_tile_ar_parameters", False)
+                else (
                 "AR optical properties: direct single-tile parameters; no tile hierarchy."
                 if is_single_tile_data(data)
                 else "AR optical properties: shared n/k across all tiles; thickness varies hierarchically."
                 if args.shared_ar_optical_properties
                 else "AR optical properties: thickness, n, and k all vary hierarchically."
+                )
             )
         ),
         (
@@ -8504,6 +9958,13 @@ def write_outputs(
             else "No free post-reset per-tile grey log correction is fitted."
         ),
         (
+            "A globally shared complex-q boundary correction is fitted jointly with the "
+            "production AR, ice, incidence, reset, and HgCdTe parameters. Its parameter "
+            f"bounds are `{COMPLEX_Q_LOWER.tolist()}` to `{COMPLEX_Q_UPPER.tolist()}`."
+            if getattr(args, "fit_complex_q", False)
+            else "No complex-q boundary correction is fitted."
+        ),
+        (
             (
                 (
                 "Fitted one global non-negative chief-ray incidence angle relative to normal; "
@@ -8546,9 +10007,15 @@ def write_outputs(
             f"effective aggregated SSE weight: `{args.likelihood_weight / len(data['tile_ids'])}`; "
             f"log-noise sigma: `{args.log_noise_sigma}`."
         ),
-        f"AR population-mean prior sigma in unconstrained space: `{args.ar_mean_prior_sigma}`.",
         (
-            "Global AR mean is sampled in standard-normal coordinates with the same "
+            f"Direct per-tile AR prior sigma in unconstrained space: `{args.ar_mean_prior_sigma}`."
+            if getattr(args, "independent_tile_ar_parameters", False)
+            else f"AR population-mean prior sigma in unconstrained space: `{args.ar_mean_prior_sigma}`."
+        ),
+        (
+            "Each tile AR vector is sampled directly around the reference in raw coordinates."
+            if getattr(args, "independent_tile_ar_parameters", False)
+            else "Global AR mean is sampled in standard-normal coordinates with the same "
             "raw-space prior."
             if getattr(args, "standardize_ar_mean", False)
             else "Global AR mean is sampled directly in raw coordinates."
@@ -8557,31 +10024,45 @@ def write_outputs(
             "AR thickness/index coordinates use an orthogonal full-rank rotation; "
             "the standardized Normal prior and all parameter degrees of freedom are unchanged."
             if getattr(args, "rotate_ar_coordinates", False)
-            else "AR thickness/index coordinates use their standard ordering."
+            else (
+                "AR layer indices are parameterized in strict increasing order, "
+                "so each layer has a larger real index than the preceding layer."
+                if getattr(args, "ordered_ar_indices", False)
+                else "AR thickness/index coordinates use their standard ordering."
+            )
         ),
         (
-            (
+            "The instantaneous ice rate is fixed at "
+            f"`{args.fixed_trajectory_rate_nm_day}` nm/day; no trajectory-rate "
+            "parameter is sampled."
+            if getattr(args, "fixed_trajectory_rate_nm_day", None) is not None
+            else (
+                "Free constant-rate prior: centered at the default "
+                f"`{trajectory_rate_per_scale(data['days']) * TRAJECTORY_SCALE_INIT:.8g}` nm/day."
+                if getattr(args, "constant_rate_trajectory", False)
+                else (
                 "Fully non-parametric node-rate prior: centered at the default "
                 f"`{trajectory_rate_per_scale(data['days']) * TRAJECTORY_SCALE_INIT:.8g}` nm/day."
                 if args.trajectory_rate_prior_mean_nm_day is None
                 else "Fully non-parametric node-rate prior: centered at "
                 f"`{args.trajectory_rate_prior_mean_nm_day}` nm/day."
-            )
-            if getattr(args, "fully_np_trajectory", False)
-            else (
-                "Constant base-rate prior: centered at the default "
-                f"`{trajectory_rate_per_scale(data['days']) * TRAJECTORY_SCALE_INIT:.8g}` nm/day."
-                if args.trajectory_rate_prior_mean_nm_day is None
-                else "Constant base-rate prior: centered at "
-                f"`{args.trajectory_rate_prior_mean_nm_day}` nm/day."
-            )
-            if getattr(args, "constant_rate_modulation", False)
-            else (
-                "Unmodulated initial instantaneous-rate prior: centered at the default "
-                f"`{trajectory_rate_per_scale(data['days']) * TRAJECTORY_SCALE_INIT:.8g}` nm/day."
-                if args.trajectory_rate_prior_mean_nm_day is None
-                else "Unmodulated initial instantaneous-rate prior: centered at "
-                f"`{args.trajectory_rate_prior_mean_nm_day}` nm/day."
+                )
+                if getattr(args, "fully_np_trajectory", False)
+                else (
+                    "Constant base-rate prior: centered at the default "
+                    f"`{trajectory_rate_per_scale(data['days']) * TRAJECTORY_SCALE_INIT:.8g}` nm/day."
+                    if args.trajectory_rate_prior_mean_nm_day is None
+                    else "Constant base-rate prior: centered at "
+                    f"`{args.trajectory_rate_prior_mean_nm_day}` nm/day."
+                )
+                if getattr(args, "constant_rate_modulation", False)
+                else (
+                    "Unmodulated initial instantaneous-rate prior: centered at the default "
+                    f"`{trajectory_rate_per_scale(data['days']) * TRAJECTORY_SCALE_INIT:.8g}` nm/day."
+                    if args.trajectory_rate_prior_mean_nm_day is None
+                    else "Unmodulated initial instantaneous-rate prior: centered at "
+                    f"`{args.trajectory_rate_prior_mean_nm_day}` nm/day."
+                )
             )
         ),
         (
@@ -8620,7 +10101,11 @@ def write_outputs(
         ),
         f"Trajectory-rate prior log-scale sigma: `{args.trajectory_rate_prior_sigma_log}`.",
         (
-            "Fully non-parametric log-rate nodes are sampled in exact prior-whitened "
+            "No trajectory-rate nodes are sampled because the instantaneous rate is fixed."
+            if getattr(args, "fixed_trajectory_rate_nm_day", None) is not None
+            else "One free constant instantaneous-rate parameter is sampled; no rate nodes are used."
+            if getattr(args, "constant_rate_trajectory", False)
+            else "Fully non-parametric log-rate nodes are sampled in exact prior-whitened "
             "coordinates; all node degrees of freedom remain free."
             if getattr(args, "whiten_np_trajectory", False)
             else "Fully non-parametric log-rate nodes are sampled directly."
@@ -8633,7 +10118,12 @@ def write_outputs(
         ),
         "The primary trajectory quantity is a positive instantaneous rate; ice thickness is its time integral.",
         (
-            "Fully non-parametric rates are log-linearly interpolated between observation-epoch nodes, "
+            "The instantaneous rate is fixed at "
+            f"`{args.fixed_trajectory_rate_nm_day}` nm/day for both trajectory segments."
+            if getattr(args, "fixed_trajectory_rate_nm_day", None) is not None
+            else "A single free positive instantaneous rate is used for the complete trajectory."
+            if getattr(args, "constant_rate_trajectory", False)
+            else "Fully non-parametric rates are log-linearly interpolated between observation-epoch nodes, "
             "so the positive accumulation trajectory remains monotonic."
             if getattr(args, "fully_np_trajectory", False)
             else (
@@ -8650,7 +10140,11 @@ def write_outputs(
         (
             f"MAP-only trajectory-rate start: `{args.map_trajectory_rate_nm_day}` nm/day."
             if args.map_trajectory_rate_nm_day is not None
-            else "MAP-only trajectory-rate start: historical initialization."
+            else (
+                f"Fixed trajectory rate: `{args.fixed_trajectory_rate_nm_day}` nm/day."
+                if getattr(args, "fixed_trajectory_rate_nm_day", None) is not None
+                else "MAP-only trajectory-rate start: historical initialization."
+            )
         ),
         (
             "Cold MAP uses a finite smooth continuation outside the initial-thickness "
@@ -8756,7 +10250,11 @@ def write_outputs(
                 ]
             )
     if args.ar_prior_from_map_start:
-        lines.append("AR population-mean prior is centered on the physical MAP start.")
+        lines.append(
+            "Direct per-tile AR priors are centered on the physical MAP start."
+            if getattr(args, "independent_tile_ar_parameters", False)
+            else "AR population-mean prior is centered on the physical MAP start."
+        )
     map_init_max_tiles = getattr(args, "map_init_max_tiles", None)
     if map_init_max_tiles is not None:
         lines.append(
@@ -8792,12 +10290,18 @@ def write_outputs(
     if data["n_scas"] > 1:
         lines.extend(
             [
-                f"SCA AR sigma prior: `{args.ar_sca_sigma_prior}`; tile AR sigma prior: `{args.ar_tile_sigma_prior}`.",
+                (
+                    "AR parameters are direct independent per-SCA/tile vectors; no population or tile hierarchy."
+                    if getattr(args, "independent_tile_ar_parameters", False)
+                    else f"SCA AR sigma prior: `{args.ar_sca_sigma_prior}`; tile AR sigma prior: `{args.ar_tile_sigma_prior}`."
+                ),
                 (
                     "AR thickness uses global population shrinkage, then SCA-level offsets, "
                     "then tile-level deviations; n/k are shared globally."
                     if args.shared_ar_optical_properties
                     else "AR parameters use global population shrinkage, then SCA-level offsets, then tile-level deviations."
+                    if not getattr(args, "independent_tile_ar_parameters", False)
+                    else ""
                 ),
             ]
         )
@@ -8855,6 +10359,21 @@ def write_outputs(
                     )
                 ),
                 f"- Parameter step norm: `{map_diagnostics['parameter_step_norm']:.10g}`.",
+            ]
+        )
+    if warmup_map_diagnostics:
+        lines.extend(
+            [
+                "",
+                "## Fixed-rate warmup",
+                f"- Fixed instantaneous rate: `{WARMUP_FIXED_RATE_NM_DAY}` nm/day.",
+                f"- MAP steps: `{WARMUP_MAP_STEPS}`.",
+                f"- AR refractive indices fixed by layer: `{WARMUP_FIXED_AR_INDICES.tolist()}`.",
+                f"- HgCdTe n/k nuisance scales fixed to literature: `{WARMUP_FIXED_HGCDTE_SCALES}`.",
+                f"- HgCdTe n/k nuisance scales shared across tiles: `{WARMUP_SHARED_HGCDTE_SCALES}`.",
+                f"- Reported convergence: `{warmup_map_diagnostics['converged']}`.",
+                f"- Initial/final objective: `{warmup_map_diagnostics['initial_objective']:.10g}` / `{warmup_map_diagnostics['objective']:.10g}`.",
+                f"- Final projected gradient infinity norm: `{warmup_map_diagnostics.get('projected_gradient_norm', warmup_map_diagnostics['gradient_norm']):.10g}`.",
             ]
         )
     elif "diagnostic_diverging" in samples:
@@ -9007,6 +10526,26 @@ def write_outputs(
             )
     else:
         raise ValueError("Unexpected ACM step posterior shape")
+    if getattr(args, "fit_complex_q", False) and "complex_q_parameters" in samples:
+        q_quantiles = np.percentile(
+            np.asarray(samples["complex_q_parameters"], dtype=float),
+            [16, 50, 84],
+            axis=0,
+        )
+        lines.extend(
+            [
+                "",
+                "### Complex-q parameters",
+                "",
+                "| Parameter | 16th percentile | Median | 84th percentile |",
+                "|---|---:|---:|---:|",
+            ]
+        )
+        for index, name in enumerate(COMPLEX_Q_PARAMETER_NAMES):
+            values = q_quantiles[:, index]
+            lines.append(
+                f"| {name} | {values[0]:.10g} | {values[1]:.10g} | {values[2]:.10g} |"
+            )
     if "late_acm_step_log_offset" in samples:
         late_step_percent = 100.0 * np.expm1(
             np.asarray(samples["late_acm_step_log_offset"])
@@ -9078,12 +10617,17 @@ def write_outputs(
             "vector across all selected tiles and SCAs."
             if getattr(args, "shared_ar_parameters_across_tiles", False)
             else (
+                f"This all-SCA fit uses {ice_trajectory_scope} and direct independent "
+                "AR parameters for every selected SCA/tile; no tile hierarchy."
+                if getattr(args, "independent_tile_ar_parameters", False)
+                else (
                 f"This all-SCA fit uses {ice_trajectory_scope} and hierarchically "
                 "shrinks tile AR thickness toward an SCA-specific population; dielectric "
                 "n/k are shared across all tiles."
                 if args.shared_ar_optical_properties
                 else f"This all-SCA fit uses {ice_trajectory_scope} and hierarchically "
                 "shrinks tile AR parameters toward an SCA-specific population."
+                )
             )
         )
     else:
@@ -9092,11 +10636,15 @@ def write_outputs(
             "there is no tile-level AR variation."
             if getattr(args, "shared_ar_parameters_across_tiles", False)
             else (
+                "This fit uses direct independent AR parameters for every selected tile."
+                if getattr(args, "independent_tile_ar_parameters", False)
+                else (
                 "This is a single-tile fit. The ice trajectory and all AR parameters are "
                 "directly shared by the selected tile."
                 if is_single_tile_data(data)
                 else f"This is a hierarchical fit; {ice_trajectory_scope}, and "
                 f"the {ar_layers} dielectric AR layer(s) vary by tile under hierarchical shrinkage."
+                )
             )
         )
     lines.extend(
@@ -9275,6 +10823,14 @@ def parse_args():
         help=(
             "Use one identical full AR parameter vector for every selected tile, "
             "removing tile-level AR variation."
+        ),
+    )
+    parser.add_argument(
+        "--independent-tile-ar-parameters",
+        action="store_true",
+        help=(
+            "Fit a direct AR parameter vector independently for every SCA/tile, "
+            "with no shared AR population mean or tile hierarchy."
         ),
     )
     parser.add_argument(
@@ -9893,7 +11449,7 @@ def parse_args():
     parser.add_argument(
         "--tile-rate-trajectory-smoothness-weight",
         type=float,
-        default=0.01,
+        default=0.001,
         help="Curvature regularization weight for tile-specific log-rate trajectories.",
     )
     parser.add_argument(
@@ -9999,12 +11555,12 @@ def parse_args():
     )
     parser.add_argument(
         "--map-optimizer",
-        choices=("jax-lbfgsb", "lbfgs", "trust-exact", "adam"),
+        choices=("jax-lbfgsb", "lbfgs", "least-squares", "trust-exact", "adam"),
         default="lbfgs",
         help=(
             "Optimizer for --map-steps; SciPy L-BFGS-B is the default, with "
             "JAX-native bounded L-BFGS-B, exact-Hessian trust-region polishing, "
-            "and Adam available as alternatives."
+            "trust-region nonlinear least-squares, and Adam available as alternatives."
         ),
     )
     parser.add_argument(
@@ -10062,7 +11618,24 @@ def parse_args():
         default=None,
         help=(
             "Warm-start MAP sample sites from a compatible map-only posterior_samples.npz "
-            "or its output directory; tile-statistics fingerprints must match."
+            "or its output directory; tile-statistics fingerprints must match unless "
+            "--map-init-allow-tile-subset is enabled."
+        ),
+    )
+    parser.add_argument(
+        "--map-init-allow-tile-subset",
+        action="store_true",
+        help=(
+            "Allow --map-init-from to load a compatible map-only fit made from a "
+            "strict subset of the target tiles."
+        ),
+    )
+    parser.add_argument(
+        "--map-init-broadcast-tile-values",
+        action="store_true",
+        help=(
+            "When loading a one-tile MAP subset, initialize every target tile-local "
+            "site from that source tile."
         ),
     )
     parser.add_argument(
@@ -10116,6 +11689,17 @@ def parse_args():
             "Use a constant positive rate with observation-epoch-node modulation; "
             "apply relative-entropy regularization without rate smoothness."
         ),
+    )
+    trajectory_model_group.add_argument(
+        "--constant-rate-trajectory",
+        action="store_true",
+        help="Fit one free positive instantaneous rate with no trajectory nodes.",
+    )
+    trajectory_model_group.add_argument(
+        "--fixed-trajectory-rate-nm-day",
+        type=float,
+        default=None,
+        help="Fix the positive instantaneous rate and do not sample a rate latent.",
     )
     trajectory_model_group.add_argument(
         "--fully-np-trajectory",
@@ -10180,7 +11764,7 @@ def parse_args():
             "ar_layers": 3,
             "absolute_substrate_power": True,
             "use_hgcdte_optical_constants": True,
-            "shared_absolute_hgcdte_scales": True,
+            "shared_absolute_hgcdte_scales": PRODUCTION_SHARED_HGCDTE_SCALES,
             "fixed_absolute_hgcdte_scales": False,
             "sed_mode": "core",
             "sed_weighting": "energy",
@@ -10205,7 +11789,7 @@ def parse_args():
             "fit_post_reset_tile_log_offset": True,
             "post_reset_tile_log_offset_prior_sigma": 0.1,
             "fit_post_reset_ice_index": False,
-            "fit_pre_post_ice_index": True,
+            "fit_pre_post_ice_index": False,
             "ice_index_prior_mean": 1.25,
             "ice_index_prior_sigma": 0.03,
             "ice_index_lower": 1.15,
@@ -10213,26 +11797,33 @@ def parse_args():
             "ice_extinction_prior_sigma": 0.005,
             "ice_extinction_upper": 0.05,
             "trajectory_rate_prior_mean_nm_day": 5.0,
+            "fixed_trajectory_rate_nm_day": None,
             "trajectory_rate_prior_sigma_log": 1.5,
             "tile_rate_variation": True,
             "tile_rate_trajectory_variation": True,
             "independent_tile_trajectories": False,
-            "tile_rate_trajectory_smoothness_weight": 0.01,
-            "tile_rate_prior_sigma_log": 0.1,
+            "tile_rate_trajectory_smoothness_weight": (
+                PRODUCTION_TILE_RATE_TRAJECTORY_SMOOTHNESS_WEIGHT
+            ),
+            "tile_rate_prior_sigma_log": PRODUCTION_TILE_RATE_PRIOR_SIGMA_LOG,
             "tile_rate_neighbor_sigma_log": 0.05,
             "tile_rate_neighbor_smoothness": False,
             "ar_mean_prior_sigma": 10.0,
             "ar_sca_sigma_prior": 1.0,
             "ar_tile_sigma_prior": 1.0,
+            "fixed_ar_indices": None,
+            "ordered_ar_indices": True,
             "standardize_ar_mean": False,
             "rotate_ar_coordinates": False,
             "ar_prior_from_map_start": False,
             "fully_np_trajectory": True,
             "np_modulation": False,
             "constant_rate_modulation": False,
+            "constant_rate_trajectory": False,
             "whiten_np_trajectory": True,
             "rotate_np_likelihood": False,
             "map_trajectory_rate_nm_day": 10.2,
+            "np_smoothness_weight": PRODUCTION_NP_SMOOTHNESS_WEIGHT,
             "map_parameter_scaling": "prior",
             "map_optimizer": "lbfgs",
             "map_steps": 10000,
@@ -10240,6 +11831,8 @@ def parse_args():
             "map_tolerance": 1.0e-9,
             "map_ftol": 0.0,
             "map_init_from": None,
+            "map_init_allow_tile_subset": False,
+            "map_init_broadcast_tile_values": False,
             "map_init_max_tiles": None,
             "map_design_wavelength_nm": None,
             "map_middle_layer_eighth_wave": False,
@@ -10256,6 +11849,7 @@ def parse_args():
             "fit_sca_ar_opd": False,
             "shared_ar_optical_properties": False,
             "shared_ar_parameters_across_tiles": False,
+            "independent_tile_ar_parameters": False,
             "fit_hgcdte": False,
             "fit_hgcdte_modulation": False,
             "fit_conductive_layer": False,
@@ -10278,9 +11872,37 @@ def parse_args():
     return args
 
 
-def _fit_one():
+def fixed_rate_warmup_args(args):
+    """Return the explicit 500-step fixed-rate initialization configuration."""
+    warmup = argparse.Namespace(**vars(args))
+    warmup.fixed_trajectory_rate_nm_day = WARMUP_FIXED_RATE_NM_DAY
+    warmup.trajectory_rate_prior_mean_nm_day = WARMUP_FIXED_RATE_NM_DAY
+    warmup.fully_np_trajectory = False
+    warmup.whiten_np_trajectory = False
+    warmup.np_modulation = False
+    warmup.constant_rate_modulation = False
+    warmup.constant_rate_trajectory = False
+    warmup.tile_rate_variation = False
+    warmup.tile_rate_trajectory_variation = False
+    warmup.independent_tile_trajectories = False
+    warmup.map_trajectory_rate_nm_day = None
+    warmup.fixed_absolute_hgcdte_scales = getattr(
+        args,
+        "fixed_absolute_hgcdte_scales",
+        WARMUP_FIXED_HGCDTE_SCALES,
+    )
+    warmup.shared_absolute_hgcdte_scales = (
+        False if warmup.fixed_absolute_hgcdte_scales else WARMUP_SHARED_HGCDTE_SCALES
+    )
+    warmup.fixed_ar_indices = WARMUP_FIXED_AR_INDICES.copy()
+    warmup.ordered_ar_indices = False
+    warmup.map_steps = WARMUP_MAP_STEPS
+    return warmup
+
+
+def _fit_one(configured_args=None):
     run_start = time.perf_counter()
-    args = parse_args()
+    args = parse_args() if configured_args is None else configured_args
     corrections_applied = bool(
         getattr(args, "corrections_already_applied", False)
         or args.fixed_corrections is not None
@@ -10468,6 +12090,34 @@ def _fit_one():
         or args.trajectory_rate_prior_mean_nm_day <= 0.0
     ):
         raise ValueError("trajectory-rate-prior-mean-nm-day must be positive and finite")
+    if args.fixed_trajectory_rate_nm_day is not None and (
+        not np.isfinite(args.fixed_trajectory_rate_nm_day)
+        or args.fixed_trajectory_rate_nm_day <= 0.0
+    ):
+        raise ValueError("fixed-trajectory-rate-nm-day must be positive and finite")
+    if args.fixed_trajectory_rate_nm_day is not None and (
+        args.np_modulation
+        or args.constant_rate_modulation
+        or args.constant_rate_trajectory
+        or args.fully_np_trajectory
+        or args.tile_rate_variation
+        or args.tile_rate_trajectory_variation
+        or args.independent_tile_trajectories
+    ):
+        raise ValueError(
+            "A fixed trajectory rate cannot be combined with rate modulation or variation"
+        )
+    if args.constant_rate_trajectory and (
+        args.np_modulation
+        or args.constant_rate_modulation
+        or args.fully_np_trajectory
+        or args.tile_rate_variation
+        or args.tile_rate_trajectory_variation
+        or args.independent_tile_trajectories
+    ):
+        raise ValueError(
+            "A constant trajectory rate cannot be combined with another trajectory mode"
+        )
     if args.trajectory_rate_prior_sigma_log <= 0.0 or not np.isfinite(
         args.trajectory_rate_prior_sigma_log
     ):
@@ -10772,9 +12422,57 @@ def _fit_one():
     data["qe_columns"] = context["qe_columns"]
     data["response_wavelengths_nm"] = np.asarray(context["wavelengths"], dtype=float)
     data["response_wavelength_count"] = int(context["wavelengths"].size)
+    args.np_rate_likelihood_rotation = None
+    ar_prior_reference = (
+        map_start_reference(args, ar_reference, ar_lower, ar_upper)
+        if args.ar_prior_from_map_start
+        else ar_reference
+    )
+
+    if getattr(args, "skip_fixed_rate_warmup", False):
+        warmup_args = None
+        warmup_initial_values = None
+        warmup_map_diagnostics = None
+        print("Skipping legacy fixed-rate MAP warmup; using the requested MAP warm start.")
+    else:
+        warmup_args = fixed_rate_warmup_args(args)
+        warmup_initial_values = initial_values_for_data(
+            data, warmup_args, ar_reference, ar_lower, ar_upper
+        )
+        warmup_model = build_model_for_args(
+            data,
+            context,
+            warmup_args,
+            ar_prior_reference=ar_prior_reference,
+            incidence_chief_ray_tilts_deg=incidence_chief_ray_tilts_deg,
+        )
+        warmup_initial_values, warmup_map_diagnostics = run_map_stage(
+            warmup_model,
+            warmup_initial_values,
+            warmup_args,
+            jax,
+            init_to_value,
+            args.seed + 1,
+        )
+
     initial_values = initial_values_for_data(
         data, args, ar_reference, ar_lower, ar_upper
     )
+    if warmup_initial_values is not None:
+        initial_values = transfer_map_initial_values(
+            warmup_initial_values,
+            initial_values,
+            source_ar_parameter_indices=ar_active_parameter_indices(
+                args.ar_layers,
+                args.fit_ar_absorption,
+                warmup_args.fixed_ar_indices,
+            ),
+            target_ar_parameter_indices=ar_active_parameter_indices(
+                args.ar_layers,
+                args.fit_ar_absorption,
+                getattr(args, "fixed_ar_indices", None),
+            ),
+        )
     if args.map_init_from is not None:
         initial_values = load_map_warm_start(
             args.map_init_from,
@@ -10783,122 +12481,19 @@ def _fit_one():
             value_converters=reparameterized_map_value_converters(
                 data, args, ar_reference, ar_lower, ar_upper
             ),
+            allow_tile_subset=getattr(args, "map_init_allow_tile_subset", False),
+            broadcast_tile_subset=getattr(
+                args, "map_init_broadcast_tile_values", False
+            ),
+            allow_tile_template=getattr(args, "map_init_allow_tile_template", False),
         )
-    args.np_rate_likelihood_rotation = None
-    ar_prior_reference = (
-        map_start_reference(args, ar_reference, ar_lower, ar_upper)
-        if args.ar_prior_from_map_start
-        else ar_reference
-    )
-    model = build_model(
+    model = build_model_for_args(
         data,
         context,
-        args.log_noise_sigma,
-        args.likelihood_weight,
-        ar_mean_prior_sigma=args.ar_mean_prior_sigma,
+        args,
         ar_prior_reference=ar_prior_reference,
-        ar_layers=args.ar_layers,
-        np_modulation=args.np_modulation,
-        constant_rate_modulation=args.constant_rate_modulation,
-        constant_rate_smoothness_weight=args.constant_rate_smoothness_weight,
-        fully_np_trajectory=args.fully_np_trajectory,
-        standardize_ar_mean=args.standardize_ar_mean,
-        rotate_ar_coordinates=args.rotate_ar_coordinates,
-        whiten_np_trajectory=args.whiten_np_trajectory,
-        np_rate_likelihood_rotation=args.np_rate_likelihood_rotation,
-        pivot_initial_thickness=args.pivot_initial_thickness,
-        map_safe_initial_thickness=bool(args.map_steps),
-        np_entropy_weight=args.np_entropy_weight,
-        np_smoothness_weight=args.np_smoothness_weight,
-        np_max_node_multiplier=args.np_max_node_multiplier,
-        ar_sca_sigma_prior=args.ar_sca_sigma_prior,
-        ar_tile_sigma_prior=args.ar_tile_sigma_prior,
-        fit_sca_ar_opd=args.fit_sca_ar_opd,
-        sca_ar_opd_prior_sigma_nm=args.sca_ar_opd_prior_sigma_nm,
-        shared_ar_optical_properties=args.shared_ar_optical_properties,
-        shared_ar_parameters_across_tiles=args.shared_ar_parameters_across_tiles,
-        fit_ar_absorption=args.fit_ar_absorption,
-        fit_hgcdte=args.fit_hgcdte,
-         fit_hgcdte_modulation=args.fit_hgcdte_modulation,
-         hgcdte_modulation_prior_sigma_log=args.hgcdte_modulation_prior_sigma_log,
-         fit_ice_optical_modulation=args.fit_ice_optical_modulation,
-         ice_modulation_prior_sigma_log=args.ice_modulation_prior_sigma_log,
-         ice_n_modulation_prior_sigma_log=args.ice_n_modulation_prior_sigma_log,
-         fit_conductive_layer=args.fit_conductive_layer,
-        finite_hgcdte_detector=args.finite_hgcdte_detector,
-        detector_thickness_nm=args.detector_thickness_nm,
-        fit_detector_thickness=args.fit_detector_thickness,
-        detector_thickness_prior_sigma_log=args.detector_thickness_prior_sigma_log,
-        detector_thickness_neighbor_sigma_log=args.detector_thickness_neighbor_sigma_log,
-        detector_backside_index=args.detector_backside_index,
-        fit_qe_rbf=args.fit_qe_rbf,
-        qe_rbf_node_wavelengths_nm=args.qe_rbf_node_wavelengths_nm,
-        qe_rbf_width_nm=args.qe_rbf_width_nm,
-        qe_rbf_prior_sigma_log=args.qe_rbf_prior_sigma_log,
-        use_asw_optical_constants=args.use_asw_optical_constants,
-        use_hgcdte_optical_constants=(
-            args.use_hgcdte_optical_constants or args.fit_hgcdte_modulation
-        ),
-        incidence_cone_half_angle_deg=args.incidence_cone_half_angle_deg,
-        incidence_pupil_half_angle_deg=args.incidence_pupil_half_angle_deg,
         incidence_chief_ray_tilts_deg=incidence_chief_ray_tilts_deg,
-        fit_incidence_angle=args.fit_incidence_angle,
-        incidence_angle_prior_sigma_deg=args.incidence_angle_prior_sigma_deg,
-        incidence_angle_prior_uniform=args.incidence_angle_prior_uniform,
-        led_dependent_acm_step=args.led_dependent_acm_step,
-        fit_acm_step=not corrections_applied,
-        acm_step_prior_sigma=args.acm_step_prior_sigma,
-        fit_late_acm_step=(
-            args.fit_late_acm_step if not corrections_applied else False
-        ),
-        late_acm_step_prior_sigma=args.late_acm_step_prior_sigma,
-        fit_additional_acm_step=(
-            args.fit_additional_acm_step if not corrections_applied else False
-        ),
-        additional_acm_step_prior_sigma=args.additional_acm_step_prior_sigma,
-        trajectory_rate_prior_mean_nm_day=args.trajectory_rate_prior_mean_nm_day,
-        trajectory_rate_prior_sigma_log=args.trajectory_rate_prior_sigma_log,
-        tile_rate_variation=args.tile_rate_variation,
-        tile_rate_trajectory_variation=args.tile_rate_trajectory_variation,
-        independent_tile_trajectories=args.independent_tile_trajectories,
-        tile_rate_trajectory_smoothness_weight=(
-            args.tile_rate_trajectory_smoothness_weight
-        ),
-        tile_rate_prior_sigma_log=args.tile_rate_prior_sigma_log,
-        tile_rate_neighbor_sigma_log=args.tile_rate_neighbor_sigma_log,
-        tile_rate_neighbor_smoothness=args.tile_rate_neighbor_smoothness,
-        fixed_initial_thickness_nm=args.fixed_initial_thickness_nm,
-        initial_thickness_prior_mean_nm=args.initial_thickness_prior_mean_nm,
-        initial_thickness_prior_sigma_nm=args.initial_thickness_prior_sigma_nm,
-        early_time_cutoff_day=(
-            args.early_time_scale_cutoff_day
-            if not corrections_applied
-            else None
-        ),
-        early_time_scale_prior_sigma=args.early_time_scale_prior_sigma,
-        absolute_hgcdte_scale_prior_sigma_log=args.absolute_hgcdte_scale_prior_sigma_log,
-        fixed_absolute_hgcdte_scales=args.fixed_absolute_hgcdte_scales,
-        shared_absolute_hgcdte_scales=args.shared_absolute_hgcdte_scales,
-        initial_thickness_prior_uniform=args.initial_thickness_prior_uniform,
-        tile_initial_thickness_lognormal=args.tile_initial_thickness_lognormal,
-        tile_initial_thickness_log_median_nm=args.tile_initial_thickness_log_median_nm,
-         tile_initial_thickness_log_sigma=args.tile_initial_thickness_log_sigma,
-         ice_reset_day=args.ice_reset_day,
-         fit_post_reset_tile_log_offset=args.fit_post_reset_tile_log_offset,
-         post_reset_tile_log_offset_prior_sigma=args.post_reset_tile_log_offset_prior_sigma,
-         fit_post_reset_ice_index=args.fit_post_reset_ice_index,
-         post_reset_ice_index_prior_mean=args.post_reset_ice_index_prior_mean,
-         post_reset_ice_index_prior_sigma=args.post_reset_ice_index_prior_sigma,
-         post_reset_ice_index_lower=args.post_reset_ice_index_lower,
-         post_reset_ice_index_upper=args.post_reset_ice_index_upper,
-         fit_pre_post_ice_index=args.fit_pre_post_ice_index,
-         ice_index_prior_mean=args.ice_index_prior_mean,
-         ice_index_prior_sigma=args.ice_index_prior_sigma,
-         ice_index_lower=args.ice_index_lower,
-         ice_index_upper=args.ice_index_upper,
-         ice_extinction_prior_sigma=args.ice_extinction_prior_sigma,
-         ice_extinction_upper=args.ice_extinction_upper,
-     )
+    )
     if args.rotate_np_likelihood:
         args.np_rate_likelihood_rotation = trajectory_rate_posterior_rotation(
             model, initial_values, jax
@@ -10956,11 +12551,14 @@ def _fit_one():
             np_max_node_multiplier=args.np_max_node_multiplier,
             ar_sca_sigma_prior=args.ar_sca_sigma_prior,
             ar_tile_sigma_prior=args.ar_tile_sigma_prior,
-            fit_sca_ar_opd=args.fit_sca_ar_opd,
-            sca_ar_opd_prior_sigma_nm=args.sca_ar_opd_prior_sigma_nm,
-            shared_ar_optical_properties=args.shared_ar_optical_properties,
-            shared_ar_parameters_across_tiles=args.shared_ar_parameters_across_tiles,
-            fit_ar_absorption=args.fit_ar_absorption,
+             fit_sca_ar_opd=args.fit_sca_ar_opd,
+             sca_ar_opd_prior_sigma_nm=args.sca_ar_opd_prior_sigma_nm,
+             shared_ar_optical_properties=args.shared_ar_optical_properties,
+             shared_ar_parameters_across_tiles=args.shared_ar_parameters_across_tiles,
+             independent_tile_ar_parameters=getattr(
+                 args, "independent_tile_ar_parameters", False
+             ),
+             fit_ar_absorption=args.fit_ar_absorption,
             fit_hgcdte=args.fit_hgcdte,
              fit_hgcdte_modulation=args.fit_hgcdte_modulation,
              hgcdte_modulation_prior_sigma_log=args.hgcdte_modulation_prior_sigma_log,
@@ -10999,8 +12597,12 @@ def _fit_one():
                 args.fit_additional_acm_step if not corrections_applied else False
             ),
             additional_acm_step_prior_sigma=args.additional_acm_step_prior_sigma,
-            trajectory_rate_prior_mean_nm_day=args.trajectory_rate_prior_mean_nm_day,
-            trajectory_rate_prior_sigma_log=args.trajectory_rate_prior_sigma_log,
+             trajectory_rate_prior_mean_nm_day=args.trajectory_rate_prior_mean_nm_day,
+             fixed_trajectory_rate_nm_day=args.fixed_trajectory_rate_nm_day,
+             constant_rate_trajectory=getattr(args, "constant_rate_trajectory", False),
+             fixed_ar_indices=getattr(args, "fixed_ar_indices", None),
+             ordered_ar_indices=getattr(args, "ordered_ar_indices", False),
+             trajectory_rate_prior_sigma_log=args.trajectory_rate_prior_sigma_log,
             tile_rate_variation=args.tile_rate_variation,
             tile_rate_trajectory_variation=args.tile_rate_trajectory_variation,
             independent_tile_trajectories=args.independent_tile_trajectories,
@@ -11038,9 +12640,11 @@ def _fit_one():
             ice_index_prior_sigma=args.ice_index_prior_sigma,
             ice_index_lower=args.ice_index_lower,
             ice_index_upper=args.ice_index_upper,
-            ice_extinction_prior_sigma=args.ice_extinction_prior_sigma,
-            ice_extinction_upper=args.ice_extinction_upper,
-        )
+             ice_extinction_prior_sigma=args.ice_extinction_prior_sigma,
+             ice_extinction_upper=args.ice_extinction_upper,
+             fit_complex_q=getattr(args, "fit_complex_q", False),
+             include_map_prediction=(args.map_optimizer == "least-squares"),
+          )
         reduced_initial_values = initial_values_for_data(
             reduced_data, args, ar_reference, ar_lower, ar_upper
         )
@@ -11060,6 +12664,23 @@ def _fit_one():
                 args.map_steps,
                 args.map_tolerance,
                 args.map_ftol,
+                parameter_scales=reduced_scales,
+            )
+        elif args.map_optimizer == "least-squares":
+            reduced_scales = (
+                map_parameter_scale_values(reduced_initial_values, args)
+                if args.map_parameter_scaling == "prior"
+                else None
+            )
+            reduced_map_values, _ = run_least_squares_map_optimization(
+                reduced_model,
+                reduced_initial_values,
+                reduced_data,
+                args,
+                ar_prior_reference,
+                jax,
+                args.map_steps,
+                args.map_tolerance,
                 parameter_scales=reduced_scales,
             )
         elif args.map_optimizer == "jax-lbfgsb":
@@ -11095,7 +12716,10 @@ def _fit_one():
                 args.map_learning_rate,
             )
         initial_values = transfer_map_initial_values(
-            reduced_map_values, initial_values
+            reduced_map_values,
+            initial_values,
+            source_tile_ids=reduced_data["tile_ids"],
+            target_tile_ids=data["tile_ids"],
         )
     if args.map_steps:
         if args.map_optimizer == "lbfgs":
@@ -11111,6 +12735,23 @@ def _fit_one():
                 args.map_steps,
                 args.map_tolerance,
                 args.map_ftol,
+                parameter_scales=parameter_scales,
+            )
+        elif args.map_optimizer == "least-squares":
+            parameter_scales = (
+                map_parameter_scale_values(initial_values, args)
+                if args.map_parameter_scaling == "prior"
+                else None
+            )
+            initial_values, map_diagnostics = run_least_squares_map_optimization(
+                model,
+                initial_values,
+                data,
+                args,
+                ar_prior_reference,
+                jax,
+                args.map_steps,
+                args.map_tolerance,
                 parameter_scales=parameter_scales,
             )
         elif args.map_optimizer == "jax-lbfgsb":
@@ -11217,8 +12858,9 @@ def _fit_one():
                   if args.fit_post_reset_tile_log_offset
                   else None
               ),
-              fit_pre_post_ice_index=args.fit_pre_post_ice_index,
-         )
+               fit_pre_post_ice_index=args.fit_pre_post_ice_index,
+               fit_complex_q=getattr(args, "fit_complex_q", False),
+          )
         postprocessing_seconds = time.perf_counter() - postprocessing_start
         write_outputs(
             args.output_dir,
@@ -11227,6 +12869,7 @@ def _fit_one():
             args,
             fit_diagnostics=fit_diagnostics,
             map_diagnostics=map_diagnostics,
+            warmup_map_diagnostics=warmup_map_diagnostics,
         )
         output_seconds = time.perf_counter() - postprocessing_start - postprocessing_seconds
         print(
@@ -11302,6 +12945,7 @@ def _fit_one():
             "acm_step_log_offset",
             "late_acm_step_log_offset",
             "additional_acm_step_log_offset",
+            "complex_q_parameters",
         }
         global_sites = tuple(
             sorted(name for name in initial_values if name in global_site_candidates)
@@ -11354,6 +12998,7 @@ def _fit_one():
             # a free NUTS variable after initialization.
             nuts_initial_values = dict(initial_values)
             nuts_initial_values["initial_thickness_nm"] = args.nuts_initial_thickness_nm
+    nuts_initial_values = interior_nuts_initial_values(nuts_initial_values)
     nuts_initial_params = build_nuts_initial_params(
         model,
         nuts_initial_values,
@@ -11468,7 +13113,8 @@ def _fit_one():
               else None
           ),
           fit_pre_post_ice_index=args.fit_pre_post_ice_index,
-     )
+          fit_complex_q=getattr(args, "fit_complex_q", False),
+      )
     write_outputs(
         args.output_dir,
         data,
@@ -11477,6 +13123,7 @@ def _fit_one():
         fit_diagnostics=fit_diagnostics,
         sampler_diagnostics=sampler_diagnostics,
         map_diagnostics=map_diagnostics,
+        warmup_map_diagnostics=warmup_map_diagnostics,
     )
     if args.samples >= 4:
         if jax.default_backend() == "gpu":
