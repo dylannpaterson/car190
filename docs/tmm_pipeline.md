@@ -261,27 +261,73 @@ d(t) = d0 + integral[r(u), u=first_observation..t]       before reset
 d(t) = d0_reset + integral[r(u), u=reset_day..t]          after reset
 ```
 
-This is a discontinuous baseline reset, not a rate reset. The reset day must be
-chosen from the observation metadata rather than inferred from an arbitrary
-time gap. The current WFI01 expanded statistics place the first post-reset
-epoch near day 15.06. For an exploratory fit before fixed corrections exist,
-omit `--fixed-corrections`; the ACM step remains fitted, but the missing
-temperature-dependent gain correction is not modeled. The fixed correction
-table must be regenerated before treating a fit as production-quality.
+This is a discontinuous baseline reset, not a rate reset. The physical reset day
+must be chosen from the observation metadata rather than inferred from an
+arbitrary time gap. In the unified reduction, the first Program 1063 epoch is
+the physical reset anchor. The former day-15.06 anchor is the
+operational-temperature transition used by the count-space correction builder,
+not the physical reset.
 
-The WFI01 data contain a common ACM-like step at repeat 35 near day 11.31 and
-another between repeat 38 and repeat 39 (the first post-reset epoch is repeat
-36). To model the post-reset step without fitting the empirical sinusoid across
-the ice reset, use
+The unified reduction first fits a local side-swap correction independently for
+each detector and LED. Image counts and dark-subtracted photodiode signals have
+separate multiplicative factors; the local fit uses a continuous spline plus a
+single log-step. The side-swap-corrected photodiode-scaled statistics are then
+passed to the count-space correction builder. On a later run, only the newest
+`raw_statistics/` output is reused; prior scaled `statistics/` files are
+ignored and regenerated. Changes to photodiode telemetry do not force raw image
+reprocessing. `raw_statistics/` remains truly uncorrected and is never rewritten
+by this stage.
+
+The cumulative/base ACM steps are fitted jointly to all six LEDs as grey
+throughput corrections. The additional step at effective repeat 669 and the
+day-22 step at effective repeat 682 are fitted independently for each LED; the
+later day-26 step at effective repeat 691 is shared grey. The operational
+repeat remains the boundary for the ACM pre/post partition. After those ACM
+corrections are applied, the
+pre-operational temperature correction is fitted only between the first ACM
+step and the pre-reset ACM step (effective repeats 14 through 34 in the
+20261009 WFI02 timeline), excluding the early day-two transient. The
+post-operational temperature-dependent correction starts only
+after the additional ACM event (effective repeat 669 in the 20261009 WFI02
+timeline). Both temperature corrections are fitted only to LED 3; the
+resulting scale is applied identically to every LED. The former late ACM term
+is not fitted again because it is replaced by the per-detector side-swap
+calibration. The two temperature fits are therefore not interchangeable and
+must both be retained when regenerating the correction table. The
+post-operational temperature fit ends before the later day-22 discontinuity
+(effective repeat 682 in the 20261009 WFI02 timeline). A per-LED day-22 step
+is estimated locally from neighboring reference rows and stored separately
+from the temperature fit. The later day-26 discontinuity is mapped to effective
+repeat 691 and estimated as one shared-grey local step from the neighboring
+all-program rows. The late ACM coefficient is still disabled because side-swap
+handles its event at effective repeat 686.
+The extrapolated factor is applied only to the Program 1063 rows before the
+operational boundary (the first 1063 batch in WFI02); later Program 1063
+batches receive zero for this component.
+
+The legacy WFI01 1039-only timeline contains a common ACM-like step at repeat
+35 near day 11.31 and another between repeat 38 and repeat 39. To model the
+later step without fitting the empirical sinusoid across the physical ice reset, use
 `--additional-acm-step-repeat 39` together with `--fit-additional-acm-step`
 for a free exploratory fit. When building fixed corrections, pass
-`--ice-reset-day 15.064405023148149`,
+the first Program 1063 observation as `--ice-reset-day`,
 `--pre-reset-acm-step-repeat 35`, and
 `--additional-acm-step-repeat 39`;
-the builder then fits the pre-reset sinusoid separately from independent
-post-reset sinusoids for each LED, with one shared repeat-39 step, and stores
+the builder then fits the pre- and post-operational temperature sinusoids
+separately from the physical-reset baseline, with one shared repeat-39 step, and stores
 the repeat-35 and repeat-39 steps in
 `pre_reset_acm_step_log_offset` and `additional_acm_step_log_offset`.
+The repeat-35 correction remains active after the operational boundary; the repeat-39
+factor is applied on top of that carried correction rather than replacing it.
+The unified timeline inserts Program 1063 observations between those legacy
+repeats, so the reduction maps legacy repeat 39 to the corresponding current
+post-operational epoch instead of treating current repeat 39 as the same event.
+The former legacy endpoint, repeat 56, identifies the side-swap event. On the
+current unified timeline it is mapped to the effective detector repeat (686 in
+the 20261007 inventory). The event must not be inferred from the maximum repeat
+in the current file. Its image and photodiode factors are recorded in the
+detector-specific side-swap calibration file; the retained late-step columns in
+the count-correction schema are zero for production compatibility.
 The TMM CLI uses `--pre-reset-acm-step-repeat` to load that fixed correction;
 the repeat-35 coefficient itself is estimated by the correction-table builder,
 not refit as a free TMM parameter.

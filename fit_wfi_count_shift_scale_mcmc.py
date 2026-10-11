@@ -40,8 +40,10 @@ def _statistics_paths(path, detectors=None):
         paths = [path]
     else:
         paths = sorted(path.glob("wfi*_tile_log_statistics_512.csv"))
+        if not paths:
+            paths = sorted(path.glob("wfi*_tile_log_statistics_512_count_corrected.csv"))
     if not paths:
-        raise ValueError(f"No raw 512-pixel tile statistics found at {path}")
+        raise ValueError(f"No 512-pixel tile statistics found at {path}")
     by_detector = {_detector_from_path(item): item for item in paths}
     if detectors is None:
         selected = sorted(by_detector, key=_detector_sort_key)
@@ -56,6 +58,10 @@ def _statistics_paths(path, detectors=None):
 
 
 def _correction_path(path, detector, n_detectors):
+    if path is None:
+        raise ValueError(
+            f"Raw statistics require a count-space correction table for {detector}"
+        )
     path = Path(path)
     if path.is_file():
         return path
@@ -86,19 +92,30 @@ def _load_detector_model(
         additional_acm_step_repeat=additional_acm_step_repeat,
         pre_reset_acm_step_repeat=pre_reset_acm_step_repeat,
     )
-    corrected = apply_fixed_corrections(data, corrections_path)
-    if corrected.get("fixed_correction_space") != "counts":
-        raise ValueError(
-            f"{detector} correction table must be marked as count-space: {corrections_path}"
-        )
     counts = np.asarray(data["counts"], dtype=float)
-    values = np.asarray(corrected["sum_current_counts"], dtype=float) / counts
+    if corrections_path is None:
+        if not Path(statistics_path).name.endswith("_count_corrected.csv"):
+            raise ValueError(
+                f"Raw statistics require a count-space correction table: {statistics_path}"
+            )
+        values = np.asarray(data["sum_current_counts"], dtype=float) / counts
+    else:
+        corrected = apply_fixed_corrections(data, corrections_path)
+        if corrected.get("fixed_correction_space") != "counts":
+            raise ValueError(
+                f"{detector} correction table must be marked as count-space: {corrections_path}"
+            )
+        values = np.asarray(corrected["sum_current_counts"], dtype=float) / counts
     return {
         "detector": detector,
         "data": data,
         "values": values,
         "counts": counts,
-        "corrections_path": str(Path(corrections_path).expanduser().resolve()),
+        "corrections_path": (
+            None
+            if corrections_path is None
+            else str(Path(corrections_path).expanduser().resolve())
+        ),
         "reset_day": float(reset_day),
     }
 
@@ -114,7 +131,18 @@ def load_model_data(
     statistics = _statistics_paths(statistics_path, detectors)
     detector_models = []
     for detector, path in statistics:
-        correction_path = _correction_path(path=corrections_path, detector=detector, n_detectors=len(statistics))
+        if path.name.endswith("_count_corrected.csv"):
+            if corrections_path is not None:
+                raise ValueError(
+                    "Do not pass a correction table with *_count_corrected.csv statistics"
+                )
+            correction_path = None
+        else:
+            correction_path = _correction_path(
+                path=corrections_path,
+                detector=detector,
+                n_detectors=len(statistics),
+            )
         detector_models.append(
             _load_detector_model(
                 detector,

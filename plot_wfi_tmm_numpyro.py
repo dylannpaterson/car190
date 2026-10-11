@@ -20,6 +20,12 @@ from fit_wfi_tmm_numpyro import (
     early_time_scale_configuration,
 )
 from assess_rcs_spectral_identifiability import QE_URL, load_qe
+from wfi_production_plot_annotations import (
+    annotate_time_axis,
+    event_legend_handles,
+    non_annotation_legend_handles,
+    split_time_series_at_reset,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -168,7 +174,7 @@ def save_trajectory_plot(path, samples, days, seed):
     draw_count = min(100, len(sorted_thickness))
     draw_indices = rng.choice(len(sorted_thickness), draw_count, replace=False)
 
-    figure, axes = plt.subplots(1, 2, figsize=(13, 5), constrained_layout=True)
+    figure, axes = plt.subplots(2, 1, figsize=(11, 8), constrained_layout=True)
     if tile_trajectory:
         tile_colors = plt.get_cmap("viridis", tile_thickness_quantiles.shape[1])
         for tile_index in range(tile_thickness_quantiles.shape[1]):
@@ -222,7 +228,10 @@ def save_trajectory_plot(path, samples, days, seed):
             label="Median",
         )
         axes[0].set_title("Shared ice trajectory")
-    axes[0].set_xlabel("Days since first exposure")
+    if tile_rate_trajectory or has_rate_trajectory:
+        axes[0].set_xlabel("")
+    else:
+        axes[0].set_xlabel("Days since first exposure")
     axes[0].set_ylabel("Ice thickness (nm)")
     axes[0].legend(frameon=False, fontsize=8)
     axes[0].grid(alpha=0.2)
@@ -299,7 +308,7 @@ def save_trajectory_plot(path, samples, days, seed):
     plt.close(figure)
 
 
-def save_np_node_plot(path, samples, days, repeats):
+def save_np_node_plot(path, samples, days, repeats, time_annotations=None):
     if "np_node_multipliers" not in samples:
         return
     repeat_values = np.asarray(sorted(set(repeats.tolist())), dtype=int)
@@ -325,7 +334,34 @@ def save_np_node_plot(path, samples, days, repeats):
         node_ylabel = "NP instantaneous-rate multiplier"
         node_title = "Observation-epoch-node rate modulation"
 
-    figure, axes = plt.subplots(1, 2, figsize=(12, 4.5), constrained_layout=True)
+    thickness_quantiles = None
+    if "np_node_thickness" in samples:
+        thickness = np.asarray(samples["np_node_thickness"], dtype=float)
+        if thickness.ndim == 3:
+            thickness = np.mean(thickness, axis=1)
+        thickness_quantiles = np.percentile(thickness, [16, 50, 84], axis=0)
+    reset_day = (
+        None
+        if time_annotations is None
+        else time_annotations.physical_reset_day
+    )
+    if thickness_quantiles is None:
+        node_days, node_value_quantiles = split_time_series_at_reset(
+            node_days,
+            node_value_quantiles,
+            reset_day=reset_day,
+        )
+    else:
+        node_days, node_value_quantiles, thickness_quantiles = (
+            split_time_series_at_reset(
+                node_days,
+                node_value_quantiles,
+                thickness_quantiles,
+                reset_day=reset_day,
+            )
+        )
+
+    figure, axes = plt.subplots(2, 1, figsize=(11, 8), sharex=True)
     axes[0].fill_between(
         node_days,
         node_value_quantiles[0],
@@ -355,17 +391,11 @@ def save_np_node_plot(path, samples, days, repeats):
             )
     else:
         axes[0].axhline(1.0, color="black", linewidth=0.8, linestyle="--")
-    axes[0].set_xlabel("Days since first exposure")
     axes[0].set_ylabel(node_ylabel)
     axes[0].set_title(node_title)
-    axes[0].legend(frameon=False, fontsize=8)
     axes[0].grid(alpha=0.2)
 
-    if "np_node_thickness" in samples:
-        thickness = np.asarray(samples["np_node_thickness"], dtype=float)
-        if thickness.ndim == 3:
-            thickness = np.mean(thickness, axis=1)
-        thickness_quantiles = np.percentile(thickness, [16, 50, 84], axis=0)
+    if thickness_quantiles is not None:
         axes[1].fill_between(
             node_days,
             thickness_quantiles[0],
@@ -383,17 +413,34 @@ def save_np_node_plot(path, samples, days, repeats):
         )
         axes[1].set_ylabel("Ice thickness (nm)")
         axes[1].set_title("Ice thickness at observation-epoch nodes")
-        axes[1].legend(frameon=False, fontsize=8)
     axes[1].set_xlabel("Days since first exposure")
     axes[1].grid(alpha=0.2)
+    if time_annotations is not None:
+        annotate_time_axis(axes[0], time_annotations)
+        annotate_time_axis(axes[1], time_annotations)
+    for axis in axes:
+        handles, labels = non_annotation_legend_handles(axis, time_annotations)
+        if handles:
+            axis.legend(handles, labels, frameon=False, fontsize=8)
     figure.suptitle(
         f"{sample_scope(samples)} "
         + (
             "fully non-parametric ice trajectory"
             if fully_np_trajectory
             else "non-parametric rate modulation"
-        )
+        ),
+        y=0.98,
     )
+    if time_annotations is not None:
+        figure.legend(
+            handles=event_legend_handles(time_annotations),
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.015),
+            ncol=8,
+            frameon=False,
+            fontsize=7,
+        )
+    figure.subplots_adjust(top=0.88, bottom=0.15, hspace=0.22)
     figure.savefig(path, dpi=180)
     plt.close(figure)
 
@@ -1599,7 +1646,7 @@ def load_model_prediction_quantiles(
     )
 
 
-def save_tile_fit_plot(path, data, prediction_quantiles):
+def save_tile_fit_plot(path, data, prediction_quantiles, time_annotations=None):
     observed = data["sums"] / data["counts"]
     days = data["days"]
     leds = data["led"]
@@ -1608,7 +1655,12 @@ def save_tile_fit_plot(path, data, prediction_quantiles):
         if data.get("early_time_scale_applied_to_data", False)
         else "Tile observations"
     )
-    figure, axes = plt.subplots(2, 3, figsize=(15, 8), sharex=False, sharey=True, constrained_layout=True)
+    figure, axes = plt.subplots(2, 3, figsize=(15, 8), sharex=False, sharey=True)
+    reset_day = (
+        None
+        if time_annotations is None
+        else time_annotations.physical_reset_day
+    )
     for led, axis in enumerate(axes.flat, start=1):
         groups = np.flatnonzero(leds == led)
         order = groups[np.argsort(days[groups], kind="stable")]
@@ -1627,9 +1679,16 @@ def save_tile_fit_plot(path, data, prediction_quantiles):
                 ]
             )
             model_band_label = "Tile-median 16th-84th percentile"
+        residual = observed_led - prediction_quantiles[1][:, order]
+        x, observed_plot, predicted_plot = split_time_series_at_reset(
+            x,
+            observed_led,
+            predicted_curve_quantiles,
+            reset_day=reset_day,
+        )
         axis.scatter(
-            np.broadcast_to(x, observed_led.shape).ravel(),
-            (100.0 * np.expm1(observed_led)).ravel(),
+            np.broadcast_to(x, observed_plot.shape).ravel(),
+            (100.0 * np.expm1(observed_plot)).ravel(),
             color="#444444",
             alpha=0.18,
             s=7,
@@ -1637,31 +1696,48 @@ def save_tile_fit_plot(path, data, prediction_quantiles):
         )
         axis.fill_between(
             x,
-            100.0 * np.expm1(predicted_curve_quantiles[0]),
-            100.0 * np.expm1(predicted_curve_quantiles[2]),
+            100.0 * np.expm1(predicted_plot[0]),
+            100.0 * np.expm1(predicted_plot[2]),
             color="#56B4E9",
             alpha=0.35,
             label=model_band_label if led == 1 else None,
         )
         axis.plot(
             x,
-            100.0 * np.expm1(predicted_curve_quantiles[1]),
+            100.0 * np.expm1(predicted_plot[1]),
             color="#0072B2",
             linewidth=2.0,
             label="Model median" if led == 1 else None,
         )
-        residual = observed_led - prediction_quantiles[1][:, order]
         rms = np.sqrt(np.mean(residual**2))
         axis.set_title(f"LED {led}; tile RMS={rms:.4g} log")
         axis.axhline(0.0, color="black", linewidth=0.6)
         axis.grid(alpha=0.2)
         axis.set_xlabel("Days since first exposure")
+    if time_annotations is not None:
+        for axis in axes.flat:
+            annotate_time_axis(axis, time_annotations)
     axes[0, 0].set_ylabel("Relative change (%)")
     axes[1, 0].set_ylabel("Relative change (%)")
-    axes[0, 0].legend(frameon=False, fontsize=8)
-    figure.suptitle(
-        f"{scope_label(data['sca_names'])} observations versus posterior physical TMM model"
+    handles, labels = non_annotation_legend_handles(
+        axes[0, 0], time_annotations
     )
+    if handles:
+        axes[0, 0].legend(handles, labels, frameon=False, fontsize=8)
+    figure.suptitle(
+        f"{scope_label(data['sca_names'])} observations versus posterior physical TMM model",
+        y=0.97,
+    )
+    if time_annotations is not None:
+        figure.legend(
+            handles=event_legend_handles(time_annotations),
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.935),
+            ncol=8,
+            frameon=False,
+            fontsize=7,
+        )
+    figure.tight_layout(rect=(0.0, 0.02, 1.0, 0.89))
     figure.savefig(path, dpi=180)
     plt.close(figure)
 
@@ -1829,6 +1905,7 @@ def save_tile_data_model_time_plot(
     acm_step=0.0,
     late_acm_step=0.0,
     additional_acm_step=0.0,
+    time_annotations=None,
 ):
     """Plot every LED after ACM handling; count correction is already in the data."""
     observed = np.asarray(data["sums"] / data["counts"], dtype=float)
@@ -1859,7 +1936,12 @@ def save_tile_data_model_time_plot(
     observed -= acm_correction[None, :]
     prediction_quantiles -= acm_correction[None, None, :]
 
-    figure, axis = plt.subplots(figsize=(13, 7), constrained_layout=True)
+    figure, axis = plt.subplots(figsize=(13, 7))
+    reset_day = (
+        None
+        if time_annotations is None
+        else time_annotations.physical_reset_day
+    )
     led_values = sorted(np.unique(leds))
     cmap = plt.get_cmap("tab10")
     color_by_led = {
@@ -1872,10 +1954,16 @@ def save_tile_data_model_time_plot(
         x = days[order]
         observed_led = observed[:, order]
         model_led = prediction_quantiles[1][:, order]
+        x, observed_plot, model_plot = split_time_series_at_reset(
+            x,
+            observed_led,
+            model_led,
+            reset_day=reset_day,
+        )
         for tile in range(observed_led.shape[0]):
             axis.scatter(
                 x,
-                100.0 * np.expm1(observed_led[tile]),
+                100.0 * np.expm1(observed_plot[tile]),
                 color=color_by_led[led],
                 alpha=0.22,
                 s=12,
@@ -1883,7 +1971,7 @@ def save_tile_data_model_time_plot(
             )
         model_alpha = 0.22 if model_led.shape[0] > 1 else 1.0
         model_linewidth = 0.8 if model_led.shape[0] > 1 else 2.0
-        for model_curve in model_led:
+        for model_curve in model_plot:
             axis.plot(
                 x,
                 100.0 * np.expm1(model_curve),
@@ -1924,12 +2012,6 @@ def save_tile_data_model_time_plot(
             ),
         ),
     ]
-    axis.legend(
-        handles=color_handles + style_handles,
-        frameon=False,
-        fontsize=9,
-        ncol=min(4, len(color_handles) + len(style_handles)),
-    )
     axis.axhline(0.0, color="black", linewidth=0.6)
     axis.set_xlabel("Days since first exposure")
     if data.get("fixed_corrections_applied", False):
@@ -1939,10 +2021,31 @@ def save_tile_data_model_time_plot(
         axis.set_ylabel("Relative change after ACM-step removal (%)")
         title_suffix = "fitted ACM throughput step removed; count correction applied to data"
     axis.grid(alpha=0.2)
+    event_handles = []
+    if time_annotations is not None:
+        annotate_time_axis(axis, time_annotations)
+        event_handles = event_legend_handles(time_annotations)
+    axis.legend(
+        handles=color_handles + style_handles,
+        frameon=False,
+        fontsize=9,
+        ncol=min(4, len(color_handles) + len(style_handles)),
+    )
     figure.suptitle(
         f"{scope_label(data['sca_names'])} tile data and modeled curves; "
-        + title_suffix
+        + title_suffix,
+        y=0.97,
     )
+    if event_handles:
+        figure.legend(
+            handles=event_handles,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.935),
+            ncol=8,
+            frameon=False,
+            fontsize=7,
+        )
+    figure.tight_layout(rect=(0.0, 0.02, 1.0, 0.89))
     figure.savefig(path, dpi=180)
     plt.close(figure)
 
@@ -2161,7 +2264,7 @@ def save_tile_fit_scatter_plot(path, data, prediction_quantiles):
     observed = data["sums"] / data["counts"]
     median_prediction = prediction_quantiles[1]
     residual = observed - median_prediction
-    figure, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+    figure, axes = plt.subplots(2, 1, figsize=(11, 8), constrained_layout=True)
     colors = plt.get_cmap("tab10")(data["led"] - 1)
     for led in range(1, 7):
         groups = np.flatnonzero(data["led"] == led)

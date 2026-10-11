@@ -1,10 +1,10 @@
 """Fixed production TMM model for independent WFI tile fits.
 
-The production model deliberately has no exploratory command-line switches.
 Each invocation evaluates the corrected sufficient statistics with a fixed
 three-layer lossless AR stack, semi-infinite HgCdTe, an energy-weighted SED,
 and independent per-tile latent parameters.  EMCEE initialization is handled
-by ``run_wfi_tmm_emcee_warmup.py``; this module owns the deterministic MAP fit.
+by ``run_wfi_tmm_emcee_warmup.py``; this module owns the deterministic MAP fit
+and its optional constant-rate warmup/MaxEnt regularization stages.
 """
 
 import csv
@@ -25,6 +25,8 @@ SED_URL = str(
 QE_URL = str(ROOT / "external_reference_data/WFI_Quantum_efficiency.ecsv")
 PRODUCTION_RESET_DAY = 15.064405023148149
 PRODUCTION_MAP_STEPS = 10000
+PRODUCTION_MAP_FTOL = 1.0e-9
+PRODUCTION_MAP_XTOL = 1.0e-9
 AR_LAYERS = 3
 AR_DESIGN_WAVELENGTH_NM = 1050.0
 AR_DIELECTRIC_K_START = 0.0
@@ -32,6 +34,21 @@ AR_LOWER = np.asarray([0.01, 1.0, 0.0], dtype=float)
 AR_UPPER = np.asarray([10.0, 4.0, 0.5], dtype=float)
 AR_MEAN_PRIOR_SIGMA = 10.0
 ICE_INDEX_DEFAULT = 1.25
+ICE_N_MODULATION_NODE_WAVELENGTHS_NM = np.asarray(
+    [
+        623.520885362797,
+        852.802649193115,
+        1038.5847494059,
+        1269.7582849979,
+        1481.24145201185,
+        1670.16888078615,
+    ],
+    dtype=float,
+)
+ICE_N_MODULATION_WIDTH_NM = 500.0
+ICE_N_MODULATION_PRIOR_SIGMA_LOG = 0.05
+AR_HGCDTE_MODULATION_PRIOR_SIGMA_LOG = 0.02
+AR_HGCDTE_MODULATION_ANCHOR_NM = 1050.0
 INCIDENCE_ANGLE_MAX_DEG = 15.0
 INCIDENCE_ANGLE_INIT_DEG = 7.5
 POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA = 0.1
@@ -117,6 +134,18 @@ class ProductionConfig:
     tile_statistics: Path
     output_dir: Path
     map_init_from: Path | None = None
+    map_initial_values: dict | None = None
+    smoothness_weight: float | None = None
+    entropy_reference_log_rates: np.ndarray | None = None
+    entropy_weight: float = 0.0
+    rate_prior_log_mean: np.ndarray | None = None
+    constant_rate: bool = False
+    fit_ice_n_modulation: bool = False
+    ice_n_modulation_prior_sigma_log: float = ICE_N_MODULATION_PRIOR_SIGMA_LOG
+    ar_mean_prior_sigma: float = AR_MEAN_PRIOR_SIGMA
+    fit_ar_hgcdte_modulation: bool = False
+    ar_hgcdte_modulation_prior_sigma_log: float = AR_HGCDTE_MODULATION_PRIOR_SIGMA_LOG
+    model_metadata: dict | None = None
 
 
 def require_numpyro():
@@ -148,6 +177,48 @@ def _trapezoid_sample_weights(wavelengths):
     weights[-1] = 0.5 * (wavelengths[-1] - wavelengths[-2])
     weights[1:-1] = 0.5 * (wavelengths[2:] - wavelengths[:-2])
     return weights
+
+
+def ice_n_modulation_basis(
+    wavelengths_nm,
+    node_wavelengths_nm=ICE_N_MODULATION_NODE_WAVELENGTHS_NM,
+    width_nm=ICE_N_MODULATION_WIDTH_NM,
+):
+    """Return normalized broad basis functions for n(lambda) modulation."""
+    wavelengths_nm = np.asarray(wavelengths_nm, dtype=float).reshape(-1)
+    node_wavelengths_nm = np.asarray(node_wavelengths_nm, dtype=float).reshape(-1)
+    if (
+        wavelengths_nm.size == 0
+        or np.any(~np.isfinite(wavelengths_nm))
+        or np.any(wavelengths_nm <= 0.0)
+    ):
+        raise ValueError("Ice modulation wavelengths must be positive and finite")
+    if (
+        node_wavelengths_nm.size < 2
+        or np.any(~np.isfinite(node_wavelengths_nm))
+        or np.any(np.diff(node_wavelengths_nm) <= 0.0)
+        or not np.isfinite(width_nm)
+        or width_nm <= 0.0
+    ):
+        raise ValueError("Ice modulation nodes and width must be finite and ordered")
+    basis = np.exp(
+        -0.5
+        * ((wavelengths_nm[:, None] - node_wavelengths_nm[None, :]) / width_nm) ** 2
+    )
+    return basis / np.sum(basis, axis=1, keepdims=True)
+
+
+def spectral_modulation_basis(
+    wavelengths_nm,
+    anchor_wavelength_nm=AR_HGCDTE_MODULATION_ANCHOR_NM,
+):
+    """Return broad basis functions anchored to zero at one wavelength."""
+    wavelengths_nm = np.asarray(wavelengths_nm, dtype=float).reshape(-1)
+    if not np.isfinite(anchor_wavelength_nm) or anchor_wavelength_nm <= 0.0:
+        raise ValueError("Spectral modulation anchor must be positive and finite")
+    basis = ice_n_modulation_basis(wavelengths_nm)
+    anchor = ice_n_modulation_basis(np.asarray([anchor_wavelength_nm]))[0]
+    return basis - anchor[None, :]
 
 
 def _prepare_response_integration(
@@ -324,6 +395,8 @@ def load_response_context(sca_names):
         "qe_fieldnames": np.asarray(qe_fieldnames),
         "hgcdte_n": hgcdte_n,
         "hgcdte_k": hgcdte_k,
+        "ice_n_modulation_basis": ice_n_modulation_basis(model_wavelengths),
+        "spectral_modulation_basis": spectral_modulation_basis(model_wavelengths),
         "absolute_substrate_power": True,
     }
 
@@ -355,6 +428,7 @@ def load_tile_statistics(path):
     sum_squared = np.zeros_like(counts)
     led = np.zeros(len(groups), dtype=int)
     repeat = np.zeros(len(groups), dtype=int)
+    program = np.full(len(groups), -1, dtype=int)
     days = np.zeros(len(groups), dtype=float)
     exposure_times = [""] * len(groups)
     metadata = {}
@@ -366,6 +440,8 @@ def load_tile_statistics(path):
         sum_squared[0, group_index] = float(row["sum_squared_log_change"])
         led[group_index] = int(row["led"])
         repeat[group_index] = int(row["repeat"])
+        if row.get("program", ""):
+            program[group_index] = int(row["program"])
         days[group_index] = float(row["days"])
         exposure_times[group_index] = row.get("exposure_start_time", "")
         tile_id = int(row["tile_id"])
@@ -394,6 +470,12 @@ def load_tile_statistics(path):
     )
     if node_days.size < 3 or np.any(np.diff(node_days) <= 0.0):
         raise ValueError("Repeat nodes must contain at least three increasing days")
+    program_1063 = program == 1063
+    reset_day = (
+        float(np.min(days[program_1063]))
+        if np.any(program_1063)
+        else float(PRODUCTION_RESET_DAY)
+    )
     return {
         "tile_ids": tile_ids,
         "metadata": metadata,
@@ -403,12 +485,14 @@ def load_tile_statistics(path):
         "groups": np.asarray(groups, dtype=int),
         "led": led,
         "repeat": repeat,
+        "program": program,
         "days": days,
         "first_by_led": first_by_led,
         "exposure_times": exposure_times,
         "repeat_values": repeat_values,
         "repeat_index": repeat_index,
         "node_days": node_days,
+        "reset_day": reset_day,
         "sca_names": np.asarray([detector_name_from_statistics_path(path)]),
         "sca_index": np.asarray([0], dtype=int),
         "n_scas": 1,
@@ -515,6 +599,28 @@ def rate_curvature_matrix(node_days):
     return matrix
 
 
+def _relative_entropy(log_values, log_reference, jnp):
+    """Return the generalized KL penalty for positive values versus a prior."""
+    log_ratio = log_values - log_reference
+    ratio = jnp.exp(log_ratio)
+    regular = ratio * log_ratio - jnp.expm1(log_ratio)
+    quadratic = 0.5 * log_ratio**2
+    return jnp.where(jnp.abs(log_ratio) < 1.0e-4, quadratic, regular)
+
+
+def _signed_entropy_residual(log_values, log_reference, jnp):
+    """Return a differentiable signed square root of twice the entropy."""
+    log_ratio = log_values - log_reference
+    entropy = _relative_entropy(log_values, log_reference, jnp)
+    magnitude = jnp.sqrt(2.0 * jnp.maximum(entropy, 0.0))
+    safe_abs_ratio = jnp.maximum(jnp.abs(log_ratio), 1.0e-12)
+    return jnp.where(
+        jnp.abs(log_ratio) < 1.0e-6,
+        log_ratio,
+        log_ratio * magnitude / safe_abs_ratio,
+    )
+
+
 def integrate_rate_trajectory(jax, jnp, days, node_days, integration_times, log_rates):
     gauss_nodes = jnp.asarray(GAUSS_LEGENDRE_NODES)
     gauss_weights = jnp.asarray(GAUSS_LEGENDRE_WEIGHTS)
@@ -556,7 +662,13 @@ def _incidence_sine(angle_deg, jnp):
     return jnp.sin(jnp.asarray(angle_deg) * jnp.pi / 180.0)
 
 
-def build_prediction_function(data, context):
+def build_prediction_function(
+    data,
+    context,
+    *,
+    fit_ice_n_modulation=False,
+    fit_ar_hgcdte_modulation=False,
+):
     """Build the fixed single-ray TE/TM absolute-power predictor."""
     jax, jnp, _, _ = require_numpyro()
     wavelengths = jnp.asarray(context["wavelengths"])
@@ -582,25 +694,58 @@ def build_prediction_function(data, context):
     reference_wavelength_count = wavelengths.size
     base_n = jnp.asarray(context["hgcdte_n"])
     base_k = jnp.asarray(context["hgcdte_k"])
+    ice_modulation_basis_value = None
+    spectral_modulation_basis_value = None
+    if fit_ice_n_modulation:
+        if "ice_n_modulation_basis" not in context:
+            raise ValueError("Ice n modulation requires a wavelength basis")
+        ice_modulation_basis_value = jnp.asarray(
+            context["ice_n_modulation_basis"]
+        )
+    if fit_ar_hgcdte_modulation:
+        if "spectral_modulation_basis" not in context:
+            raise ValueError("AR/HgCdTe modulation requires a wavelength basis")
+        spectral_modulation_basis_value = jnp.asarray(
+            context["spectral_modulation_basis"]
+        )
 
     def layer_elements(index, thickness, polarization, angle_sine):
-        cosine = jnp.sqrt(1.0 - (angle_sine[:, None] / index) ** 2)
+        if index.ndim == 2:
+            index = index[:, :, None]
+        cosine = jnp.sqrt(1.0 - (angle_sine[:, None, None] / index) ** 2)
         admittance = index * cosine if polarization == "s" else index / cosine
-        phase = phase_factor[None, None, :] * index[:, :, None] * thickness[:, :, None] * cosine[:, :, None]
+        phase = (
+            phase_factor[None, None, :]
+            * index
+            * thickness[:, :, None]
+            * cosine
+        )
         cosine_phase = jnp.cos(phase)
         sine_phase = -1j * jnp.sin(phase)
         return (
             cosine_phase,
-            sine_phase / admittance[:, :, None],
-            sine_phase * admittance[:, :, None],
+            sine_phase / admittance,
+            sine_phase * admittance,
             cosine_phase,
         )
 
-    def polarization_response(ar_parameters, hgcdte_parameters, ice_thickness, angle_sine, polarization):
+    def polarization_response(
+        ar_parameters,
+        hgcdte_n,
+        hgcdte_k,
+        ice_thickness,
+        angle_sine,
+        polarization,
+        ice_index,
+        *,
+        ar_index=None,
+    ):
         ar_parameters = ar_parameters.reshape((ar_parameters.shape[0], AR_LAYERS, 3))
-        ar_index = ar_parameters[:, :, 1] + 1j * ar_parameters[:, :, 2]
+        if ar_index is None:
+            ar_index = ar_parameters[:, :, 1] + 1j * ar_parameters[:, :, 2]
+        # Serialized AR thickness coordinates use 100 nm as their unit.
         ar_thickness = 100.0 * ar_parameters[:, :, 0]
-        substrate = base_n[None, :] * jnp.exp(hgcdte_parameters[:, 0, None]) + 1j * base_k[None, :] * jnp.exp(hgcdte_parameters[:, 1, None])
+        substrate = hgcdte_n + 1j * hgcdte_k
         substrate_cosine = jnp.sqrt(1.0 - (angle_sine[:, None] / substrate) ** 2)
         substrate_admittance_value = (
             substrate * substrate_cosine
@@ -629,7 +774,6 @@ def build_prediction_function(data, context):
             * jnp.abs(2.0 * incident_admittance[:, None] / clean_denominator) ** 2
         )
 
-        ice_index = jnp.asarray(ICE_INDEX_DEFAULT + 0.0j)
         ice_cosine = jnp.sqrt(1.0 - (angle_sine[:, None, None] / ice_index) ** 2)
         ice_admittance = (
             ice_index * ice_cosine if polarization == "s" else ice_index / ice_cosine
@@ -653,7 +797,16 @@ def build_prediction_function(data, context):
         )
         return clean, coated
 
-    def prediction(ice_thickness, ar_parameters, hgcdte_parameters, incidence_angle_deg):
+    def prediction(
+        ice_thickness,
+        ar_parameters,
+        hgcdte_parameters,
+        incidence_angle_deg,
+        ice_n_log_modulation=None,
+        ar_n_log_modulation=None,
+        hgcdte_n_log_modulation=None,
+        hgcdte_k_log_modulation=None,
+    ):
         ar_parameters = jnp.asarray(ar_parameters)
         if ar_parameters.ndim == 1:
             ar_parameters = ar_parameters[None, :]
@@ -666,11 +819,84 @@ def build_prediction_function(data, context):
         angle_sine = jnp.broadcast_to(
             _incidence_sine(incidence_angle_deg, jnp), (ar_parameters.shape[0],)
         )
+        if fit_ice_n_modulation:
+            if ice_n_log_modulation is None:
+                raise ValueError("Ice n modulation values are required")
+            modulation = jnp.asarray(ice_n_log_modulation).reshape(
+                (ar_parameters.shape[0], ice_modulation_basis_value.shape[1])
+            )
+            ice_index = (
+                ICE_INDEX_DEFAULT
+                * jnp.exp(modulation @ ice_modulation_basis_value.T)
+            )[:, None, :].astype(jnp.complex128)
+        else:
+            ice_index = jnp.asarray(ICE_INDEX_DEFAULT + 0.0j)
+        if fit_ar_hgcdte_modulation:
+            if (
+                ar_n_log_modulation is None
+                or hgcdte_n_log_modulation is None
+                or hgcdte_k_log_modulation is None
+            ):
+                raise ValueError("AR/HgCdTe modulation values are required")
+            ar_modulation = jnp.exp(
+                jnp.einsum(
+                    "bln,wn->blw",
+                    ar_n_log_modulation,
+                    spectral_modulation_basis_value,
+                )
+            )
+            ar_parameters_reshaped = ar_parameters.reshape(
+                (ar_parameters.shape[0], AR_LAYERS, 3)
+            )
+            ar_index = (
+                ar_parameters_reshaped[:, :, 1, None] * ar_modulation
+                + 1j * ar_parameters_reshaped[:, :, 2, None]
+            )
+            hgcdte_n = base_n[None, :] * jnp.exp(
+                hgcdte_parameters[:, 0, None]
+                + jnp.einsum(
+                    "bn,wn->bw",
+                    hgcdte_n_log_modulation,
+                    spectral_modulation_basis_value,
+                )
+            )
+            hgcdte_k = base_k[None, :] * jnp.exp(
+                hgcdte_parameters[:, 1, None]
+                + jnp.einsum(
+                    "bn,wn->bw",
+                    hgcdte_k_log_modulation,
+                    spectral_modulation_basis_value,
+                )
+            )
+        else:
+            ar_parameters_reshaped = ar_parameters.reshape(
+                (ar_parameters.shape[0], AR_LAYERS, 3)
+            )
+            ar_index = (
+                ar_parameters_reshaped[:, :, 1]
+                + 1j * ar_parameters_reshaped[:, :, 2]
+            )
+            hgcdte_n = base_n[None, :] * jnp.exp(hgcdte_parameters[:, 0, None])
+            hgcdte_k = base_k[None, :] * jnp.exp(hgcdte_parameters[:, 1, None])
         clean_s, coated_s = polarization_response(
-            ar_parameters, hgcdte_parameters, ice_thickness, angle_sine, "s"
+            ar_parameters,
+            hgcdte_n,
+            hgcdte_k,
+            ice_thickness,
+            angle_sine,
+            "s",
+            ice_index,
+            ar_index=ar_index,
         )
         clean_p, coated_p = polarization_response(
-            ar_parameters, hgcdte_parameters, ice_thickness, angle_sine, "p"
+            ar_parameters,
+            hgcdte_n,
+            hgcdte_k,
+            ice_thickness,
+            angle_sine,
+            "p",
+            ice_index,
+            ar_index=ar_index,
         )
         clean = 0.5 * (clean_s + clean_p)
         coated = 0.5 * (coated_s + coated_p)
@@ -684,7 +910,8 @@ def build_prediction_function(data, context):
     counts = jnp.asarray(data["counts"])
     sums = jnp.asarray(data["sums"])
     sum_squared = jnp.asarray(data["sum_squared"])
-    reset_mask = jnp.asarray(np.asarray(data["days"], dtype=float) >= PRODUCTION_RESET_DAY)
+    reset_day = float(data.get("reset_day", PRODUCTION_RESET_DAY))
+    reset_mask = jnp.asarray(np.asarray(data["days"], dtype=float) >= reset_day)
 
     def residual_sum_squares(
         ice_thickness,
@@ -692,10 +919,21 @@ def build_prediction_function(data, context):
         hgcdte_parameters,
         incidence_angle_deg,
         post_reset_tile_log_offsets=None,
+        ice_n_log_modulation=None,
+        ar_n_log_modulation=None,
+        hgcdte_n_log_modulation=None,
+        hgcdte_k_log_modulation=None,
         return_prediction=False,
     ):
         fitted = prediction(
-            ice_thickness, ar_parameters, hgcdte_parameters, incidence_angle_deg
+            ice_thickness,
+            ar_parameters,
+            hgcdte_parameters,
+            incidence_angle_deg,
+            ice_n_log_modulation=ice_n_log_modulation,
+            ar_n_log_modulation=ar_n_log_modulation,
+            hgcdte_n_log_modulation=hgcdte_n_log_modulation,
+            hgcdte_k_log_modulation=hgcdte_k_log_modulation,
         )
         observed = sums / jnp.maximum(counts, 1.0)
         if post_reset_tile_log_offsets is not None:
@@ -715,7 +953,7 @@ def build_prediction_function(data, context):
 def _trajectory_state(data, log_rate_nodes, initial_log, reset_log, jax, jnp):
     days = jnp.asarray(data["days"])
     node_days = jnp.asarray(data["node_days"])
-    reset_day = float(PRODUCTION_RESET_DAY)
+    reset_day = float(data.get("reset_day", PRODUCTION_RESET_DAY))
     integration_times = np.unique(
         np.concatenate(
             (
@@ -763,7 +1001,22 @@ def _trajectory_state(data, log_rate_nodes, initial_log, reset_log, jax, jnp):
     return ice, rates, node_ice, node_rates
 
 
-def _least_squares_prior_residuals(values, data, jnp):
+def _least_squares_prior_residuals(
+    values,
+    data,
+    jnp,
+    *,
+    smoothness_weight=None,
+    entropy_reference_log_rates=None,
+    entropy_weight=0.0,
+    rate_prior_log_mean=None,
+    ice_n_modulation_prior_sigma_log=ICE_N_MODULATION_PRIOR_SIGMA_LOG,
+    ar_mean_prior_sigma=AR_MEAN_PRIOR_SIGMA,
+    fit_ar_hgcdte_modulation=False,
+    ar_hgcdte_modulation_prior_sigma_log=AR_HGCDTE_MODULATION_PRIOR_SIGMA_LOG,
+):
+    if smoothness_weight is None:
+        smoothness_weight = NP_SMOOTHNESS_WEIGHT
     reference, lower, upper = ar_prior_arrays()
     active = ar_active_parameter_indices()
     reference_raw = jnp.asarray(ar_reference_raw(reference, lower, upper, active))
@@ -774,17 +1027,28 @@ def _least_squares_prior_residuals(values, data, jnp):
             ((jnp.asarray(values[name]) - jnp.asarray(center)) / float(scale)).reshape(-1)
         )
 
-    add_normal("ar_tile_raw", reference_raw, AR_MEAN_PRIOR_SIGMA)
+    add_normal("ar_tile_raw", reference_raw, ar_mean_prior_sigma)
     add_normal("initial_thickness_log_nm", np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM), INITIAL_THICKNESS_LOG_SIGMA)
     add_normal("reset_initial_thickness_log_nm", np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM), INITIAL_THICKNESS_LOG_SIGMA)
-    add_normal("np_log_rate_nodes", np.log(TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY), TRAJECTORY_RATE_PRIOR_SIGMA_LOG)
+    if rate_prior_log_mean is None:
+        rate_prior_log_mean = np.log(TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY)
+    add_normal("np_log_rate_nodes", rate_prior_log_mean, TRAJECTORY_RATE_PRIOR_SIGMA_LOG)
     add_normal("post_reset_tile_log_offset", 0.0, POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA)
     add_normal("absolute_hgcdte_n_log_scale", 0.0, ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG)
     add_normal("absolute_hgcdte_k_log_scale", 0.0, ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG)
-    curvature_matrix = rate_curvature_matrix(data["node_days"])
-    curvature = jnp.einsum(
-        "ij,tkj->tki", jnp.asarray(curvature_matrix), jnp.asarray(values["np_log_rate_nodes"])
-    ).reshape(-1)
+    if "ice_n_log_modulation" in values:
+        add_normal(
+            "ice_n_log_modulation",
+            0.0,
+            ice_n_modulation_prior_sigma_log,
+        )
+    if fit_ar_hgcdte_modulation:
+        for name in (
+            "ar_n_log_modulation",
+            "hgcdte_n_log_modulation",
+            "hgcdte_k_log_modulation",
+        ):
+            add_normal(name, 0.0, ar_hgcdte_modulation_prior_sigma_log)
     likelihood_scale = (
         0.5
         * default_likelihood_weight(data["counts"])
@@ -792,17 +1056,67 @@ def _least_squares_prior_residuals(values, data, jnp):
         * float(np.sum(data["sum_squared"]))
         / LOG_NOISE_SIGMA**2
     )
-    residuals.append(
-        curvature
-        * jnp.sqrt(2.0 * likelihood_scale * NP_SMOOTHNESS_WEIGHT / curvature.size)
-    )
+    if smoothness_weight:
+        curvature_matrix = rate_curvature_matrix(data["node_days"])
+        curvature = jnp.einsum(
+            "ij,tkj->tki", jnp.asarray(curvature_matrix), jnp.asarray(values["np_log_rate_nodes"])
+        ).reshape(-1)
+        residuals.append(
+            curvature
+            * jnp.sqrt(2.0 * likelihood_scale * smoothness_weight / curvature.size)
+        )
+    if entropy_reference_log_rates is not None and entropy_weight:
+        entropy_reference_log_rates = jnp.asarray(entropy_reference_log_rates)
+        entropy_residual = _signed_entropy_residual(
+            jnp.asarray(values["np_log_rate_nodes"]),
+            entropy_reference_log_rates,
+            jnp,
+        ).reshape(-1)
+        residuals.append(
+            entropy_residual
+            * jnp.sqrt(likelihood_scale * entropy_weight / entropy_residual.size)
+        )
     return jnp.concatenate(residuals)
 
 
-def build_model(data, context):
-    """Build the fixed independent-tile NumPyro density."""
+def build_model(
+    data,
+    context,
+    *,
+    smoothness_weight=None,
+    entropy_reference_log_rates=None,
+    entropy_weight=0.0,
+    rate_prior_log_mean=None,
+    constant_rate=False,
+    fit_ice_n_modulation=False,
+    ice_n_modulation_prior_sigma_log=ICE_N_MODULATION_PRIOR_SIGMA_LOG,
+    ar_mean_prior_sigma=AR_MEAN_PRIOR_SIGMA,
+    fit_ar_hgcdte_modulation=False,
+    ar_hgcdte_modulation_prior_sigma_log=AR_HGCDTE_MODULATION_PRIOR_SIGMA_LOG,
+):
+    """Build the independent-tile NumPyro density.
+
+    The default arguments preserve the legacy curvature-regularized model.
+    Production MaxEnt fits pass the regularization arguments explicitly.
+    """
     if not context.get("absolute_substrate_power", False):
         raise ValueError("Production requires an absolute-power response context")
+    if smoothness_weight is None:
+        smoothness_weight = NP_SMOOTHNESS_WEIGHT
+    if smoothness_weight < 0.0 or entropy_weight < 0.0:
+        raise ValueError("Regularization weights must be non-negative")
+    if (
+        not np.isfinite(ice_n_modulation_prior_sigma_log)
+        or ice_n_modulation_prior_sigma_log <= 0.0
+    ):
+        raise ValueError("Ice n modulation prior sigma must be positive and finite")
+    if (
+        not np.isfinite(ar_hgcdte_modulation_prior_sigma_log)
+        or ar_hgcdte_modulation_prior_sigma_log <= 0.0
+    ):
+        raise ValueError(
+            "AR/HgCdTe modulation prior sigma must be positive and finite"
+        )
     jax, jnp, numpyro, dist = require_numpyro()
     likelihood_weight = default_likelihood_weight(data["counts"])
     data = dict(data)
@@ -811,6 +1125,26 @@ def build_model(data, context):
     n_scas = data["n_scas"]
     n_tiles = data["n_tiles"]
     n_nodes = len(data["node_days"])
+    rate_prior_shape = (n_scas, n_tiles, n_nodes)
+    if rate_prior_log_mean is None:
+        rate_prior_log_mean = np.full(
+            rate_prior_shape,
+            np.log(TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY),
+            dtype=float,
+        )
+    else:
+        rate_prior_log_mean = np.broadcast_to(
+            np.asarray(rate_prior_log_mean, dtype=float), rate_prior_shape
+        ).copy()
+    if np.any(~np.isfinite(rate_prior_log_mean)):
+        raise ValueError("Trajectory-rate prior means must be finite")
+    if entropy_reference_log_rates is not None:
+        entropy_reference_log_rates = np.broadcast_to(
+            np.asarray(entropy_reference_log_rates, dtype=float), rate_prior_shape
+        ).copy()
+        if np.any(~np.isfinite(entropy_reference_log_rates)):
+            raise ValueError("Entropy reference rates must be finite")
+    reset_day = float(data.get("reset_day", PRODUCTION_RESET_DAY))
     n_rows = n_scas * n_tiles
     if n_rows != np.asarray(data["counts"]).shape[0]:
         raise ValueError("Tile statistics do not match the SCA/tile layout")
@@ -821,7 +1155,12 @@ def build_model(data, context):
         ar_prior_arrays()[2],
         active,
     )
-    predictor = build_prediction_function(data, context)
+    predictor = build_prediction_function(
+        data,
+        context,
+        fit_ice_n_modulation=fit_ice_n_modulation,
+        fit_ar_hgcdte_modulation=fit_ar_hgcdte_modulation,
+    )
     curvature_matrix = jnp.asarray(rate_curvature_matrix(data["node_days"]))
     likelihood_scale = (
         0.5
@@ -831,11 +1170,19 @@ def build_model(data, context):
         / LOG_NOISE_SIGMA**2
     )
 
+    def rate_nodes_from_values(values):
+        if constant_rate:
+            return jnp.broadcast_to(
+                values["log_rate_scale"][..., None],
+                rate_prior_shape,
+            )
+        return values["np_log_rate_nodes"]
+
     def state_from_values(values):
         ar_parameters = _physical_ar_parameters(values["ar_tile_raw"], jax, jnp)
         ice, rates, node_ice, node_rates = _trajectory_state(
             data,
-            values["np_log_rate_nodes"],
+            rate_nodes_from_values(values),
             values["initial_thickness_log_nm"],
             values["reset_initial_thickness_log_nm"],
             jax,
@@ -852,6 +1199,32 @@ def build_model(data, context):
             hgcdte,
             values["incidence_angle_deg"],
             post_reset_tile_log_offsets=values["post_reset_tile_log_offset"].reshape(-1),
+            ice_n_log_modulation=(
+                values["ice_n_log_modulation"]
+                if fit_ice_n_modulation
+                else None
+            ),
+            ar_n_log_modulation=(
+                values["ar_n_log_modulation"].reshape(
+                    (n_rows, AR_LAYERS, len(ICE_N_MODULATION_NODE_WAVELENGTHS_NM))
+                )
+                if fit_ar_hgcdte_modulation
+                else None
+            ),
+            hgcdte_n_log_modulation=(
+                values["hgcdte_n_log_modulation"].reshape(
+                    (n_rows, len(ICE_N_MODULATION_NODE_WAVELENGTHS_NM))
+                )
+                if fit_ar_hgcdte_modulation
+                else None
+            ),
+            hgcdte_k_log_modulation=(
+                values["hgcdte_k_log_modulation"].reshape(
+                    (n_rows, len(ICE_N_MODULATION_NODE_WAVELENGTHS_NM))
+                )
+                if fit_ar_hgcdte_modulation
+                else None
+            ),
             return_prediction=True,
         )
         return {
@@ -869,7 +1242,7 @@ def build_model(data, context):
         state = state_from_values(values)
         counts = jnp.asarray(data["counts"])
         observed = jnp.asarray(data["sums"]) / jnp.maximum(counts, 1.0)
-        post_mask = jnp.asarray(np.asarray(data["days"]) >= PRODUCTION_RESET_DAY)
+        post_mask = jnp.asarray(np.asarray(data["days"]) >= reset_day)
         observed = observed + (
             jnp.asarray(values["post_reset_tile_log_offset"]).reshape(-1, 1)
             * post_mask[None, :]
@@ -880,14 +1253,30 @@ def build_model(data, context):
             * jnp.sqrt(counts)
             * (state["prediction"] - observed)
         ).reshape(-1)
-        prior_residual = _least_squares_prior_residuals(values, data, jnp)
+        prior_values = values
+        if constant_rate:
+            prior_values = dict(values)
+            prior_values["np_log_rate_nodes"] = rate_nodes_from_values(values)
+        prior_residual = _least_squares_prior_residuals(
+            prior_values,
+            data,
+            jnp,
+            smoothness_weight=smoothness_weight,
+            entropy_reference_log_rates=entropy_reference_log_rates,
+            entropy_weight=entropy_weight,
+            rate_prior_log_mean=rate_prior_log_mean,
+            ice_n_modulation_prior_sigma_log=ice_n_modulation_prior_sigma_log,
+            ar_mean_prior_sigma=ar_mean_prior_sigma,
+            fit_ar_hgcdte_modulation=fit_ar_hgcdte_modulation,
+            ar_hgcdte_modulation_prior_sigma_log=ar_hgcdte_modulation_prior_sigma_log,
+        )
         return jnp.concatenate((data_residual, prior_residual))
 
     def model():
         values = {
             "ar_tile_raw": numpyro.sample(
                 "ar_tile_raw",
-                dist.Normal(jnp.asarray(reference_raw), AR_MEAN_PRIOR_SIGMA)
+                dist.Normal(jnp.asarray(reference_raw), ar_mean_prior_sigma)
                 .expand((n_scas, n_tiles, len(active)))
                 .to_event(3),
             ),
@@ -905,15 +1294,6 @@ def build_model(data, context):
             ),
             "incidence_angle_deg": numpyro.sample(
                 "incidence_angle_deg", dist.Uniform(0.0, INCIDENCE_ANGLE_MAX_DEG)
-            ),
-            "np_log_rate_nodes": numpyro.sample(
-                "np_log_rate_nodes",
-                dist.Normal(
-                    np.log(TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY),
-                    TRAJECTORY_RATE_PRIOR_SIGMA_LOG,
-                )
-                .expand((n_scas, n_tiles, n_nodes))
-                .to_event(3),
             ),
             "post_reset_tile_log_offset": numpyro.sample(
                 "post_reset_tile_log_offset",
@@ -934,6 +1314,71 @@ def build_model(data, context):
                 .to_event(2),
             ),
         }
+        if constant_rate:
+            values["log_rate_scale"] = numpyro.sample(
+                "log_rate_scale",
+                dist.Normal(
+                    jnp.asarray(rate_prior_log_mean[..., 0]),
+                    TRAJECTORY_RATE_PRIOR_SIGMA_LOG,
+                ).to_event(2),
+            )
+        else:
+            values["np_log_rate_nodes"] = numpyro.sample(
+                "np_log_rate_nodes",
+                dist.Normal(
+                    jnp.asarray(rate_prior_log_mean),
+                    TRAJECTORY_RATE_PRIOR_SIGMA_LOG,
+                ).to_event(3),
+            )
+        if fit_ice_n_modulation:
+            values["ice_n_log_modulation"] = numpyro.sample(
+                "ice_n_log_modulation",
+                dist.Normal(0.0, ice_n_modulation_prior_sigma_log)
+                .expand(
+                    (
+                        n_scas,
+                        n_tiles,
+                        len(ICE_N_MODULATION_NODE_WAVELENGTHS_NM),
+                    )
+                )
+                .to_event(3),
+            )
+        if fit_ar_hgcdte_modulation:
+            values["ar_n_log_modulation"] = numpyro.sample(
+                "ar_n_log_modulation",
+                dist.Normal(
+                    0.0,
+                    ar_hgcdte_modulation_prior_sigma_log,
+                )
+                .expand(
+                    (
+                        n_scas,
+                        n_tiles,
+                        AR_LAYERS,
+                        len(ICE_N_MODULATION_NODE_WAVELENGTHS_NM),
+                    )
+                )
+                .to_event(4),
+            )
+            for name in (
+                "hgcdte_n_log_modulation",
+                "hgcdte_k_log_modulation",
+            ):
+                values[name] = numpyro.sample(
+                    name,
+                    dist.Normal(
+                        0.0,
+                        ar_hgcdte_modulation_prior_sigma_log,
+                    )
+                    .expand(
+                        (
+                            n_scas,
+                            n_tiles,
+                            len(ICE_N_MODULATION_NODE_WAVELENGTHS_NM),
+                        )
+                    )
+                    .to_event(3),
+                )
         state = state_from_values(values)
         numpyro.factor(
             "tile_gaussian_log_likelihood",
@@ -943,14 +1388,32 @@ def build_model(data, context):
             * state["total_sse"]
             / LOG_NOISE_SIGMA**2,
         )
-        curvature = jnp.einsum("ij,tkj->tki", curvature_matrix, values["np_log_rate_nodes"])
-        numpyro.factor(
-            "trajectory_curvature",
-            -likelihood_scale * NP_SMOOTHNESS_WEIGHT * jnp.mean(curvature**2),
-        )
+        if smoothness_weight:
+            curvature = jnp.einsum(
+                "ij,tkj->tki", curvature_matrix, rate_nodes_from_values(values)
+            )
+            numpyro.factor(
+                "trajectory_curvature",
+                -likelihood_scale * smoothness_weight * jnp.mean(curvature**2),
+            )
+        if entropy_reference_log_rates is not None and entropy_weight:
+            entropy = _relative_entropy(
+                rate_nodes_from_values(values),
+                jnp.asarray(entropy_reference_log_rates),
+                jnp,
+            )
+            numpyro.factor(
+                "trajectory_entropy",
+                -likelihood_scale * entropy_weight * jnp.mean(entropy),
+            )
         for name, value in state.items():
             if name not in ("total_sse", "prediction"):
                 numpyro.deterministic(name, value)
+        if fit_ice_n_modulation:
+            numpyro.deterministic(
+                "ice_n_modulation",
+                jnp.exp(values["ice_n_log_modulation"]),
+            )
         numpyro.deterministic("_map_least_squares_prediction", state["prediction"])
         numpyro.deterministic("ice_thickness", state["ice"])
         numpyro.deterministic("instantaneous_rate_nm_day", state["rates"])
@@ -958,7 +1421,10 @@ def build_model(data, context):
         numpyro.deterministic("node_instantaneous_rate_nm_day", state["node_rates"])
         numpyro.deterministic(
             "np_node_multipliers",
-            jnp.exp(values["np_log_rate_nodes"] - np.log(TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY)),
+            jnp.exp(
+                rate_nodes_from_values(values)
+                - np.log(TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY)
+            ),
         )
         numpyro.deterministic("tile_ice_thickness", state["ice"].reshape((n_scas, n_tiles, -1)))
         numpyro.deterministic("tile_instantaneous_rate_nm_day", state["rates"].reshape((n_scas, n_tiles, -1)))
@@ -984,35 +1450,76 @@ def build_model(data, context):
     return model
 
 
-def initial_values_for_data(data):
+def initial_values_for_data(
+    data,
+    constant_rate=False,
+    fit_ice_n_modulation=False,
+    fit_ar_hgcdte_modulation=False,
+):
     active = ar_active_parameter_indices()
     reference_raw = ar_reference_raw(*ar_prior_arrays(), active)
     shape = (int(data["n_scas"]), int(data["n_tiles"]))
-    return {
+    values = {
         "ar_tile_raw": np.broadcast_to(reference_raw, shape + (len(active),)).copy(),
         "initial_thickness_log_nm": np.full(shape, np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM)),
         "reset_initial_thickness_log_nm": np.full(shape, np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM)),
         "incidence_angle_deg": float(INCIDENCE_ANGLE_INIT_DEG),
-        "np_log_rate_nodes": np.full(
-            shape + (len(data["node_days"]),),
-            np.log(TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY),
-        ),
         "post_reset_tile_log_offset": np.zeros(shape),
         "absolute_hgcdte_n_log_scale": np.zeros(shape),
         "absolute_hgcdte_k_log_scale": np.zeros(shape),
     }
+    if constant_rate:
+        values["log_rate_scale"] = np.full(
+            shape,
+            np.log(TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY),
+        )
+    else:
+        values["np_log_rate_nodes"] = np.full(
+            shape + (len(data["node_days"]),),
+            np.log(TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY),
+        )
+    if fit_ice_n_modulation:
+        values["ice_n_log_modulation"] = np.zeros(
+            shape + (len(ICE_N_MODULATION_NODE_WAVELENGTHS_NM),)
+        )
+    if fit_ar_hgcdte_modulation:
+        values["ar_n_log_modulation"] = np.zeros(
+            shape
+            + (
+                AR_LAYERS,
+                len(ICE_N_MODULATION_NODE_WAVELENGTHS_NM),
+            )
+        )
+        for name in (
+            "hgcdte_n_log_modulation",
+            "hgcdte_k_log_modulation",
+        ):
+            values[name] = np.zeros(
+                shape + (len(ICE_N_MODULATION_NODE_WAVELENGTHS_NM),)
+            )
+    return values
 
 
-def map_parameter_scale_values(initial_values):
+def map_parameter_scale_values(
+    initial_values,
+    ice_n_modulation_prior_sigma_log=ICE_N_MODULATION_PRIOR_SIGMA_LOG,
+    ar_mean_prior_sigma=AR_MEAN_PRIOR_SIGMA,
+    ar_hgcdte_modulation_prior_sigma_log=AR_HGCDTE_MODULATION_PRIOR_SIGMA_LOG,
+):
     scales = {
-        "ar_tile_raw": AR_MEAN_PRIOR_SIGMA,
+        "ar_tile_raw": ar_mean_prior_sigma,
         "initial_thickness_log_nm": INITIAL_THICKNESS_LOG_SIGMA,
         "reset_initial_thickness_log_nm": INITIAL_THICKNESS_LOG_SIGMA,
         "incidence_angle_deg": INCIDENCE_ANGLE_MAX_DEG,
         "np_log_rate_nodes": TRAJECTORY_RATE_PRIOR_SIGMA_LOG,
+        "log_rate_scale": TRAJECTORY_RATE_PRIOR_SIGMA_LOG,
         "post_reset_tile_log_offset": POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA,
         "absolute_hgcdte_n_log_scale": ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG,
         "absolute_hgcdte_k_log_scale": ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG,
+        "ice_n_log_modulation": ice_n_modulation_prior_sigma_log,
+        "ar_n_log_modulation": ar_hgcdte_modulation_prior_sigma_log,
+        "hgcdte_n_log_modulation": ar_hgcdte_modulation_prior_sigma_log,
+        "hgcdte_k_log_modulation": ar_hgcdte_modulation_prior_sigma_log,
     }
     return {
         name: np.full(np.asarray(value).shape, float(scales[name]))
@@ -1043,6 +1550,9 @@ def run_least_squares_map_optimization(
     initial_values,
     jax,
     tolerance=1.0e-9,
+    ice_n_modulation_prior_sigma_log=ICE_N_MODULATION_PRIOR_SIGMA_LOG,
+    ar_mean_prior_sigma=AR_MEAN_PRIOR_SIGMA,
+    ar_hgcdte_modulation_prior_sigma_log=AR_HGCDTE_MODULATION_PRIOR_SIGMA_LOG,
 ):
     """Run the only production MAP optimizer in prior-width coordinates."""
     from jax.flatten_util import ravel_pytree
@@ -1050,7 +1560,12 @@ def run_least_squares_map_optimization(
 
     flat_initial, unravel, flat_lower, flat_upper = map_parameter_bounds(initial_values, jax)
     flat_initial = np.asarray(flat_initial, dtype=float)
-    parameter_scales = map_parameter_scale_values(initial_values)
+    parameter_scales = map_parameter_scale_values(
+        initial_values,
+        ice_n_modulation_prior_sigma_log=ice_n_modulation_prior_sigma_log,
+        ar_mean_prior_sigma=ar_mean_prior_sigma,
+        ar_hgcdte_modulation_prior_sigma_log=ar_hgcdte_modulation_prior_sigma_log,
+    )
     scale_pytree = {
         name: jax.numpy.asarray(np.broadcast_to(parameter_scales[name], np.asarray(value).shape))
         for name, value in initial_values.items()
@@ -1084,11 +1599,11 @@ def run_least_squares_map_optimization(
         bounds=(scaled_lower, scaled_upper),
         method="trf",
         x_scale=1.0,
-        ftol=None,
-        xtol=None,
+        ftol=PRODUCTION_MAP_FTOL,
+        xtol=PRODUCTION_MAP_XTOL,
         gtol=float(tolerance),
         max_nfev=PRODUCTION_MAP_STEPS,
-        verbose=0,
+        verbose=2,
     )
     optimized_scaled = np.asarray(result.x, dtype=float)
     optimized_flat = flat_initial + flat_scales * optimized_scaled
@@ -1108,15 +1623,20 @@ def run_least_squares_map_optimization(
     final_objective = float(
         -log_density(model, (), {}, unravel(jax.numpy.asarray(optimized_flat)))[0]
     )
+    gradient_converged = bool(scaled_gradient_norm <= tolerance)
     diagnostics = {
         "optimizer": "scipy least_squares",
-        "converged": bool(result.success and scaled_gradient_norm <= tolerance),
+        "converged": bool(result.success),
+        "gradient_converged": gradient_converged,
         "status": int(result.status),
         "message": str(result.message),
         "iterations": int(result.nfev),
         "function_evaluations": int(result.nfev),
         "gradient_norm": float(np.max(np.abs(scaled_gradient / flat_scales))),
         "scaled_gradient_norm": scaled_gradient_norm,
+        "function_tolerance": float(PRODUCTION_MAP_FTOL),
+        "step_tolerance": float(PRODUCTION_MAP_XTOL),
+        "gradient_tolerance": float(tolerance),
         "objective": final_objective,
         "initial_objective": initial_objective,
         "parameter_step_norm": float(np.linalg.norm(optimized_flat - flat_initial)),
@@ -1148,12 +1668,21 @@ def load_map_warm_start(
             raise ValueError("EMCEE warm-start detector does not match the target tile")
         transferred = dict(initial_values)
         for name, target in initial_values.items():
-            if name not in samples:
+            source_name = name
+            if name == "log_rate_scale" and name not in samples:
+                source_name = "np_log_rate_nodes"
+            if source_name not in samples:
                 continue
             target_array = np.asarray(target)
-            value = np.asarray(samples[name], dtype=float)
-            while value.ndim > target_array.ndim and value.shape[0] == 1:
-                value = value[0]
+            value = np.asarray(samples[source_name], dtype=float)
+            if name == "log_rate_scale" and source_name == "np_log_rate_nodes":
+                while value.ndim > target_array.ndim + 1 and value.shape[0] == 1:
+                    value = value[0]
+                if value.ndim == target_array.ndim + 1:
+                    value = value[..., 0]
+            else:
+                while value.ndim > target_array.ndim and value.shape[0] == 1:
+                    value = value[0]
             if value.shape == target_array.shape:
                 transferred[name] = value.copy()
             elif (
@@ -1174,6 +1703,64 @@ def _evaluate_model(model, values):
         for name, site in traced.items()
         if site["type"] in ("sample", "deterministic")
     }
+
+
+def fit_map_state(config):
+    """Fit a map and return its state without writing production outputs."""
+    jax, _, _, _ = require_numpyro()
+    jax.config.update("jax_enable_x64", True)
+    data = load_tile_statistics(config.tile_statistics)
+    context = load_response_context(data["sca_names"])
+    data["qe_columns"] = context["qe_columns"]
+    data["response_wavelengths_nm"] = context["wavelengths"]
+    data["response_wavelength_count"] = int(context["wavelengths"].size)
+    initial_values = initial_values_for_data(
+        data,
+        constant_rate=config.constant_rate,
+        fit_ice_n_modulation=config.fit_ice_n_modulation,
+        fit_ar_hgcdte_modulation=config.fit_ar_hgcdte_modulation,
+    )
+    if config.map_init_from is not None:
+        initial_values = load_map_warm_start(config.map_init_from, initial_values, data)
+    if config.map_initial_values is not None:
+        for name, value in config.map_initial_values.items():
+            if name not in initial_values:
+                raise ValueError(f"Unknown MAP initial-value site: {name}")
+            value = np.asarray(value, dtype=float)
+            if value.shape != np.asarray(initial_values[name]).shape:
+                raise ValueError(
+                    f"MAP initial-value shape mismatch for {name}: "
+                    f"{value.shape} != {np.asarray(initial_values[name]).shape}"
+                )
+            initial_values[name] = value.copy()
+    model = build_model(
+        data,
+        context,
+        smoothness_weight=config.smoothness_weight,
+        entropy_reference_log_rates=config.entropy_reference_log_rates,
+        entropy_weight=config.entropy_weight,
+        rate_prior_log_mean=config.rate_prior_log_mean,
+        constant_rate=config.constant_rate,
+        fit_ice_n_modulation=config.fit_ice_n_modulation,
+        ice_n_modulation_prior_sigma_log=config.ice_n_modulation_prior_sigma_log,
+        ar_mean_prior_sigma=config.ar_mean_prior_sigma,
+        fit_ar_hgcdte_modulation=config.fit_ar_hgcdte_modulation,
+        ar_hgcdte_modulation_prior_sigma_log=(
+            config.ar_hgcdte_modulation_prior_sigma_log
+        ),
+    )
+    map_values, diagnostics = run_least_squares_map_optimization(
+        model,
+        initial_values,
+        jax,
+        ice_n_modulation_prior_sigma_log=config.ice_n_modulation_prior_sigma_log,
+        ar_mean_prior_sigma=config.ar_mean_prior_sigma,
+        ar_hgcdte_modulation_prior_sigma_log=(
+            config.ar_hgcdte_modulation_prior_sigma_log
+        ),
+    )
+    evaluated = _evaluate_model(model, map_values)
+    return data, context, map_values, diagnostics, evaluated
 
 
 def ar_quantile_fields():
@@ -1202,6 +1789,7 @@ def write_outputs(
     statistics_path,
     diagnostics,
     fit_diagnostics,
+    model_metadata=None,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
     samples = {
@@ -1227,6 +1815,7 @@ def write_outputs(
         "observation_days": np.asarray(data["days"], dtype=float),
         "observation_led": np.asarray(data["led"], dtype=int),
         "observation_repeat": np.asarray(data["repeat"], dtype=int),
+        "observation_program": np.asarray(data.get("program", []), dtype=int),
         "groups": np.asarray(data["groups"], dtype=int),
         "ar_layers": np.asarray(AR_LAYERS),
         "absolute_substrate_power": np.asarray(1),
@@ -1242,7 +1831,7 @@ def write_outputs(
         "tile_initial_thickness_lognormal": np.asarray(1),
         "tile_initial_thickness_log_median_nm": np.asarray(INITIAL_THICKNESS_LOG_MEDIAN_NM),
         "tile_initial_thickness_log_sigma": np.asarray(INITIAL_THICKNESS_LOG_SIGMA),
-        "ice_reset_day": np.asarray(PRODUCTION_RESET_DAY),
+        "ice_reset_day": np.asarray(float(data.get("reset_day", PRODUCTION_RESET_DAY))),
         "fit_post_reset_tile_log_offset": np.asarray(1),
         "post_reset_tile_log_offset_prior_sigma": np.asarray(POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA),
         "fit_incidence_angle": np.asarray(1),
@@ -1251,7 +1840,14 @@ def write_outputs(
         "map_optimizer": np.asarray("least-squares"),
         "map_steps": np.asarray(PRODUCTION_MAP_STEPS),
         "map_parameter_scaling": np.asarray("prior"),
+        "map_function_tolerance": np.asarray(diagnostics["function_tolerance"]),
+        "map_step_tolerance": np.asarray(diagnostics["step_tolerance"]),
+        "map_gradient_tolerance": np.asarray(diagnostics["gradient_tolerance"]),
+        "map_gradient_converged": np.asarray(int(diagnostics["gradient_converged"])),
     }
+    for name, value in (model_metadata or {}).items():
+        if value is not None:
+            metadata[str(name)] = np.asarray(value)
     np.savez_compressed(output_dir / "posterior_samples.npz", **samples, **metadata)
 
     observed = np.asarray(fit_diagnostics["observed"], dtype=float)
@@ -1373,9 +1969,16 @@ def write_outputs(
             f"- Evaluations: `{diagnostics['function_evaluations']}`.",
             f"- Objective: `{diagnostics['objective']:.10g}`.",
             f"- Converged: `{diagnostics['converged']}`.",
+            f"- Strict gradient convergence: `{diagnostics['gradient_converged']}`.",
+            f"- Function/step/gradient tolerances: `{diagnostics['function_tolerance']}` / `{diagnostics['step_tolerance']}` / `{diagnostics['gradient_tolerance']}`.",
+            f"- Termination: `{diagnostics['message']}`.",
+            f"- Ice reset day: `{float(data.get('reset_day', PRODUCTION_RESET_DAY))}` (input Program 1063 boundary when available).",
             f"- SED weighting: `energy`.",
             f"- Initial-thickness prior: median `{INITIAL_THICKNESS_LOG_MEDIAN_NM}` nm, log sigma `{INITIAL_THICKNESS_LOG_SIGMA}`.",
             f"- Trajectory prior: `{TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY}` nm/day, log sigma `{TRAJECTORY_RATE_PRIOR_SIGMA_LOG}`.",
+            f"- Trajectory regularization: `{(model_metadata or {}).get('trajectory_regularization', 'curvature')}`.",
+            f"- Trajectory curvature weight: `{(model_metadata or {}).get('trajectory_smoothness_weight', NP_SMOOTHNESS_WEIGHT)}`.",
+            f"- Trajectory entropy weight: `{(model_metadata or {}).get('trajectory_entropy_weight', 0.0)}`.",
             f"- HgCdTe n/k scale prior sigma: `{ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG}`.",
             "- Corrections: already applied in the input statistics; no correction table used.",
             "",
@@ -1386,26 +1989,10 @@ def write_outputs(
 
 def fit_one(config):
     run_start = time.perf_counter()
-    jax, _, _, _ = require_numpyro()
-    jax.config.update("jax_enable_x64", True)
-    data = load_tile_statistics(config.tile_statistics)
-    context = load_response_context(data["sca_names"])
-    data["qe_columns"] = context["qe_columns"]
-    data["response_wavelengths_nm"] = context["wavelengths"]
-    data["response_wavelength_count"] = int(context["wavelengths"].size)
-    initial_values = initial_values_for_data(data)
-    if config.map_init_from is not None:
-        initial_values = load_map_warm_start(config.map_init_from, initial_values, data)
-    model = build_model(data, context)
-    map_values, diagnostics = run_least_squares_map_optimization(
-        model,
-        initial_values,
-        jax,
-    )
-    evaluated = _evaluate_model(model, map_values)
+    data, _, map_values, diagnostics, evaluated = fit_map_state(config)
     observed = np.asarray(data["sums"], dtype=float) / np.asarray(data["counts"], dtype=float)
     observed += np.asarray(map_values["post_reset_tile_log_offset"]).reshape(-1, 1) * (
-        np.asarray(data["days"])[None, :] >= PRODUCTION_RESET_DAY
+        np.asarray(data["days"])[None, :] >= float(data.get("reset_day", PRODUCTION_RESET_DAY))
     )
     fit_diagnostics = {
         "observed": observed,
@@ -1418,6 +2005,7 @@ def fit_one(config):
         config.tile_statistics,
         diagnostics,
         fit_diagnostics,
+        config.model_metadata,
     )
     print(
         f"Wrote {config.output_dir} in {time.perf_counter() - run_start:.2f}s",

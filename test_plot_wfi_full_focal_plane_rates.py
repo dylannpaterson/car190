@@ -5,7 +5,11 @@ from pathlib import Path
 
 import numpy as np
 
-from plot_wfi_full_focal_plane_rates import load_rate_map, sca_position
+from plot_wfi_full_focal_plane_rates import (
+    load_rate_map,
+    load_reset_rate_values,
+    sca_position,
+)
 
 
 class TestWfiFocalPlaneOrientation(unittest.TestCase):
@@ -50,6 +54,31 @@ class TestWfiFocalPlaneOrientation(unittest.TestCase):
         self.assertEqual(sca_position("WFI01"), (27.0, 12.0))
         self.assertEqual(sca_position("WFI03"), (27.0, -6.0))
         self.assertEqual(sca_position("WFI07"), (45.0, 18.0))
+
+    def test_reset_rates_use_endpoint_thickness_difference(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "posterior_samples.npz"
+            np.savez(
+                path,
+                observation_days=np.asarray([0.0, 1.0, 2.0, 4.0, 5.0, 6.0]),
+                ice_reset_day=np.asarray([3.0]),
+                tile_ids=np.asarray([0, 1]),
+                tile_ice_thickness=np.asarray(
+                    [
+                        [
+                            [1.0, 3.0, 5.0, 2.0, 4.0, 8.0],
+                            [2.0, 4.0, 8.0, 4.0, 7.0, 13.0],
+                        ]
+                    ]
+                ),
+            )
+
+            tile_ids, pre_values, post_values, reset_day = load_reset_rate_values(path)
+
+            np.testing.assert_array_equal(tile_ids, [0, 1])
+            np.testing.assert_allclose(pre_values, [2.0, 3.0])
+            np.testing.assert_allclose(post_values, [3.0, 4.5])
+            self.assertEqual(reset_day, 3.0)
 
 
 if __name__ == "__main__":

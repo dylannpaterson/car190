@@ -22,6 +22,8 @@ class FixedProductionSettingsTests(unittest.TestCase):
         self.assertEqual(production.TRAJECTORY_RATE_PRIOR_SIGMA_LOG, 1.5)
         self.assertEqual(production.ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG, 0.25)
         self.assertEqual(production.PRODUCTION_MAP_STEPS, 10000)
+        self.assertEqual(production.PRODUCTION_MAP_FTOL, 1.0e-9)
+        self.assertEqual(production.PRODUCTION_MAP_XTOL, 1.0e-9)
 
     def test_initial_values_use_direct_independent_tile_sites(self):
         data = {
@@ -87,6 +89,20 @@ class FixedProductionSettingsTests(unittest.TestCase):
 
         self.assertEqual(values["incidence_angle_deg"], 6.25)
 
+    def test_warm_start_reduces_node_rate_archive_to_scalar_rate_site(self):
+        data = {"counts": np.ones((1, 1)), "sums": np.zeros((1, 1)), "sum_squared": np.ones((1, 1))}
+        initial = {"log_rate_scale": np.zeros((1, 1))}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "posterior_samples.npz"
+            np.savez(
+                path,
+                map_only=np.asarray(1),
+                np_log_rate_nodes=np.asarray([[[1.25, 1.25, 1.25]]]),
+            )
+            values = production.load_map_warm_start(path, initial, data)
+
+        np.testing.assert_allclose(values["log_rate_scale"], [[1.25]])
+
     def test_model_exposes_only_fixed_production_latents(self):
         jax, _, _, _ = production.require_numpyro()
         jax.config.update("jax_enable_x64", True)
@@ -132,6 +148,153 @@ class FixedProductionSettingsTests(unittest.TestCase):
         )
         for site in ("ar_mu_raw", "log_trajectory_scale", "complex_q_parameters"):
             self.assertNotIn(site, sites)
+
+    def test_experimental_entropy_regularization_replaces_curvature_factor(self):
+        jax, _, _, _ = production.require_numpyro()
+        jax.config.update("jax_enable_x64", True)
+        data = {
+            "counts": np.ones((1, 6)),
+            "sums": np.zeros((1, 6)),
+            "sum_squared": np.ones((1, 6)),
+            "days": np.asarray([0.0, 0.1, 1.0, 1.1, 2.0, 2.1]),
+            "node_days": np.asarray([0.0, 1.0, 2.0]),
+            "led": np.arange(1, 7),
+            "first_by_led": np.arange(6),
+            "n_scas": 1,
+            "n_tiles": 1,
+            "tile_ids": np.asarray([0]),
+            "sca_index": np.asarray([0]),
+            "sca_names": np.asarray(["WFI01"]),
+            "groups": np.arange(6),
+            "repeat": np.asarray([0, 0, 1, 1, 2, 2]),
+            "metadata": {0: {"tile_row": 0, "tile_col": 0}},
+        }
+        context = {
+            "wavelengths": np.asarray([1000.0]),
+            "model_weights": np.ones((1, 6, 1)),
+            "outside_output": np.zeros((1, 6)),
+            "clean_output": np.ones((1, 6)),
+            "hgcdte_n": np.asarray([3.6]),
+            "hgcdte_k": np.asarray([0.7]),
+            "absolute_substrate_power": True,
+        }
+        model = production.build_model(
+            data,
+            context,
+            smoothness_weight=0.0,
+            entropy_reference_log_rates=np.zeros((1, 1, 3)),
+            entropy_weight=0.1,
+            rate_prior_log_mean=np.zeros((1, 1, 3)),
+        )
+        from numpyro.handlers import seed, trace
+
+        sites = trace(seed(model, jax.random.PRNGKey(103))).get_trace()
+
+        self.assertIn("trajectory_entropy", sites)
+        self.assertNotIn("trajectory_curvature", sites)
+
+    def test_constant_rate_model_replaces_node_rate_site(self):
+        jax, _, _, _ = production.require_numpyro()
+        jax.config.update("jax_enable_x64", True)
+        data = {
+            "counts": np.ones((1, 6)),
+            "sums": np.zeros((1, 6)),
+            "sum_squared": np.ones((1, 6)),
+            "days": np.asarray([0.0, 0.1, 1.0, 1.1, 2.0, 2.1]),
+            "node_days": np.asarray([0.0, 1.0, 2.0]),
+            "led": np.arange(1, 7),
+            "first_by_led": np.arange(6),
+            "n_scas": 1,
+            "n_tiles": 1,
+            "tile_ids": np.asarray([0]),
+            "sca_index": np.asarray([0]),
+            "sca_names": np.asarray(["WFI01"]),
+            "groups": np.arange(6),
+            "repeat": np.asarray([0, 0, 1, 1, 2, 2]),
+            "metadata": {0: {"tile_row": 0, "tile_col": 0}},
+        }
+        context = {
+            "wavelengths": np.asarray([1000.0]),
+            "model_weights": np.ones((1, 6, 1)),
+            "outside_output": np.zeros((1, 6)),
+            "clean_output": np.ones((1, 6)),
+            "hgcdte_n": np.asarray([3.6]),
+            "hgcdte_k": np.asarray([0.7]),
+            "absolute_substrate_power": True,
+        }
+        model = production.build_model(data, context, constant_rate=True)
+        initial = production.initial_values_for_data(data, constant_rate=True)
+        self.assertIn("log_rate_scale", initial)
+        self.assertNotIn("np_log_rate_nodes", initial)
+        from numpyro.handlers import seed, trace
+
+        sites = trace(seed(model, jax.random.PRNGKey(104))).get_trace()
+
+        self.assertEqual(sites["log_rate_scale"]["value"].shape, (1, 1))
+        self.assertNotIn("np_log_rate_nodes", sites)
+
+    def test_ice_n_modulation_basis_is_normalized(self):
+        basis = production.ice_n_modulation_basis(
+            np.asarray([600.0, 1000.0, 1600.0])
+        )
+        self.assertEqual(
+            basis.shape,
+            (3, len(production.ICE_N_MODULATION_NODE_WAVELENGTHS_NM)),
+        )
+        np.testing.assert_allclose(np.sum(basis, axis=1), 1.0)
+
+    def test_spectral_modulation_basis_is_anchored(self):
+        basis = production.spectral_modulation_basis(
+            np.asarray([600.0, production.AR_HGCDTE_MODULATION_ANCHOR_NM, 1600.0])
+        )
+        np.testing.assert_allclose(basis[1], 0.0)
+
+    def test_constant_rate_model_can_add_ice_n_modulation(self):
+        jax, _, _, _ = production.require_numpyro()
+        jax.config.update("jax_enable_x64", True)
+        data = {
+            "counts": np.ones((1, 6)),
+            "sums": np.zeros((1, 6)),
+            "sum_squared": np.ones((1, 6)),
+            "days": np.asarray([0.0, 0.1, 1.0, 1.1, 2.0, 2.1]),
+            "node_days": np.asarray([0.0, 1.0, 2.0]),
+            "led": np.arange(1, 7),
+            "first_by_led": np.arange(6),
+            "n_scas": 1,
+            "n_tiles": 1,
+            "tile_ids": np.asarray([0]),
+            "sca_index": np.asarray([0]),
+            "sca_names": np.asarray(["WFI01"]),
+            "groups": np.arange(6),
+            "repeat": np.asarray([0, 0, 1, 1, 2, 2]),
+            "metadata": {0: {"tile_row": 0, "tile_col": 0}},
+        }
+        context = {
+            "wavelengths": np.asarray([1000.0]),
+            "model_weights": np.ones((1, 6, 1)),
+            "outside_output": np.zeros((1, 6)),
+            "clean_output": np.ones((1, 6)),
+            "hgcdte_n": np.asarray([3.6]),
+            "hgcdte_k": np.asarray([0.7]),
+            "ice_n_modulation_basis": np.ones(
+                (1, len(production.ICE_N_MODULATION_NODE_WAVELENGTHS_NM))
+            )
+            / len(production.ICE_N_MODULATION_NODE_WAVELENGTHS_NM),
+            "absolute_substrate_power": True,
+        }
+        model = production.build_model(
+            data,
+            context,
+            constant_rate=True,
+            fit_ice_n_modulation=True,
+        )
+        from numpyro.handlers import seed, trace
+
+        sites = trace(seed(model, jax.random.PRNGKey(105))).get_trace()
+        self.assertEqual(
+            sites["ice_n_log_modulation"]["value"].shape,
+            (1, 1, len(production.ICE_N_MODULATION_NODE_WAVELENGTHS_NM)),
+        )
 
 if __name__ == "__main__":
     unittest.main()

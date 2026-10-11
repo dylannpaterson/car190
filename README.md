@@ -13,11 +13,13 @@ The production model is intentionally fixed and is run through
 - independent positive HgCdTe n/k log scales with prior sigma `0.25`;
 - energy-weighted core SED integration using the pinned local reference files;
 - exactly three independent lossless AR layers and a fitted incidence angle;
-- fixed lossless ice index `n=1.25`, with reset day `15.064405023148149`;
+- fixed lossless ice index `n=1.25`, with the physical reset anchored at the
+  first unified Program 1063 epoch;
 - independent per-tile lognormal initial and reset thickness priors, median `10` nm and log sigma `1.5`;
 - fully non-parametric, unwhitened per-tile trajectories with a `5` nm/day lognormal rate prior;
 - one fitted post-reset log offset per tile, with prior sigma `0.1`;
-- deterministic least-squares MAP optimization in prior-width coordinates for up to `10000` evaluations.
+- deterministic least-squares MAP optimization in prior-width coordinates for up to `10000` evaluations;
+- practical MAP convergence at `1e-9` function-reduction and step tolerances, with strict scaled-gradient convergence reported separately.
 
 The initializer is fixed at 52 walkers, 1,000 steps, seed `20261004`, no
 complex-q parameters, and a constant-in-time accumulation rate. Its best state
@@ -110,9 +112,9 @@ python build_wfi_tile_statistics_stream.py \
   --incremental
 ```
 
-The MAST query defaults to RCS program `1039`; the statistics builder rejects
-indices containing other programs because their partial LED sequences are not
-compatible with the RCS time series.
+These local archive commands retain the older Program 1039-only fixture
+workflow. They are not the production path for the unified Program 1039 plus
+Program 1063 reduction; use the Nexus pipeline below for that reduction.
 
 The MAST token is read from `mast_api_token.txt` in the repository root.
 
@@ -120,53 +122,127 @@ The MAST token is read from `mast_api_token.txt` in the repository root.
 
 On the Nexus, use the one-step pipeline instead of copying products from a
 user-owned CAR190 directory. It lists calibrated ASDF products under the
-CAR190 S3 prefix, refreshes the all-detector MAST index, fetches the PD1
-photodiode telemetry, uses the MAST supplement by default, and writes each run
-below a UTC `YYYYMMDD` directory. Image products are streamed into memory only;
-the pipeline does not create an S3 image cache.
+CAR190 S3 prefix, refreshes one unified all-detector MAST index for Programs
+1039 and 1063, explicitly fetches PD2 photodiode telemetry for each program,
+uses the first non-warm-up dark-subtracted signal per LED as the shared
+reference, uses the MAST supplement by default, and writes each run below a
+UTC `YYYYMMDD` directory.
+Image products are streamed into memory only; the pipeline does not create an
+S3 image cache.
 
-The RRN deployment needs only `run_wfi_reduction_pipeline.py` and the
-repository-root `mast_api_token.txt`; install the base packages in
+The Nexus deployment needs `run_wfi_reduction_pipeline.py`,
+`fit_wfi_side_swap.py`, `wfi_side_swap.py`, and the repository-root
+`mast_api_token.txt`; install the base packages in
 `requirements-wfi01-ice.txt` and the local `roman-mast-tools` checkout
 separately. The standalone script does not import the other reduction modules
 or require local ASDF products, index files, telemetry CSVs, or correction
 CSVs.
 
 ```bash
-./run_wfi_reduction_pipeline.py
+./run_wfi_reduction_pipeline.py --detector WFI01
 ```
 
-There are no setup arguments. The source, output root, detector list, MAST
-token path, MAST supplement, PD1 telemetry channel, tile sizes, and correction
-settings are fixed production defaults. Existing raw statistics are reused by
-file-set name; newly discovered products are streamed and reduced, and changed
+Omit `--detector WFI01` to reduce every WFI detector, or replace it with one
+detector identifier such as `WFI02`. The source, default output root, MAST token
+path, MAST supplement, PD2 telemetry channel, tile sizes, and unified program
+set are fixed production defaults. Only the newest available `raw_statistics/`
+file is reused by file-set name; existing scaled `statistics/` files are never
+used as inputs. Newly discovered products are streamed and reduced, and changed
 or removed source products trigger a safe full rebuild. At most the
 baseline/current image pair for the active LED is held in memory. The only
 statistics output is the `512x512` tile grid, which is 64 tiles per detector.
+Pass `--workers N` to reduce multiple detectors concurrently; each worker has
+its own MAST session and the default remains one worker for conservative
+single-detector operation. For example, use `--workers 18` when reducing the
+full WFI set on a 32-core host.
+
+By default, the pipeline searches the default root for the most recent dated
+`raw_statistics/` output and reuses it by file-set name. Existing scaled
+`statistics/` files are ignored and regenerated with current telemetry and
+corrections. Changes to photodiode telemetry therefore do not force raw image
+reprocessing. Use `--run-root PATH` only when the existing reduction tree is
+outside the repository checkout.
+
+The pre-operational temperature-gain sine is fitted from Program 1039 only
+between the first ACM step (effective repeat `14`) and the pre-reset ACM step
+(effective repeat `35`), excluding both later data and the early day-two
+transient. The previous `15.064405023148149`-day anchor is the
+operational-temperature transition used to partition the ACM fit. The
+post-operational sine starts only
+after the additional ACM event (effective repeat `669` in the 20261009 WFI02
+timeline), after the base ACM correction is applied. The repeat-669 additional
+ACM step and the day-22 step (effective repeat `682` in the 20261009 WFI02
+timeline) are fitted independently for each LED; the other ACM steps remain
+shared grey terms. The post-operational temperature sine ends before day 22;
+the per-LED day-22 step is estimated locally from neighboring reference
+ observations rather than absorbed into that sine. A later day-26 ACM
+ adjustment is mapped to effective repeat `691` and fitted as one shared-grey
+ local step across the LEDs. The physical ice reset is
+the first Program 1063 observation and is recorded per detector in
+`pipeline_manifest.json`. The post-operational sine is applied only to the
+first Program 1063 batch; later Program 1063 batches are outside that
+extrapolation and receive no temperature-dependent gain correction; the
+application cutoff is the operational ACM boundary, not the later sine-fit
+start. The existing pre-operational gain correction remains in the same
+correction table.
 
 Each dated directory contains:
 
-- `statistics/`: raw tile sufficient statistics, including count moments;
-- `corrections/`: fitted count-space gain/ACM correction tables and summaries;
-- `corrected_statistics/`: the same 512-tile statistics with the fitted count
-  correction applied;
-- `telemetry/photodiode_pd1_ice_monitor.csv`: dark-subtracted per-exposure PD1
-  summary produced by `roman-telem --ice-monitor` before reduction;
+- `statistics/`: per-detector side-swap-corrected photodiode-scaled tile
+  sufficient statistics, including count moments;
+- `raw_statistics/`: the same tile statistics computed from truly raw,
+  uncorrected detector counts;
+- `corrections/`: per-detector side-swap calibration files plus fitted
+  count-space gain/ACM correction tables and summaries;
+- `corrected_statistics/`: the photodiode-scaled 512-tile statistics with the
+  fitted count correction applied;
+- `diagnostics/`: scaled-versus-corrected current-count plots for each detector,
+  including LED3 pre- and post-operational temperature-fit diagnostics;
+- `telemetry/`: dark-subtracted per-exposure PD2 summaries fetched separately
+  for Programs 1039 and 1063 by explicit `roman-telem --ice-monitor
+  --ice-program PROGRAM` calls before reduction; the first non-warm-up signal
+  per LED across those summaries is the shared production reference;
 - `pipeline.log`: timestamped phase, detector, and product progress;
 - `all_wfi_rcs_flat_index.csv`: refreshed MAST supplement index;
 - `*_rrn_inventory.csv`: the source products and timestamps used;
 - `pipeline_manifest.json`: source, command, detector, correction, and output
   provenance.
 
-The raw statistics plus the correction table remain the canonical TMM fit
-inputs. Do not pass `*_count_corrected.csv` together with that same correction
-table, or the count correction will be applied twice. The pipeline's
-`*_count_corrected.csv` files are provided as explicitly corrected products for
-inspection and downstream tools that do not apply the table themselves.
+The side-swap-corrected photodiode-scaled statistics plus the count correction
+table remain the canonical count-correction inputs. `raw_statistics/` remains
+truly raw for auditing and independent recalculation. Do not pass `*_count_corrected.csv`
+together with that same correction table, or the count correction will be
+applied twice. The pipeline's `*_count_corrected.csv` files are provided as
+explicitly corrected products for inspection and downstream tools that do not
+apply the table themselves.
 
 The pipeline stops if the root token, MAST index query, telemetry query, or
 MAST supplement cannot be refreshed; it does not silently fall back to a
 partial local-only reduction.
+
+### 1b. Optional Program 1063 cadence thinning
+
+The canonical `corrected_statistics/` files retain every corrected epoch. When
+the high-cadence Program 1063 sequence makes the production trajectory fit
+unnecessarily difficult, create a derived input directory without changing
+those canonical files:
+
+```bash
+.venv/bin/python thin_wfi_statistics.py \
+  --source-dir /path/to/corrected_statistics \
+  --output-dir /path/to/corrected_statistics_program1063_1h \
+  --spacing-hours 1
+```
+
+This copies all Program 1039 rows unchanged and retains complete six-LED
+Program 1063 cycles separated by at least one hour. The output includes
+`program1063_cadence_thinning_manifest.json`, which records the selected
+repeats and row counts. The thinning operates on already corrected sufficient
+statistics; it does not average rows or apply another correction.
+
+Use the derived directory as the input to `run_wfi_production.py` only after
+checking the manifest. The source corrected statistics remain the canonical
+product for auditing and for any analysis that needs the full cadence.
 
 ### 2. Production TMM fit
 
@@ -222,10 +298,49 @@ directory with:
   --reset-day 15.064405023148149
 .venv/bin/python -u plot_wfi_fitted_incidence_angle_mosaic.py \
   --root /path/to/corrected_statistics
+.venv/bin/python -u plot_wfi_post_reset_initial_thickness_mosaic.py \
+  --root /path/to/fit_archive_root
 ```
 
 The incidence-angle command writes
 `production/wfi_fitted_incidence_angle_mosaic.png` below the statistics directory.
+The post-reset initial-thickness command writes
+`production/wfi_post_reset_initial_thickness_mosaic.png` and uses the complete
+current production fit layout before falling back to the complete legacy layout.
+
+### Production prior bundle
+
+Bundle the complete production outputs into one self-describing FITS product:
+
+```bash
+.venv/bin/python -u bundle_wfi_production_prior.py \
+  --statistics-dir /path/to/corrected_statistics \
+  --fit-root /path/to/fit_archive_root
+```
+
+The default output is
+`production/wfi_production_map_prior_bundle.fits` below the statistics directory.
+The primary header and embedded `README`, `MODEL`, and `SCHEMA` extensions define
+the time, position, units, join keys, fit estimator, and provenance. The product
+contains detector positions, zero-based tile pixel bounds, UTC ISO exposure-start
+timestamps, UTC MJD timestamps, relative model days, fitted parameters, fitted
+observation-time trajectories, non-parametric node trajectories, residuals, and
+source/archive checksums. It records MAP point estimates, not posterior
+uncertainties. The bundle exposes both the raw production AR thickness
+coordinates and physical AR thickness in nm; physical thickness is exactly
+`100 * raw_coordinate`.
+
+The `HGCDTE_REFERENCE` extension contains the wavelength-dependent internal
+reference `n` and `k` curve used by the production TMM on its response grid.
+`PARAMETERS.absolute_hgcdte_n` and `absolute_hgcdte_k` contain the reconstructed
+physical per-tile vectors; the corresponding log-scale columns are retained as
+the fitted prior parameters. Reconstruction is
+`n = reference_n * exp(n_log_scale)` and
+`k = reference_k * exp(k_log_scale)`. The bundled reference is the internal
+80 K, `x=0.445` sensitivity model, not a detector-specific validation table.
+The production absolute-substrate-power response does not multiply the
+independent measured QE values; a downstream model using Roman system
+effective area must apply that system response once instead.
 
 The original `fit_wfi_tmm_numpyro.py` remains the exploratory/reproduction
 implementation and is not the production entrypoint.
@@ -444,13 +559,16 @@ the separate legacy output format.
 
 - `build_wfi01_tile_statistics.py`: tile sufficient-statistic calculation;
 - `run_wfi_reduction_pipeline.py`: Nexus S3/MAST streaming, dated reduction,
-  and count-space correction application;
+  per-detector side-swap calibration, and count-space correction application;
+- `fit_wfi_side_swap.py`: detector-local image/photodiode side-swap calibration;
+- `wfi_side_swap.py`: log-space spline-plus-step fitting utilities;
 - `build_wfi_tile_statistics_stream.py`: resumable MAST downloader;
 - `run_wfi_production.py`: fixed all-detector independent-tile production runner;
 - `run_wfi_tmm_emcee_warmup.py`: fixed one-tile EMCEE initializer;
 - `fit_wfi_tmm_production.py`: fixed production TMM model and MAP writer;
 - `fit_wfi_tmm_numpyro.py`: single- and all-SCA TMM model and output writer;
 - `plot_wfi_tmm_numpyro.py`: posterior prediction and plotting;
+- `plot_wfi_post_reset_initial_thickness_mosaic.py`: post-reset initial-thickness focal-plane mosaic;
 - `analyze_rcs_soc_ice_model.py`: shared trajectory and sufficient-statistic utilities;
 - `fit_wfi01_joint_complex_q_soc.py`: response integration and effective-response diagnostics;
 - `fit_wfi01_effective_boundary_numpyro.py`: separate effective-boundary diagnostic;

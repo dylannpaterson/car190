@@ -70,6 +70,54 @@ class ProductionRunnerTests(unittest.TestCase):
         self.assertEqual(fits.parent, output)
         self.assertEqual(emcee, output / "emcee")
 
+    def test_statistics_reset_day_uses_first_program_1063_row(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "wfi01_corrected.csv"
+            fieldnames = [
+                "tile_id",
+                "group",
+                "program",
+                "days",
+                "n_pair_valid",
+                "sum_log_change",
+                "sum_squared_log_change",
+            ]
+            with path.open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                for group, program, day in (
+                    (0, "1039", 0.0),
+                    (1, "1063", 12.907397928240743),
+                    (2, "1063", 12.91),
+                ):
+                    writer.writerow(
+                        {
+                            "tile_id": 0,
+                            "group": group,
+                            "program": program,
+                            "days": day,
+                            "n_pair_valid": 10,
+                            "sum_log_change": 1.0,
+                            "sum_squared_log_change": 2.0,
+                        }
+                    )
+            self.assertAlmostEqual(
+                runner.statistics_reset_day(path),
+                12.907397928240743,
+            )
+
+    def test_archive_matches_production_model_requires_maxent_warmup_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fit_dir = Path(temporary)
+            np.savez(
+                fit_dir / "posterior_samples.npz",
+                trajectory_regularization=np.asarray("maxent"),
+                trajectory_entropy_weight=np.asarray(0.1),
+                constant_rate_map_warmup=np.asarray(1),
+            )
+            self.assertTrue(runner.archive_matches_production_model(fit_dir))
+            self.assertFalse(runner.archive_matches_production_model(fit_dir, 0.03))
+
 
 if __name__ == "__main__":
     unittest.main()

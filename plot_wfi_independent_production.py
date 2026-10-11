@@ -19,12 +19,20 @@ from plot_wfi_tmm_numpyro import (
     save_tile_map_plot,
     save_tile_rate_map_plot,
 )
+from wfi_production_plot_annotations import (
+    annotate_time_axis,
+    load_time_annotations,
+    event_legend_handles,
+    non_annotation_legend_handles,
+    split_time_series_at_reset,
+)
 
 
 ROOT = Path(__file__).resolve().parent
 PRODUCTION_DIR_NAME = "production"
 DETECTORS = tuple(f"WFI{index:02d}" for index in range(1, 19))
 TILE_COUNT = 64
+DEFAULT_RESET_DAY = 12.907397928240743
 
 
 def detector_root(detector, root=ROOT):
@@ -189,43 +197,61 @@ def production_plot_data(data):
     }
 
 
-def save_independent_trajectory_plot(path, data, reset_day):
+def save_independent_trajectory_plot(path, data, reset_day, time_annotations=None):
     days = data["days"]
     order = np.argsort(days, kind="stable")
     sorted_days = days[order]
-    figure, axes = plt.subplots(1, 2, figsize=(13, 5), constrained_layout=True)
+    sorted_thickness = data["thickness"][:, order]
+    sorted_rates = data["rates"][:, order]
+    plot_days, sorted_thickness, sorted_rates = split_time_series_at_reset(
+        sorted_days,
+        sorted_thickness,
+        sorted_rates,
+        reset_day=reset_day,
+    )
+    mean_thickness = np.mean(data["thickness"][:, order], axis=0)
+    mean_rates = np.mean(data["rates"][:, order], axis=0)
+    _, mean_thickness, mean_rates = split_time_series_at_reset(
+        sorted_days,
+        mean_thickness,
+        mean_rates,
+        reset_day=reset_day,
+    )
+    figure, axes = plt.subplots(2, 1, figsize=(11, 9), sharex=True)
     colors = plt.get_cmap("viridis", TILE_COUNT)
     for tile_id, color_index in enumerate(range(TILE_COUNT)):
         color = colors(color_index)
         axes[0].plot(
-            sorted_days,
-            data["thickness"][tile_id, order],
+            plot_days,
+            sorted_thickness[tile_id],
             color=color,
             alpha=0.65,
             linewidth=0.8,
         )
         axes[1].plot(
-            sorted_days,
-            data["rates"][tile_id, order],
+            plot_days,
+            sorted_rates[tile_id],
             color=color,
             alpha=0.65,
             linewidth=0.8,
         )
     axes[0].plot(
-        sorted_days,
-        np.mean(data["thickness"][:, order], axis=0),
+        plot_days,
+        mean_thickness,
         color="black",
         linewidth=1.8,
         label="Mean across tiles",
     )
     axes[1].plot(
-        sorted_days,
-        np.mean(data["rates"][:, order], axis=0),
+        plot_days,
+        mean_rates,
         color="black",
         linewidth=1.8,
         label="Mean across tiles",
     )
-    for axis in axes:
+    for index, axis in enumerate(axes):
+        if time_annotations is not None:
+            annotate_time_axis(axis, time_annotations)
         axis.axvline(
             reset_day,
             color="0.35",
@@ -234,14 +260,89 @@ def save_independent_trajectory_plot(path, data, reset_day):
             alpha=0.8,
             label="Ice reset",
         )
-        axis.set_xlabel("Days since first exposure")
+        axis.set_xlabel("Days since first exposure" if index == len(axes) - 1 else "")
         axis.grid(alpha=0.2)
-        axis.legend(frameon=False, fontsize=8)
+        handles, labels = non_annotation_legend_handles(axis, time_annotations)
+        if handles:
+            axis.legend(handles, labels, frameon=False, fontsize=8)
     axes[0].set_ylabel("Ice thickness (nm)")
     axes[0].set_title("Per-tile ice trajectories (64 tiles)")
     axes[1].set_ylabel("Instantaneous accumulation rate (nm/day)")
     axes[1].set_title("Per-tile instantaneous rates (64 tiles)")
-    figure.suptitle(f"{data['detector']} independent per-tile TMM fits")
+    figure.suptitle(f"{data['detector']} independent per-tile TMM fits", y=0.98)
+    if time_annotations is not None:
+        figure.legend(
+            handles=event_legend_handles(time_annotations),
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.015),
+            ncol=8,
+            frameon=False,
+            fontsize=7,
+        )
+    figure.subplots_adjust(top=0.88, bottom=0.15, hspace=0.24)
+    figure.savefig(path, dpi=180)
+    plt.close(figure)
+
+
+def save_rate_histogram(path, data, reset_day):
+    days = np.asarray(data["days"], dtype=float)
+    rates = np.asarray(data["rates"], dtype=float)
+    pre_mask = days < reset_day
+    post_mask = days >= reset_day
+    if not np.any(pre_mask) or not np.any(post_mask):
+        raise ValueError(f"Reset day does not split observations for {data['detector']}")
+
+    pre_rates = rates[:, pre_mask].reshape(-1)
+    post_rates = rates[:, post_mask].reshape(-1)
+    pre_rates = pre_rates[np.isfinite(pre_rates)]
+    post_rates = post_rates[np.isfinite(post_rates)]
+    latest_index = int(np.argmax(days))
+    current_rates = rates[:, latest_index]
+    current_rates = current_rates[np.isfinite(current_rates)]
+    if pre_rates.size == 0 or post_rates.size == 0 or current_rates.size == 0:
+        raise ValueError(f"No finite instantaneous rates for {data['detector']}")
+
+    all_rates = np.concatenate((pre_rates, post_rates))
+    rate_min = float(np.min(all_rates))
+    rate_max = float(np.max(all_rates))
+    if np.isclose(rate_min, rate_max):
+        half_width = max(abs(rate_min) * 0.05, 0.1)
+        bins = np.linspace(rate_min - half_width, rate_max + half_width, 21)
+    else:
+        bins = np.histogram_bin_edges(all_rates, bins=32)
+    current_rate = float(np.median(current_rates))
+
+    figure, axis = plt.subplots(figsize=(11, 6), constrained_layout=True)
+    axis.hist(
+        pre_rates,
+        bins=bins,
+        density=True,
+        color="#0072B2",
+        alpha=0.60,
+        label=f"Pre-reset (N={pre_rates.size:,})",
+    )
+    axis.hist(
+        post_rates,
+        bins=bins,
+        density=True,
+        color="#D55E00",
+        alpha=0.55,
+        label=f"Post-reset (N={post_rates.size:,})",
+    )
+    axis.axvline(
+        current_rate,
+        color="black",
+        linewidth=2.0,
+        label=f"Current fitted median: {current_rate:.3f} nm/day",
+    )
+    axis.set_xlabel("Instantaneous ice accumulation rate (nm/day)")
+    axis.set_ylabel("Probability density")
+    axis.set_title(
+        f"{data['detector']} instantaneous ice accumulation rates by reset epoch\n"
+        f"Reset day {reset_day:.3f}; current epoch day {days[latest_index]:.3f}"
+    )
+    axis.grid(alpha=0.2)
+    axis.legend(frameon=False)
     figure.savefig(path, dpi=180)
     plt.close(figure)
 
@@ -266,9 +367,22 @@ def save_independent_map_plot(path, data):
     plt.close(figure)
 
 
-def save_detector_plots(detector, root=ROOT):
-    output_root = detector_root(detector, root)
+def save_detector_plots(
+    detector,
+    root=ROOT,
+    reset_day=DEFAULT_RESET_DAY,
+    output_root=None,
+    statistics_path=None,
+):
+    output_root = detector_root(detector, root) if output_root is None else Path(output_root)
     fit_dirs = tile_fit_dirs(output_root)
+    if statistics_path is None:
+        statistics_path = Path(root) / (
+            f"{detector.lower()}_tile_log_statistics_512_count_corrected.csv"
+        )
+    else:
+        statistics_path = Path(statistics_path)
+    time_annotations = load_time_annotations(statistics_path)
     data = load_detector_data(detector, output_root, fit_dirs)
     plot_data = production_plot_data(data)
     prediction_quantiles = np.stack(
@@ -278,7 +392,13 @@ def save_detector_plots(detector, root=ROOT):
     save_independent_trajectory_plot(
         output_root / "numpyro_ice_trajectory.png",
         data,
-        reset_day=15.064405023148149,
+        reset_day=reset_day,
+        time_annotations=time_annotations,
+    )
+    save_rate_histogram(
+        output_root / "numpyro_rate_histogram_pre_post_reset.png",
+        data,
+        reset_day=reset_day,
     )
     node_samples = {
         "sca_names": np.asarray([detector]),
@@ -299,6 +419,7 @@ def save_detector_plots(detector, root=ROOT):
         node_samples,
         data["days"],
         data["repeats"],
+        time_annotations=time_annotations,
     )
     save_tile_map_plot(output_root / "numpyro_tile_ar_maps.png", data["ar_rows"])
     save_tile_rate_map_plot(
@@ -306,12 +427,16 @@ def save_detector_plots(detector, root=ROOT):
         read_csv_rows(output_root / "tile_rate_posterior.csv"),
     )
     save_tile_fit_plot(
-        output_root / "numpyro_tile_fit.png", plot_data, prediction_quantiles
+        output_root / "numpyro_tile_fit.png",
+        plot_data,
+        prediction_quantiles,
+        time_annotations=time_annotations,
     )
     save_tile_data_model_time_plot(
         output_root / "numpyro_tile_data_model_vs_time.png",
         plot_data,
         prediction_quantiles,
+        time_annotations=time_annotations,
     )
     save_tile_fit_scatter_plot(
         output_root / "numpyro_tile_fit_scatter.png",
@@ -337,6 +462,19 @@ def parse_args():
         action="append",
         help="Generate plots for one detector; omit to generate all WFI01-WFI18.",
     )
+    parser.add_argument("--reset-day", type=float, default=DEFAULT_RESET_DAY)
+    parser.add_argument(
+        "--fit-root",
+        type=Path,
+        default=None,
+        help="Use an isolated detector fit root instead of root/production/<detector>.",
+    )
+    parser.add_argument(
+        "--statistics-path",
+        type=Path,
+        default=None,
+        help="Statistics CSV used for event annotations with --fit-root.",
+    )
     return parser.parse_args()
 
 
@@ -346,9 +484,17 @@ def main():
     unknown = sorted(set(detectors).difference(DETECTORS))
     if unknown:
         raise ValueError(f"Unknown detectors: {unknown}")
+    if (args.fit_root is not None or args.statistics_path is not None) and len(detectors) != 1:
+        raise ValueError("--fit-root and --statistics-path require exactly one detector")
     for detector in detectors:
         print(f"Generating independent production-style plots for {detector}", flush=True)
-        output_root = save_detector_plots(detector, args.root)
+        output_root = save_detector_plots(
+            detector,
+            args.root,
+            args.reset_day,
+            output_root=args.fit_root,
+            statistics_path=args.statistics_path,
+        )
         print(f"Wrote plots under {output_root}", flush=True)
 
 

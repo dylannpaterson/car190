@@ -16,7 +16,7 @@ Only one LED baseline and one current image are held in memory at a time.
 Per-observation checkpoint files make an interrupted local-only run resumable;
 MAST-supplemented runs require ``--no-resume`` for a true full rerun.
 
-Passing ``--photodiode-channel pd1 --photodiode-summary PATH`` loads the
+Passing ``--photodiode-channel pd2 --photodiode-summary PATH`` loads the
 per-exposure CSV produced by ``roman-telem --ice-monitor``.  Its signal is the
 in-exposure LED median minus the same-pass dark median; that signal is
 normalized independently per LED to the tool-provided reference pass (the
@@ -1513,7 +1513,7 @@ def parse_args():
         default=None,
         help=(
             "Select the flight source channel in --photodiode-summary and normalize "
-            "each current image per LED; PD1 is recommended. Requires --index-path "
+            "each current image per LED; PD2 is recommended. Requires --index-path "
             "and --no-resume."
         ),
     )

@@ -425,7 +425,12 @@ def save_plots(output_dir, model, result):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--statistics", type=Path, required=True)
-    parser.add_argument("--corrections", type=Path, required=True)
+    parser.add_argument(
+        "--corrections",
+        type=Path,
+        default=None,
+        help="Count-space correction CSV or directory; omit for *_count_corrected.csv inputs",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--detectors", nargs="+", default=None)
     parser.add_argument("--reset-day", type=float, default=RESET_DAY)
