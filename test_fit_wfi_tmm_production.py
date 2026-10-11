@@ -7,6 +7,44 @@ import numpy as np
 import fit_wfi_tmm_production as production
 
 
+def _prediction_fixture():
+    wavelengths = np.asarray([900.0, 1100.0, 1300.0])
+    data = {
+        "counts": np.ones((1, 12)),
+        "sums": np.zeros((1, 12)),
+        "sum_squared": np.ones((1, 12)),
+        "days": np.asarray([0.0, 0.1, 1.0, 1.1, 2.0, 2.1, 3.0, 3.1, 4.0, 4.1, 5.0, 5.1]),
+        "node_days": np.asarray([0.0, 1.0, 2.0]),
+        "led": np.repeat(np.arange(1, 7), 2),
+        "first_by_led": np.arange(0, 12, 2),
+        "sca_index": np.asarray([0]),
+    }
+    led_weights = np.asarray(
+        [
+            [1.0, 0.8, 1.2],
+            [0.9, 1.1, 0.7],
+            [1.2, 0.9, 1.0],
+            [0.8, 1.2, 0.9],
+            [1.1, 0.7, 1.3],
+            [0.95, 1.05, 0.85],
+        ]
+    )
+    context = {
+        "wavelengths": wavelengths,
+        "model_weights": np.repeat(led_weights, 2, axis=0)[None, :, :],
+        "hgcdte_n": np.asarray([3.6, 3.5, 3.4]),
+        "hgcdte_k": np.asarray([0.7, 0.65, 0.6]),
+        "absolute_substrate_power": True,
+    }
+    reference, _, _ = production.ar_prior_arrays()
+    ar_parameters = reference[None, :]
+    ice_thickness = np.asarray(
+        [[1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 1.2, 1.7, 2.2, 2.7, 3.2, 3.7]]
+    )
+    hgcdte_parameters = np.zeros((1, 2))
+    return data, context, ar_parameters, ice_thickness, hgcdte_parameters
+
+
 class FixedProductionSettingsTests(unittest.TestCase):
     def test_settings_are_fixed_to_the_production_contract(self):
         config = production.ProductionConfig(Path("stats.csv"), Path("output"))
@@ -14,6 +52,8 @@ class FixedProductionSettingsTests(unittest.TestCase):
         self.assertEqual(config.tile_statistics, Path("stats.csv"))
         self.assertEqual(config.output_dir, Path("output"))
         self.assertIsNone(config.map_init_from)
+        self.assertTrue(config.fit_incidence_angle)
+        self.assertEqual(config.incidence_pupil_half_angle_deg, 0.0)
         self.assertEqual(production.AR_LAYERS, 3)
         self.assertEqual(production.ICE_INDEX_DEFAULT, 1.25)
         self.assertEqual(production.INITIAL_THICKNESS_LOG_MEDIAN_NM, 10.0)
@@ -248,6 +288,64 @@ class FixedProductionSettingsTests(unittest.TestCase):
             np.asarray([600.0, production.AR_HGCDTE_MODULATION_ANCHOR_NM, 1600.0])
         )
         np.testing.assert_allclose(basis[1], 0.0)
+
+    def test_pupil_quadrature_is_normalized_and_has_normal_limit(self):
+        directions, weights = production.incidence_pupil_quadrature(0.0)
+        np.testing.assert_allclose(directions, [[0.0, 0.0, 1.0]])
+        np.testing.assert_allclose(weights, [1.0])
+
+        directions, weights = production.incidence_pupil_quadrature(3.576334)
+        np.testing.assert_allclose(np.linalg.norm(directions, axis=1), 1.0)
+        self.assertTrue(np.all(directions[:, 2] > 0.0))
+        self.assertAlmostEqual(float(np.sum(weights)), 1.0)
+
+    def test_pupil_predictor_is_finite_and_changes_oblique_power_average(self):
+        data, context, ar_parameters, ice_thickness, hgcdte_parameters = _prediction_fixture()
+        single_ray = production.build_prediction_function(data, context)
+        pupil = production.build_prediction_function(
+            data,
+            context,
+            incidence_pupil_half_angle_deg=3.576334,
+        )
+
+        single_prediction = np.asarray(
+            single_ray(ice_thickness, ar_parameters, hgcdte_parameters, 0.0)
+        )
+        pupil_prediction = np.asarray(
+            pupil(ice_thickness, ar_parameters, hgcdte_parameters, 0.0)
+        )
+
+        self.assertEqual(single_prediction.shape, (1, 12))
+        self.assertEqual(pupil_prediction.shape, (1, 12))
+        self.assertTrue(np.all(np.isfinite(pupil_prediction)))
+        self.assertFalse(np.allclose(single_prediction, pupil_prediction))
+
+    def test_incidence_angle_can_be_fixed_at_zero(self):
+        data, context, *_ = _prediction_fixture()
+        data.update(
+            {
+                "n_scas": 1,
+                "n_tiles": 1,
+                "tile_ids": np.asarray([0]),
+                "sca_names": np.asarray(["WFI01"]),
+                "groups": np.arange(12),
+                "repeat": np.tile(np.asarray([0, 1]), 6),
+                "metadata": {0: {"tile_row": 0, "tile_col": 0}},
+            }
+        )
+        model = production.build_model(
+            data,
+            context,
+            fit_incidence_angle=False,
+            incidence_pupil_half_angle_deg=3.576334,
+        )
+        initial = production.initial_values_for_data(data, fit_incidence_angle=False)
+        self.assertNotIn("incidence_angle_deg", initial)
+        from numpyro.handlers import seed, trace
+
+        jax, _, _, _ = production.require_numpyro()
+        sites = trace(seed(model, jax.random.PRNGKey(106))).get_trace()
+        self.assertNotIn("incidence_angle_deg", sites)
 
     def test_constant_rate_model_can_add_ice_n_modulation(self):
         jax, _, _, _ = production.require_numpyro()

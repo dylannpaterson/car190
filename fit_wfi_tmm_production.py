@@ -51,6 +51,8 @@ AR_HGCDTE_MODULATION_PRIOR_SIGMA_LOG = 0.02
 AR_HGCDTE_MODULATION_ANCHOR_NM = 1050.0
 INCIDENCE_ANGLE_MAX_DEG = 15.0
 INCIDENCE_ANGLE_INIT_DEG = 7.5
+PUPIL_RADIAL_NODES, PUPIL_RADIAL_WEIGHTS = np.polynomial.legendre.leggauss(4)
+PUPIL_AZIMUTH_COUNT = 8
 POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA = 0.1
 INITIAL_THICKNESS_LOG_MEDIAN_NM = 10.0
 INITIAL_THICKNESS_LOG_SIGMA = 1.5
@@ -140,6 +142,8 @@ class ProductionConfig:
     entropy_weight: float = 0.0
     rate_prior_log_mean: np.ndarray | None = None
     constant_rate: bool = False
+    fit_incidence_angle: bool = True
+    incidence_pupil_half_angle_deg: float = 0.0
     fit_ice_n_modulation: bool = False
     ice_n_modulation_prior_sigma_log: float = ICE_N_MODULATION_PRIOR_SIGMA_LOG
     ar_mean_prior_sigma: float = AR_MEAN_PRIOR_SIGMA
@@ -662,15 +666,60 @@ def _incidence_sine(angle_deg, jnp):
     return jnp.sin(jnp.asarray(angle_deg) * jnp.pi / 180.0)
 
 
+def incidence_pupil_quadrature(half_angle_deg):
+    """Return directions and weights for a uniformly illuminated circular pupil."""
+    half_angle_deg = float(half_angle_deg)
+    if (
+        not np.isfinite(half_angle_deg)
+        or half_angle_deg < 0.0
+        or half_angle_deg >= 90.0
+    ):
+        raise ValueError("Incidence pupil half-angle must be in [0, 90) degrees")
+    if half_angle_deg == 0.0:
+        return np.asarray([[0.0, 0.0, 1.0]]), np.asarray([1.0])
+
+    # Uniform pupil area is uniform in normalized radius squared.
+    radius_squared = 0.5 * (1.0 + PUPIL_RADIAL_NODES)
+    radial_weights = 0.5 * PUPIL_RADIAL_WEIGHTS
+    radius = np.sqrt(radius_squared)
+    marginal_tangent = np.tan(np.deg2rad(half_angle_deg))
+    polar_angle = np.arctan(radius * marginal_tangent)
+    azimuth = 2.0 * np.pi * np.arange(PUPIL_AZIMUTH_COUNT) / PUPIL_AZIMUTH_COUNT
+    sin_polar = np.sin(polar_angle)[:, None]
+    directions = np.stack(
+        (
+            sin_polar * np.cos(azimuth)[None, :],
+            sin_polar * np.sin(azimuth)[None, :],
+            np.broadcast_to(
+                np.cos(polar_angle)[:, None],
+                sin_polar.shape[:-1] + (PUPIL_AZIMUTH_COUNT,),
+            ),
+        ),
+        axis=-1,
+    ).reshape((-1, 3))
+    weights = np.repeat(radial_weights / PUPIL_AZIMUTH_COUNT, PUPIL_AZIMUTH_COUNT)
+    return directions, weights
+
+
 def build_prediction_function(
     data,
     context,
     *,
+    incidence_pupil_half_angle_deg=0.0,
     fit_ice_n_modulation=False,
     fit_ar_hgcdte_modulation=False,
 ):
-    """Build the fixed single-ray TE/TM absolute-power predictor."""
+    """Build the production TE/TM absolute-power predictor."""
     jax, jnp, _, _ = require_numpyro()
+    pupil_directions, pupil_weights = incidence_pupil_quadrature(
+        incidence_pupil_half_angle_deg
+    )
+    pupil_mode = float(incidence_pupil_half_angle_deg) > 0.0
+    pupil_local_x = jnp.asarray(pupil_directions[:, 0])
+    pupil_local_y = jnp.asarray(pupil_directions[:, 1])
+    pupil_local_z = jnp.asarray(pupil_directions[:, 2])
+    pupil_weights = jnp.asarray(pupil_weights)
+    pupil_ray_count = int(pupil_directions.shape[0])
     wavelengths = jnp.asarray(context["wavelengths"])
     phase_factor = 2.0 * jnp.pi / wavelengths
     all_sca_index = np.asarray(data["sca_index"], dtype=int)
@@ -878,28 +927,81 @@ def build_prediction_function(
             )
             hgcdte_n = base_n[None, :] * jnp.exp(hgcdte_parameters[:, 0, None])
             hgcdte_k = base_k[None, :] * jnp.exp(hgcdte_parameters[:, 1, None])
+
+        response_ar_parameters = ar_parameters
+        response_hgcdte_n = hgcdte_n
+        response_hgcdte_k = hgcdte_k
+        response_ice_thickness = ice_thickness
+        response_ice_index = ice_index
+        response_angle_sine = angle_sine
+        response_ar_index = ar_index
+        if pupil_mode:
+            # Rotate the chief-ray-local pupil cone into the x-z chief-ray plane.
+            angle_rad = jnp.asarray(incidence_angle_deg) * (jnp.pi / 180.0)
+            sine_angle = jnp.sin(angle_rad)
+            cosine_angle = jnp.cos(angle_rad)
+            direction_x = pupil_local_x * cosine_angle + pupil_local_z * sine_angle
+            direction_y = pupil_local_y
+            response_angle_sine = jnp.broadcast_to(
+                jnp.sqrt(
+                    jnp.maximum(
+                        direction_x * direction_x + direction_y * direction_y,
+                        0.0,
+                    )
+                ),
+                (ar_parameters.shape[0], pupil_ray_count),
+            ).reshape(-1)
+            response_ar_parameters = jnp.repeat(
+                ar_parameters, pupil_ray_count, axis=0
+            )
+            response_hgcdte_n = jnp.repeat(hgcdte_n, pupil_ray_count, axis=0)
+            response_hgcdte_k = jnp.repeat(hgcdte_k, pupil_ray_count, axis=0)
+            response_ice_thickness = jnp.repeat(
+                ice_thickness, pupil_ray_count, axis=0
+            )
+            response_ar_index = jnp.repeat(ar_index, pupil_ray_count, axis=0)
+            if fit_ice_n_modulation:
+                response_ice_index = jnp.repeat(
+                    ice_index, pupil_ray_count, axis=0
+                )
+
         clean_s, coated_s = polarization_response(
-            ar_parameters,
-            hgcdte_n,
-            hgcdte_k,
-            ice_thickness,
-            angle_sine,
+            response_ar_parameters,
+            response_hgcdte_n,
+            response_hgcdte_k,
+            response_ice_thickness,
+            response_angle_sine,
             "s",
-            ice_index,
-            ar_index=ar_index,
+            response_ice_index,
+            ar_index=response_ar_index,
         )
         clean_p, coated_p = polarization_response(
-            ar_parameters,
-            hgcdte_n,
-            hgcdte_k,
-            ice_thickness,
-            angle_sine,
+            response_ar_parameters,
+            response_hgcdte_n,
+            response_hgcdte_k,
+            response_ice_thickness,
+            response_angle_sine,
             "p",
-            ice_index,
-            ar_index=ar_index,
+            response_ice_index,
+            ar_index=response_ar_index,
         )
         clean = 0.5 * (clean_s + clean_p)
         coated = 0.5 * (coated_s + coated_p)
+        if pupil_mode:
+            row_count = ar_parameters.shape[0]
+            group_count = ice_thickness.shape[1]
+            clean = jnp.sum(
+                clean.reshape((row_count, pupil_ray_count, reference_wavelength_count))
+                * pupil_weights[None, :, None],
+                axis=1,
+            )
+            coated = jnp.sum(
+                coated.reshape(
+                    (row_count, pupil_ray_count, group_count, reference_wavelength_count)
+                )
+                * pupil_weights[None, :, None, None],
+                axis=1,
+            )
         integrated_clean = jnp.sum(clean[:, None, :] * selected_weights, axis=-1)
         integrated = jnp.sum(coated * selected_weights, axis=-1)
         current = integrated / integrated_clean
@@ -1088,6 +1190,8 @@ def build_model(
     entropy_weight=0.0,
     rate_prior_log_mean=None,
     constant_rate=False,
+    fit_incidence_angle=True,
+    incidence_pupil_half_angle_deg=0.0,
     fit_ice_n_modulation=False,
     ice_n_modulation_prior_sigma_log=ICE_N_MODULATION_PRIOR_SIGMA_LOG,
     ar_mean_prior_sigma=AR_MEAN_PRIOR_SIGMA,
@@ -1158,6 +1262,7 @@ def build_model(
     predictor = build_prediction_function(
         data,
         context,
+        incidence_pupil_half_angle_deg=incidence_pupil_half_angle_deg,
         fit_ice_n_modulation=fit_ice_n_modulation,
         fit_ar_hgcdte_modulation=fit_ar_hgcdte_modulation,
     )
@@ -1197,7 +1302,7 @@ def build_model(
             ice,
             row_ar,
             hgcdte,
-            values["incidence_angle_deg"],
+            values["incidence_angle_deg"] if fit_incidence_angle else 0.0,
             post_reset_tile_log_offsets=values["post_reset_tile_log_offset"].reshape(-1),
             ice_n_log_modulation=(
                 values["ice_n_log_modulation"]
@@ -1292,9 +1397,6 @@ def build_model(
                 .expand((n_scas, n_tiles))
                 .to_event(2),
             ),
-            "incidence_angle_deg": numpyro.sample(
-                "incidence_angle_deg", dist.Uniform(0.0, INCIDENCE_ANGLE_MAX_DEG)
-            ),
             "post_reset_tile_log_offset": numpyro.sample(
                 "post_reset_tile_log_offset",
                 dist.Normal(0.0, POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA)
@@ -1314,6 +1416,11 @@ def build_model(
                 .to_event(2),
             ),
         }
+        if fit_incidence_angle:
+            values["incidence_angle_deg"] = numpyro.sample(
+                "incidence_angle_deg",
+                dist.Uniform(0.0, INCIDENCE_ANGLE_MAX_DEG),
+            )
         if constant_rate:
             values["log_rate_scale"] = numpyro.sample(
                 "log_rate_scale",
@@ -1453,6 +1560,7 @@ def build_model(
 def initial_values_for_data(
     data,
     constant_rate=False,
+    fit_incidence_angle=True,
     fit_ice_n_modulation=False,
     fit_ar_hgcdte_modulation=False,
 ):
@@ -1463,11 +1571,12 @@ def initial_values_for_data(
         "ar_tile_raw": np.broadcast_to(reference_raw, shape + (len(active),)).copy(),
         "initial_thickness_log_nm": np.full(shape, np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM)),
         "reset_initial_thickness_log_nm": np.full(shape, np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM)),
-        "incidence_angle_deg": float(INCIDENCE_ANGLE_INIT_DEG),
         "post_reset_tile_log_offset": np.zeros(shape),
         "absolute_hgcdte_n_log_scale": np.zeros(shape),
         "absolute_hgcdte_k_log_scale": np.zeros(shape),
     }
+    if fit_incidence_angle:
+        values["incidence_angle_deg"] = float(INCIDENCE_ANGLE_INIT_DEG)
     if constant_rate:
         values["log_rate_scale"] = np.full(
             shape,
@@ -1717,6 +1826,7 @@ def fit_map_state(config):
     initial_values = initial_values_for_data(
         data,
         constant_rate=config.constant_rate,
+        fit_incidence_angle=config.fit_incidence_angle,
         fit_ice_n_modulation=config.fit_ice_n_modulation,
         fit_ar_hgcdte_modulation=config.fit_ar_hgcdte_modulation,
     )
@@ -1741,6 +1851,8 @@ def fit_map_state(config):
         entropy_weight=config.entropy_weight,
         rate_prior_log_mean=config.rate_prior_log_mean,
         constant_rate=config.constant_rate,
+        fit_incidence_angle=config.fit_incidence_angle,
+        incidence_pupil_half_angle_deg=config.incidence_pupil_half_angle_deg,
         fit_ice_n_modulation=config.fit_ice_n_modulation,
         ice_n_modulation_prior_sigma_log=config.ice_n_modulation_prior_sigma_log,
         ar_mean_prior_sigma=config.ar_mean_prior_sigma,
@@ -1836,6 +1948,7 @@ def write_outputs(
         "post_reset_tile_log_offset_prior_sigma": np.asarray(POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA),
         "fit_incidence_angle": np.asarray(1),
         "incidence_angle_max_deg": np.asarray(INCIDENCE_ANGLE_MAX_DEG),
+        "incidence_pupil_half_angle_deg": np.asarray(0.0),
         "input_corrections_already_applied": np.asarray(1),
         "map_optimizer": np.asarray("least-squares"),
         "map_steps": np.asarray(PRODUCTION_MAP_STEPS),
@@ -1980,6 +2093,8 @@ def write_outputs(
             f"- Trajectory curvature weight: `{(model_metadata or {}).get('trajectory_smoothness_weight', NP_SMOOTHNESS_WEIGHT)}`.",
             f"- Trajectory entropy weight: `{(model_metadata or {}).get('trajectory_entropy_weight', 0.0)}`.",
             f"- HgCdTe n/k scale prior sigma: `{ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG}`.",
+            f"- Incidence angle fitted: `{bool((model_metadata or {}).get('fit_incidence_angle', 1))}`.",
+            f"- Incidence pupil half-angle: `{(model_metadata or {}).get('incidence_pupil_half_angle_deg', 0.0)}` degrees.",
             "- Corrections: already applied in the input statistics; no correction table used.",
             "",
         ]
@@ -1998,6 +2113,12 @@ def fit_one(config):
         "observed": observed,
         "prediction": np.asarray(evaluated["_map_least_squares_prediction"]),
     }
+    model_metadata = dict(config.model_metadata or {})
+    model_metadata.setdefault("fit_incidence_angle", int(config.fit_incidence_angle))
+    model_metadata.setdefault(
+        "incidence_pupil_half_angle_deg",
+        float(config.incidence_pupil_half_angle_deg),
+    )
     write_outputs(
         config.output_dir,
         data,
@@ -2005,7 +2126,7 @@ def fit_one(config):
         config.tile_statistics,
         diagnostics,
         fit_diagnostics,
-        config.model_metadata,
+        model_metadata,
     )
     print(
         f"Wrote {config.output_dir} in {time.perf_counter() - run_start:.2f}s",

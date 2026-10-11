@@ -2776,6 +2776,20 @@ class TestTmmTileData(unittest.TestCase):
         np.testing.assert_allclose(fitted_normal, normal_predictions)
         self.assertFalse(np.allclose(fitted_tilted, fitted_normal))
 
+        def fitted_sum(angle):
+            return jnp.sum(
+                fitted_predictor(
+                    thickness,
+                    parameters,
+                    jnp.asarray(0.0),
+                    incidence_angle_deg=angle,
+                )
+            )
+
+        zero_gradient = jax.grad(fitted_sum)(jnp.asarray(0.0))
+        self.assertTrue(np.isfinite(float(zero_gradient)))
+        self.assertAlmostEqual(float(zero_gradient), 0.0, places=12)
+
     def test_prediction_uses_row_specific_chief_ray_geometry(self):
         context = {
             "wavelengths": np.asarray([900.0, 1300.0]),

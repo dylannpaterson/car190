@@ -2932,10 +2932,13 @@ def build_prediction_function(
         local_x = local_directions[:, 0]
         local_y = local_directions[:, 1]
         local_z = local_directions[:, 2]
+        zero_pupil = float(incidence_pupil_half_angle_deg) == 0.0
 
         def fitted_incidence_sines(angle_deg):
             angle_rad = jnp.asarray(angle_deg) * (jnp.pi / 180.0)
             sine_angle = jnp.sin(angle_rad)
+            if zero_pupil:
+                return jnp.broadcast_to(sine_angle, (1, local_directions.shape[0]))
             cosine_angle = jnp.cos(angle_rad)
             direction_x = local_x * cosine_angle + local_z * sine_angle
             direction_y = local_y
