@@ -3,8 +3,11 @@
 import argparse
 import csv
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 import hashlib
 import json
+import multiprocessing
+import os
 from pathlib import Path
 import shutil
 
@@ -19,6 +22,7 @@ PRODUCTION_DIR_NAME = "production"
 TILE_COUNT = 64
 DETECTORS = tuple(f"WFI{index:02d}" for index in range(1, 19))
 PRODUCTION_MAXENT_WEIGHT = 0.1
+DEFAULT_MAP_WORKERS = 4
 
 
 def normalize_detector(value):
@@ -263,6 +267,19 @@ def fit_tile(
     return tile_fit_dir
 
 
+def _fit_tile_worker(arguments):
+    return fit_tile(*arguments)
+
+
+def _configure_parallel_environment(workers):
+    if workers <= 1:
+        return
+    # Let independent ROCm workers share the device instead of preallocating it.
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        os.environ.setdefault(name, "1")
+
+
 def write_detector_rate_posterior(fit_root, output_root):
     rows = []
     fieldnames = None
@@ -284,7 +301,7 @@ def write_detector_rate_posterior(fit_root, output_root):
     return output
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--statistics-dir",
@@ -326,7 +343,13 @@ def parse_args():
         default=None,
         help="Reuse an existing EMCEE output directory instead of rerunning EMCEE.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_MAP_WORKERS,
+        help=f"Parallel tile MAP workers; default: {DEFAULT_MAP_WORKERS}.",
+    )
+    return parser.parse_args(argv)
 
 
 def run_detector(
@@ -337,7 +360,10 @@ def run_detector(
     entropy_weight,
     output_root=None,
     reuse_emcee_from=None,
+    workers=DEFAULT_MAP_WORKERS,
 ):
+    if workers < 1:
+        raise ValueError("workers must be positive")
     statistics, output_root, statistics_root, fit_root, emcee_output = detector_paths(
         detector,
         statistics_dir,
@@ -386,8 +412,8 @@ def run_detector(
             f"Reusing existing one-tile EMCEE warmup for {detector}: {emcee_output}",
             flush=True,
         )
-    for tile_id in selected:
-        fit_tile(
+    jobs = [
+        (
             tile_id,
             paths[tile_id],
             fit_root,
@@ -395,6 +421,24 @@ def run_detector(
             force,
             entropy_weight,
         )
+        for tile_id in selected
+    ]
+    active_workers = min(workers, len(jobs)) if jobs else 1
+    print(
+        f"Fitting {len(jobs)} {detector} tile(s) with {active_workers} MAP worker(s)",
+        flush=True,
+    )
+    _configure_parallel_environment(active_workers)
+    if active_workers == 1:
+        for job in jobs:
+            _fit_tile_worker(job)
+    else:
+        context = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=active_workers,
+            mp_context=context,
+        ) as executor:
+            list(executor.map(_fit_tile_worker, jobs))
     output = write_detector_rate_posterior(fit_root, output_root)
     if output is not None:
         print(f"Wrote {output}", flush=True)
@@ -423,6 +467,7 @@ def main():
             selected_args.maxent_weight,
             output_root=selected_args.output_root,
             reuse_emcee_from=selected_args.reuse_emcee_from,
+            workers=selected_args.workers,
         )
 
 

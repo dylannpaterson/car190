@@ -272,6 +272,10 @@ tile-rate and trajectory variation, and no neighboring-tile rate smoothing.
 Corrections are expected to be already included in the input statistics; no
 fixed-correction CSV is passed to the model. Existing tile archives are reused
 only when their sufficient-statistics fingerprint matches the current input.
+Independent tile MAP fits run in four spawned worker processes by default; pass
+`--workers 1` for serial execution or another positive value to tune bounded
+parallelism. The per-tile constant-rate warmup and final MAP remain sequential
+within each worker, and detector-level aggregation waits for all workers.
 
 All production outputs are written below the input directory, not the
 repository root:

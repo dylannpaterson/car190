@@ -2,6 +2,7 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -69,6 +70,64 @@ class ProductionRunnerTests(unittest.TestCase):
         self.assertEqual(split.parent, output)
         self.assertEqual(fits.parent, output)
         self.assertEqual(emcee, output / "emcee")
+
+    def test_workers_argument_defaults_to_four(self):
+        arguments = runner.parse_args(["--statistics-dir", "."])
+        self.assertEqual(arguments.workers, 4)
+        self.assertEqual(
+            runner.parse_args(["--statistics-dir", ".", "--workers", "2"]).workers,
+            2,
+        )
+
+    def test_run_detector_rejects_nonpositive_workers(self):
+        with self.assertRaises(ValueError):
+            runner.run_detector("WFI01", None, ".", False, 0.1, workers=0)
+
+    def test_run_detector_uses_process_pool_for_multiple_workers(self):
+        class InlinePool:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def map(self, function, jobs):
+                return [function(job) for job in jobs]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "wfi01_tile_log_statistics_512_count_corrected.csv"
+            self.write_statistics(source)
+            reference_dir = root / "reference"
+            reference_dir.mkdir()
+            for name in (
+                "WFI_RCS_LEDP_spectral_energy_distribution.ecsv",
+                "WFI_Quantum_efficiency.ecsv",
+            ):
+                (reference_dir / name).write_text("reference\n")
+            pool = InlinePool(max_workers=2)
+
+            with patch.object(runner, "REFERENCE_DATA_DIR", reference_dir), patch.object(
+                runner, "TILE_COUNT", 2
+            ), patch.object(runner.emcee_warmup, "run_emcee"), patch.object(
+                runner, "fit_tile"
+            ) as fit_tile, patch.object(
+                runner, "ProcessPoolExecutor", return_value=pool
+            ), patch.object(runner, "write_detector_rate_posterior", return_value=None):
+                runner.run_detector(
+                    "WFI01",
+                    None,
+                    root,
+                    False,
+                    0.1,
+                    workers=2,
+                )
+
+            self.assertEqual(pool.kwargs["max_workers"], 2)
+            self.assertEqual(fit_tile.call_count, 2)
 
     def test_statistics_reset_day_uses_first_program_1063_row(self):
         with tempfile.TemporaryDirectory() as temporary:
