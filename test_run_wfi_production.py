@@ -1,5 +1,6 @@
 import csv
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -7,6 +8,13 @@ from unittest.mock import patch
 import numpy as np
 
 import run_wfi_production as runner
+import run_wfi_relative_response_production as relative_runner
+
+
+def _timeout_test_process(job, finished):
+    if job[0] == 3:
+        time.sleep(6.0)
+    finished.set()
 
 
 class ProductionRunnerTests(unittest.TestCase):
@@ -71,36 +79,111 @@ class ProductionRunnerTests(unittest.TestCase):
         self.assertEqual(fits.parent, output)
         self.assertEqual(emcee, output / "emcee")
 
-    def test_workers_argument_defaults_to_four(self):
+    def test_detector_paths_support_alternate_tile_size_layout(self):
+        statistics, output, split, fits, emcee = runner.detector_paths(
+            "WFI03",
+            Path("corrected"),
+            tile_size=256,
+        )
+        self.assertEqual(
+            statistics,
+            Path("corrected/wfi03_tile_log_statistics_256_count_corrected.csv"),
+        )
+        self.assertEqual(
+            output,
+            Path("corrected") / "production" / "tile_size_256" / "wfi03",
+        )
+        self.assertEqual(split, output / "tile_statistics")
+        self.assertEqual(fits, output / "fits")
+        self.assertEqual(emcee, output / "emcee")
+
+    def test_tile_size_argument_defaults_to_512(self):
         arguments = runner.parse_args(["--statistics-dir", "."])
-        self.assertEqual(arguments.workers, 4)
+        self.assertEqual(arguments.tile_size, 512)
+        self.assertEqual(arguments.workers, 2)
+        self.assertEqual(arguments.tile_timeout_seconds, 1800.0)
+        self.assertEqual(
+            arguments.absolute_hgcdte_n_scale_prior_sigma_log,
+            0.01,
+        )
+        self.assertEqual(
+            runner.parse_args(["--statistics-dir", ".", "--tile-size", "256"]).tile_size,
+            256,
+        )
+
+    def test_hgcdte_n_prior_sigma_argument_parses(self):
+        arguments = runner.parse_args(
+            [
+                "--statistics-dir",
+                ".",
+                "--absolute-hgcdte-n-scale-prior-sigma-log",
+                "0.1",
+            ]
+        )
+        self.assertEqual(arguments.absolute_hgcdte_n_scale_prior_sigma_log, 0.1)
+
+    def test_fixed_hgcdte_n_argument_parses(self):
+        arguments = runner.parse_args(
+            [
+                "--statistics-dir",
+                ".",
+                "--fixed-absolute-hgcdte-n-log-scale",
+                "0.0",
+            ]
+        )
+        self.assertEqual(arguments.fixed_absolute_hgcdte_n_log_scale, 0.0)
+
+    def test_workers_argument_requires_a_positive_integer(self):
         self.assertEqual(
             runner.parse_args(["--statistics-dir", ".", "--workers", "2"]).workers,
             2,
         )
+        with self.assertRaises(SystemExit):
+            runner.parse_args(["--statistics-dir", ".", "--workers", "0"])
 
-    def test_run_detector_rejects_nonpositive_workers(self):
-        with self.assertRaises(ValueError):
-            runner.run_detector("WFI01", None, ".", False, 0.1, workers=0)
+    def test_response_cache_argument_selects_explicit_cached_fit_mode(self):
+        arguments = runner.parse_args(
+            [
+                "--statistics-dir",
+                ".",
+                "--detector",
+                "WFI01",
+                "--tile-size",
+                "256",
+                "--response-cache-root",
+                "cache",
+            ]
+        )
+        with patch.object(relative_runner, "run_detector") as run_detector:
+            runner.run_cached_response(arguments, ["WFI01"])
+        run_detector.assert_called_once_with(
+            "WFI01",
+            Path("."),
+            Path("cache"),
+            selected_tile_ids=None,
+            tile_size=256,
+            output_root=None,
+            force=False,
+            workers=2,
+        )
 
-    def test_run_detector_uses_process_pool_for_multiple_workers(self):
-        class InlinePool:
-            def __init__(self, **kwargs):
-                self.kwargs = kwargs
+    def test_response_cache_argument_requires_one_detector(self):
+        arguments = runner.parse_args(
+            ["--statistics-dir", ".", "--response-cache-root", "cache"]
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one --detector"):
+            runner.run_cached_response(arguments, list(runner.DETECTORS))
 
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def map(self, function, jobs):
-                return [function(job) for job in jobs]
-
+    def test_run_detector_uses_data_driven_alternate_layout(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            source = root / "wfi01_tile_log_statistics_512_count_corrected.csv"
-            self.write_statistics(source)
+            statistics = root / "wfi01_tile_log_statistics_256_count_corrected.csv"
+            fields = ("tile_id", "group")
+            with statistics.open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                for tile_id in range(4):
+                    writer.writerow({"tile_id": tile_id, "group": 0})
             reference_dir = root / "reference"
             reference_dir.mkdir()
             for name in (
@@ -108,14 +191,53 @@ class ProductionRunnerTests(unittest.TestCase):
                 "WFI_Quantum_efficiency.ecsv",
             ):
                 (reference_dir / name).write_text("reference\n")
-            pool = InlinePool(max_workers=2)
 
             with patch.object(runner, "REFERENCE_DATA_DIR", reference_dir), patch.object(
-                runner, "TILE_COUNT", 2
-            ), patch.object(runner.emcee_warmup, "run_emcee"), patch.object(
+                runner.emcee_warmup, "run_emcee"
+            ) as run_emcee, patch.object(
+                runner, "_run_tile_jobs", return_value=[]
+            ) as run_tile_jobs, patch.object(
+                runner, "write_detector_rate_posterior", return_value=None
+            ):
+                runner.run_detector(
+                    "WFI01",
+                    None,
+                    root,
+                    False,
+                    0.1,
+                    tile_size=256,
+                    workers=1,
+                )
+
+            output_root = root / "production" / "tile_size_256" / "wfi01"
+            self.assertEqual(run_emcee.call_args.args[0].name, "wfi01_tile_log_statistics_256_tile_000.csv")
+            self.assertEqual(len(run_tile_jobs.call_args.args[0]), 4)
+            self.assertEqual(run_tile_jobs.call_args.args[1:], (1, 1800.0))
+            self.assertTrue(output_root.is_dir())
+
+    def test_run_detector_uses_supervised_tile_processes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            statistics = root / "wfi01_tile_log_statistics_256_count_corrected.csv"
+            fields = ("tile_id", "group")
+            with statistics.open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                for tile_id in range(4):
+                    writer.writerow({"tile_id": tile_id, "group": 0})
+            reference_dir = root / "reference"
+            reference_dir.mkdir()
+            for name in (
+                "WFI_RCS_LEDP_spectral_energy_distribution.ecsv",
+                "WFI_Quantum_efficiency.ecsv",
+            ):
+                (reference_dir / name).write_text("reference\n")
+            with patch.object(runner, "REFERENCE_DATA_DIR", reference_dir), patch.object(
+                runner.emcee_warmup, "run_emcee"
+            ), patch.object(
+                runner, "_run_tile_jobs", return_value=[]
+            ) as run_tile_jobs, patch.object(
                 runner, "fit_tile"
-            ) as fit_tile, patch.object(
-                runner, "ProcessPoolExecutor", return_value=pool
             ), patch.object(runner, "write_detector_rate_posterior", return_value=None):
                 runner.run_detector(
                     "WFI01",
@@ -123,11 +245,46 @@ class ProductionRunnerTests(unittest.TestCase):
                     root,
                     False,
                     0.1,
-                    workers=2,
+                    tile_size=256,
+                    workers=4,
                 )
 
-            self.assertEqual(pool.kwargs["max_workers"], 2)
-            self.assertEqual(fit_tile.call_count, 2)
+            self.assertEqual(len(run_tile_jobs.call_args.args[0]), 4)
+            self.assertEqual(run_tile_jobs.call_args.args[1:], (2, 1800.0))
+
+    def test_tile_timeout_is_retried_serially_without_aborting_batch(self):
+        jobs = [(3, "tile-3"), (7, "tile-7")]
+        with patch.object(
+            runner,
+            "_run_tile_batch",
+            side_effect=[[(jobs[0], "exceeded timeout")], []],
+        ) as run_tile_batch:
+            failures = runner._run_tile_jobs(
+                jobs,
+                2,
+                10.0,
+                retry_timeout_seconds=20.0,
+            )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(run_tile_batch.call_count, 2)
+        self.assertEqual(run_tile_batch.call_args_list[0].args[0], jobs)
+        self.assertEqual(run_tile_batch.call_args_list[0].args[1:3], (2, 10.0))
+        self.assertEqual(run_tile_batch.call_args_list[1].args[0], [jobs[0]])
+        self.assertEqual(run_tile_batch.call_args_list[1].args[1:3], (1, 20.0))
+
+    def test_tile_timeout_kills_only_that_worker_and_continues(self):
+        failures = runner._run_tile_jobs(
+            [(3,), (7,)],
+            2,
+            5.0,
+            process_target=_timeout_test_process,
+            retry_timeout_seconds=1.0,
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0][0], (3,))
+        self.assertIn("timeout", failures[0][1])
 
     def test_statistics_reset_day_uses_first_program_1063_row(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -170,12 +327,23 @@ class ProductionRunnerTests(unittest.TestCase):
             fit_dir = Path(temporary)
             np.savez(
                 fit_dir / "posterior_samples.npz",
-                trajectory_regularization=np.asarray("maxent"),
-                trajectory_entropy_weight=np.asarray(0.1),
+                production_model_version=np.asarray(runner.PRODUCTION_MODEL_VERSION),
+                trajectory_regularization=np.asarray("none"),
+                trajectory_entropy_weight=np.asarray(0.0),
+                thickness_penalty_enabled=np.asarray(0),
                 constant_rate_map_warmup=np.asarray(1),
             )
             self.assertTrue(runner.archive_matches_production_model(fit_dir))
             self.assertFalse(runner.archive_matches_production_model(fit_dir, 0.03))
+            legacy_dir = fit_dir / "legacy"
+            legacy_dir.mkdir()
+            np.savez(
+                legacy_dir / "posterior_samples.npz",
+                trajectory_regularization=np.asarray("maxent"),
+                trajectory_entropy_weight=np.asarray(0.1),
+                constant_rate_map_warmup=np.asarray(1),
+            )
+            self.assertFalse(runner.archive_matches_production_model(legacy_dir))
 
 
 if __name__ == "__main__":
