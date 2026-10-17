@@ -14,6 +14,8 @@ import numpy as np
 
 
 UTC = timezone.utc
+SCE_TEMPERATURE_CHANGE_UTC = datetime(2026, 10, 17, 3, 30, tzinfo=UTC)
+SCE_TEMPERATURE_CHANGE_LABEL = "SCE 153.5 to 155 K"
 
 
 @dataclass(frozen=True)
@@ -164,6 +166,14 @@ def load_time_annotations(statistics_path):
         ("ACM step 5", acm_repeats["day26_acm_step_repeat"], "acm"),
     )
     events = []
+    events.append(
+        Event(
+            label=SCE_TEMPERATURE_CHANGE_LABEL,
+            day=(SCE_TEMPERATURE_CHANGE_UTC - start_utc).total_seconds() / 86400.0,
+            repeat=-1,
+            kind="temperature",
+        )
+    )
     minimum_day = manifest.get("correction_settings", {}).get("minimum_day")
     if minimum_day is not None:
         events.append(
