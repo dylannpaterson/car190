@@ -1,0 +1,669 @@
+"""Run per-tile ice-only fits using saved fixed-optics response caches."""
+
+import argparse
+import csv
+import json
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
+import fit_wfi_relative_response as relative_fit
+from wfi_relative_response import (
+    CACHE_VERSION,
+    PRODUCTION_ENTROPY_WEIGHT,
+    PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY,
+    VARIABLE_SITES,
+    load_response_cache,
+    validate_response_cache_provenance,
+)
+from wfi_production_layout import (
+    DEFAULT_TILE_SIZE,
+    complete_tile_ids,
+    corrected_statistics_path,
+    detector_output_root,
+    positive_integer,
+    tile_statistics_path,
+)
+
+
+DETECTORS = tuple(f"WFI{index:02d}" for index in range(1, 19))
+DEFAULT_WORKERS = 4
+
+
+def normalize_detector(value):
+    detector = value.upper()
+    if detector not in DETECTORS:
+        raise ValueError(f"Unknown detector name: {value}")
+    return detector
+
+
+def tile_statistics_paths(detector, statistics, statistics_root, tile_size):
+    with Path(statistics).open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = reader.fieldnames
+        rows_by_tile = {}
+        for row in reader:
+            rows_by_tile.setdefault(int(row["tile_id"]), []).append(row)
+    if not fieldnames or not rows_by_tile:
+        raise ValueError(f"No tile statistics found in {statistics}")
+    statistics_root.mkdir(parents=True, exist_ok=True)
+    paths = {}
+    for tile_id, rows in sorted(rows_by_tile.items()):
+        path = tile_statistics_path(statistics_root, detector, tile_size, tile_id)
+        with path.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        paths[tile_id] = path
+    return paths
+
+
+def cache_source_paths(cache_path):
+    import numpy as np
+
+    with np.load(cache_path, allow_pickle=False) as cache:
+        source_fit = Path(str(cache["source_fit"].reshape(-1)[0]))
+        source_statistics = Path(str(cache["source_statistics"].reshape(-1)[0]))
+    if not source_fit.is_file():
+        raise FileNotFoundError(f"Cached source fit is missing: {source_fit}")
+    if not source_statistics.is_file():
+        raise FileNotFoundError(
+            f"Cached source statistics are missing: {source_statistics}"
+        )
+    return source_fit, source_statistics
+
+
+def detector_rate_initialization_nm_day(cache_root):
+    """Return a robust detector-level constant-rate warm start from source fits."""
+    import numpy as np
+
+    tile_medians = []
+    cache_paths = sorted(Path(cache_root).glob("tile_*/relative_response.npz"))
+    if not cache_paths:
+        raise ValueError(f"No response caches found under {cache_root}")
+    for cache_path in cache_paths:
+        source_fit, _ = cache_source_paths(cache_path)
+        with np.load(source_fit, allow_pickle=False) as source:
+            if "node_instantaneous_rate_nm_day" not in source:
+                raise ValueError(f"Source fit lacks rate nodes: {source_fit}")
+            source_rates = np.asarray(
+                source["node_instantaneous_rate_nm_day"], dtype=float
+            ).reshape(-1)
+        if source_rates.size == 0 or not np.all(np.isfinite(source_rates)):
+            raise ValueError(f"Source fit has invalid rate nodes: {source_fit}")
+        tile_medians.append(float(np.median(source_rates)))
+    initialization = float(np.median(np.asarray(tile_medians)))
+    if not np.isfinite(initialization) or initialization <= 0.0:
+        raise ValueError("Detector rate initialization must be positive and finite")
+    return initialization
+
+
+def cached_fit_matches(output_dir, statistics_path, cache_path):
+    import numpy as np
+
+    try:
+        with np.load(Path(output_dir) / "posterior_samples.npz", allow_pickle=False) as fit:
+            fit_mode = str(np.asarray(fit["fit_mode"]).reshape(-1)[0])
+            archived_statistics = str(
+                np.asarray(fit["statistics_fingerprint"]).reshape(-1)[0]
+            )
+            archived_cache = str(np.asarray(fit["response_cache"]).reshape(-1)[0])
+        return (
+            fit_mode == "relative_response_production"
+            and archived_statistics == relative_fit.statistics_fingerprint(statistics_path)
+            and archived_cache == str(Path(cache_path).resolve())
+            and (Path(output_dir) / "tile_rate_posterior.csv").is_file()
+        )
+    except (KeyError, OSError, ValueError):
+        return False
+
+
+def fit_tile(
+    tile_id,
+    statistics_path,
+    cache_path,
+    output_dir,
+    force,
+    trajectory_rate_initialization_nm_day=PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY,
+):
+    output_dir = Path(output_dir)
+    posterior_path = output_dir / "posterior_samples.npz"
+    if not force and cached_fit_matches(output_dir, statistics_path, cache_path):
+        print(f"Skipping tile {tile_id}: cached fit already exists", flush=True)
+        return output_dir
+    if posterior_path.is_file() and not force:
+        print(f"Refitting tile {tile_id}: cached fit metadata does not match", flush=True)
+    initial_fit, initial_statistics = cache_source_paths(cache_path)
+    relative_fit.fit_one(
+        statistics_path,
+        cache_path,
+        initial_fit,
+        initial_statistics,
+        output_dir,
+        trajectory_rate_initialization_nm_day=trajectory_rate_initialization_nm_day,
+    )
+    return output_dir
+
+
+def _fit_tile_worker(arguments):
+    return fit_tile(*arguments)
+
+
+def fit_tiles_batch(jobs):
+    """Fit a batch of independent tiles with one vectorized JAX objective."""
+    import numpy as np
+
+    if not jobs:
+        return []
+    active_jobs = []
+    for job in jobs:
+        (
+            tile_id,
+            statistics_path,
+            cache_path,
+            output_dir,
+            force,
+            trajectory_rate_initialization_nm_day,
+        ) = job
+        output_dir = Path(output_dir)
+        if not force and cached_fit_matches(output_dir, statistics_path, cache_path):
+            print(f"Skipping tile {tile_id}: cached fit already exists", flush=True)
+            continue
+        if output_dir.joinpath("posterior_samples.npz").is_file() and not force:
+            print(
+                f"Refitting tile {tile_id}: cached fit metadata does not match",
+                flush=True,
+            )
+        active_jobs.append(job)
+    if not active_jobs:
+        return []
+
+    jax, jnp, _, _ = relative_fit.production.require_numpyro()
+    jax.config.update("jax_enable_x64", True)
+    data_list = []
+    cache_list = []
+    initial_values_list = []
+    contexts = []
+    for (
+        tile_id,
+        statistics_path,
+        cache_path,
+        output_dir,
+        force,
+        trajectory_rate_initialization_nm_day,
+    ) in active_jobs:
+        initial_fit, initial_statistics = cache_source_paths(cache_path)
+        data = relative_fit.production.load_tile_statistics(statistics_path)
+        data["statistics_path"] = str(statistics_path)
+        context = relative_fit.production.load_response_context(data["sca_names"])
+        data["qe_columns"] = context["qe_columns"]
+        data["response_wavelengths_nm"] = context["wavelengths"]
+        data["response_wavelength_count"] = int(context["wavelengths"].size)
+        cache = load_response_cache(cache_path, data, context)
+        values = relative_fit.load_warm_values(
+            data,
+            initial_fit,
+            initial_statistics,
+            trajectory_rate_initialization_nm_day=trajectory_rate_initialization_nm_day,
+        )
+        data_list.append(data)
+        cache_list.append(cache)
+        initial_values_list.append(values)
+        contexts.append(context)
+    reference_context = contexts[0]
+    if any(
+        relative_fit.context_fingerprint(context)
+        != relative_fit.context_fingerprint(reference_context)
+        for context in contexts[1:]
+    ):
+        raise ValueError("Cannot batch tiles with different response contexts")
+
+    values, diagnostics = relative_fit.fit_ice_only_batch(
+        data_list,
+        cache_list,
+        initial_values_list,
+        jax,
+        jnp,
+    )
+    diagnostics_by_tile = {
+        "converged": diagnostics["converged"],
+        "message": diagnostics["message"],
+        "nfev": diagnostics["nfev"],
+        "parameter_count": diagnostics["parameter_count"],
+        "compile_seconds": diagnostics["compile_seconds"],
+        "total_seconds": diagnostics["total_seconds"] / len(active_jobs),
+    }
+    output_dirs = []
+    for index, job in enumerate(active_jobs):
+        (
+            tile_id,
+            statistics_path,
+            cache_path,
+            output_dir,
+            force,
+            trajectory_rate_initialization_nm_day,
+        ) = job
+        tile_values = dict(initial_values_list[index])
+        for name in VARIABLE_SITES:
+            source = np.asarray(tile_values[name])
+            target_shape = source.shape
+            batch_value = np.asarray(values[name])
+            tile_values[name] = batch_value[index].reshape(target_shape)
+        state = relative_fit.relative_state(
+            data_list[index],
+            tile_values,
+            cache_list[index],
+            jax,
+            jnp,
+        )
+        tile_diagnostics = dict(diagnostics_by_tile)
+        tile_diagnostics["initial_residual_cost"] = float(
+            diagnostics["initial_residual_costs"][index]
+        )
+        tile_diagnostics["residual_cost"] = float(
+            diagnostics["residual_costs"][index]
+        )
+        tile_diagnostics["trajectory_rate_initialization_nm_day"] = float(
+            diagnostics["trajectory_rate_initialization_nm_day"][index]
+        )
+        relative_fit.write_outputs(
+            output_dir,
+            data_list[index],
+            tile_values,
+            state,
+            tile_diagnostics,
+            cache_path,
+            jax,
+            jnp,
+        )
+        print(
+            f"Wrote relative-response fit under {output_dir} "
+            f"(batch of {len(active_jobs)}; {diagnostics['nfev']} evaluations)",
+            flush=True,
+        )
+        output_dirs.append(output_dir)
+    return output_dirs
+
+
+def _fit_tile_batch_worker(jobs):
+    return fit_tiles_batch(jobs)
+
+
+def fit_tiles_reusable(jobs):
+    """Fit tiles sequentially with one reusable compiled evaluator."""
+    import numpy as np
+
+    if not jobs:
+        return []
+    active_jobs = []
+    for job in jobs:
+        (
+            tile_id,
+            statistics_path,
+            cache_path,
+            output_dir,
+            force,
+            trajectory_rate_initialization_nm_day,
+        ) = job
+        output_dir = Path(output_dir)
+        if not force and cached_fit_matches(output_dir, statistics_path, cache_path):
+            print(f"Skipping tile {tile_id}: cached fit already exists", flush=True)
+            continue
+        if output_dir.joinpath("posterior_samples.npz").is_file() and not force:
+            print(
+                f"Refitting tile {tile_id}: cached fit metadata does not match",
+                flush=True,
+            )
+        active_jobs.append(job)
+    if not active_jobs:
+        return []
+
+    jax, jnp, _, _ = relative_fit.production.require_numpyro()
+    jax.config.update("jax_enable_x64", True)
+    data_list = []
+    cache_list = []
+    initial_values_list = []
+    contexts = []
+    for (
+        tile_id,
+        statistics_path,
+        cache_path,
+        output_dir,
+        force,
+        trajectory_rate_initialization_nm_day,
+    ) in active_jobs:
+        initial_fit, initial_statistics = cache_source_paths(cache_path)
+        data = relative_fit.production.load_tile_statistics(statistics_path)
+        data["statistics_path"] = str(statistics_path)
+        context = relative_fit.production.load_response_context(data["sca_names"])
+        data["qe_columns"] = context["qe_columns"]
+        data["response_wavelengths_nm"] = context["wavelengths"]
+        data["response_wavelength_count"] = int(context["wavelengths"].size)
+        cache = load_response_cache(cache_path, data, context)
+        values = relative_fit.load_warm_values(
+            data,
+            initial_fit,
+            initial_statistics,
+            trajectory_rate_initialization_nm_day=trajectory_rate_initialization_nm_day,
+        )
+        data_list.append(data)
+        cache_list.append(cache)
+        initial_values_list.append(values)
+        contexts.append(context)
+    reference_context = contexts[0]
+    if any(
+        relative_fit.context_fingerprint(context)
+        != relative_fit.context_fingerprint(reference_context)
+        for context in contexts[1:]
+    ):
+        raise ValueError("Cannot reuse an evaluator across different response contexts")
+
+    shared_names = (
+        "days",
+        "node_days",
+        "led",
+        "repeat",
+        "program",
+        "groups",
+        "first_by_led",
+        "repeat_values",
+        "repeat_index",
+        "exposure_times",
+        "reset_day",
+    )
+    for data in data_list[1:]:
+        for name in shared_names:
+            if not np.array_equal(np.asarray(data_list[0][name]), np.asarray(data[name])):
+                raise ValueError(
+                    f"Cannot reuse an evaluator across different {name} layouts"
+                )
+    first_grid = np.asarray(cache_list[0]["grid_nm"])
+    if any(not np.array_equal(first_grid, cache["grid_nm"]) for cache in cache_list[1:]):
+        raise ValueError("Cannot reuse an evaluator across different cache grids")
+    evaluator = relative_fit.build_ice_only_evaluator(
+        data_list[0],
+        initial_values_list[0],
+        cache_list[0],
+        jax,
+        jnp,
+    )
+    output_dirs = []
+    for index, job in enumerate(active_jobs):
+        (
+            tile_id,
+            statistics_path,
+            cache_path,
+            output_dir,
+            force,
+            trajectory_rate_initialization_nm_day,
+        ) = job
+        values, diagnostics = relative_fit.fit_ice_only_reusable(
+            data_list[index],
+            cache_list[index],
+            initial_values_list[index],
+            evaluator,
+            jax,
+            jnp,
+        )
+        state = relative_fit.relative_state(
+            data_list[index],
+            values,
+            cache_list[index],
+            jax,
+            jnp,
+        )
+        relative_fit.write_outputs(
+            output_dir,
+            data_list[index],
+            values,
+            state,
+            diagnostics,
+            cache_path,
+            jax,
+            jnp,
+        )
+        print(
+            f"Wrote relative-response fit under {output_dir} "
+            f"(reused evaluator; {diagnostics['nfev']} evaluations)",
+            flush=True,
+        )
+        output_dirs.append(output_dir)
+    return output_dirs
+
+
+def _fit_tile_reusable_worker(jobs):
+    return fit_tiles_reusable(jobs)
+
+
+def _configure_parallel_environment(workers):
+    if workers <= 1:
+        return
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        os.environ.setdefault(name, "1")
+
+
+def write_detector_rate_posterior(fit_root, output_root):
+    rows = []
+    fieldnames = None
+    for path in sorted(Path(fit_root).glob("tile_*/tile_rate_posterior.csv")):
+        with path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            if fieldnames is None:
+                fieldnames = reader.fieldnames
+            elif reader.fieldnames != fieldnames:
+                raise ValueError(f"Inconsistent tile-rate fields in {path}")
+            rows.extend(reader)
+    if not rows or not fieldnames:
+        return None
+    output = Path(output_root) / "tile_rate_posterior.csv"
+    with output.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return output
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--statistics-dir", type=Path, required=True)
+    parser.add_argument("--response-cache-root", type=Path, required=True)
+    parser.add_argument("--detector", default="WFI01")
+    parser.add_argument("--tile-id", type=int, action="append")
+    parser.add_argument("--tile-size", type=positive_integer, default=DEFAULT_TILE_SIZE)
+    parser.add_argument("--output-root", type=Path)
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--workers", type=positive_integer, default=DEFAULT_WORKERS)
+    parser.add_argument(
+        "--batch-size",
+        type=positive_integer,
+        default=8,
+        help="Independent tiles per joint JAX fit batch when --joint-batch is set.",
+    )
+    parser.add_argument(
+        "--joint-batch",
+        action="store_true",
+        help="Fit each batch jointly; default reuses one evaluator across independent tiles.",
+    )
+    parser.add_argument(
+        "--allow-external-cache-source",
+        action="store_true",
+        help=(
+            "Reuse the source fit/statistics embedded in a pinned cache from "
+            "another production run instead of requiring current-run fits."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def run_detector(
+    detector,
+    statistics_dir,
+    response_cache_root,
+    selected_tile_ids=None,
+    tile_size=DEFAULT_TILE_SIZE,
+    output_root=None,
+    force=False,
+    workers=DEFAULT_WORKERS,
+    batch_size=8,
+    joint_batch=False,
+    allow_external_cache_source=False,
+):
+    detector = normalize_detector(detector)
+    statistics_dir = Path(statistics_dir)
+    statistics = corrected_statistics_path(statistics_dir, detector, tile_size)
+    if not statistics.is_file():
+        raise FileNotFoundError(statistics)
+    output_root = (
+        detector_output_root(statistics_dir, detector, tile_size)
+        / "relative_response"
+        if output_root is None
+        else Path(output_root)
+    )
+    statistics_root = output_root / "tile_statistics"
+    fit_root = output_root / "fits"
+    paths = tile_statistics_paths(detector, statistics, statistics_root, tile_size)
+    complete_tile_ids(paths, label=f"{detector} statistics tile IDs")
+    selected = (
+        sorted(paths)
+        if selected_tile_ids is None
+        else sorted(set(selected_tile_ids))
+    )
+    missing = sorted(set(selected).difference(paths))
+    if missing:
+        raise ValueError(f"Unknown tile IDs for {detector}: {missing}")
+    cache_root = Path(response_cache_root)
+    rate_initialization_nm_day = detector_rate_initialization_nm_day(cache_root)
+    print(
+        f"Using {detector} detector-median rate warm start: "
+        f"{rate_initialization_nm_day:.12g} nm/day",
+        flush=True,
+    )
+    jobs = []
+    production_root = detector_output_root(statistics_dir, detector, tile_size)
+    source_fit_root = production_root / "fits"
+    source_statistics_root = production_root / "tile_statistics"
+    for tile_id in selected:
+        cache_path = cache_root / f"tile_{tile_id:03d}" / "relative_response.npz"
+        if not cache_path.is_file():
+            raise FileNotFoundError(cache_path)
+        if allow_external_cache_source:
+            validate_response_cache_provenance(cache_path)
+        else:
+            validate_response_cache_provenance(
+                cache_path,
+                expected_fit=source_fit_root
+                / f"tile_{tile_id:03d}"
+                / "posterior_samples.npz",
+                expected_statistics=tile_statistics_path(
+                    source_statistics_root,
+                    detector,
+                    tile_size,
+                    tile_id,
+                ),
+            )
+        jobs.append(
+            (
+                tile_id,
+                paths[tile_id],
+                cache_path,
+                fit_root / f"tile_{tile_id:03d}",
+                force,
+                rate_initialization_nm_day,
+            )
+        )
+    active_workers = min(workers, len(jobs)) if jobs else 1
+    _configure_parallel_environment(active_workers)
+    print(
+        f"Fitting {len(jobs)} {detector} tile(s) with "
+        f"{active_workers} cached-response worker(s), "
+        f"{'joint batch size ' + str(batch_size) if joint_batch else 'reused evaluator'}",
+        flush=True,
+    )
+    fit_root.mkdir(parents=True, exist_ok=True)
+    if batch_size <= 1 and not joint_batch:
+        if active_workers == 1:
+            for job in jobs:
+                _fit_tile_worker(job)
+        else:
+            context = multiprocessing.get_context("spawn")
+            with ProcessPoolExecutor(
+                max_workers=active_workers,
+                mp_context=context,
+            ) as executor:
+                list(executor.map(_fit_tile_worker, jobs))
+    elif joint_batch:
+        batches = [jobs[start : start + batch_size] for start in range(0, len(jobs), batch_size)]
+        if active_workers == 1:
+            for batch in batches:
+                _fit_tile_batch_worker(batch)
+        else:
+            context = multiprocessing.get_context("spawn")
+            with ProcessPoolExecutor(
+                max_workers=active_workers,
+                mp_context=context,
+            ) as executor:
+                list(executor.map(_fit_tile_batch_worker, batches))
+    else:
+        chunks = [jobs[index::active_workers] for index in range(active_workers)]
+        if active_workers == 1:
+            _fit_tile_reusable_worker(chunks[0])
+        else:
+            context = multiprocessing.get_context("spawn")
+            with ProcessPoolExecutor(
+                max_workers=active_workers,
+                mp_context=context,
+            ) as executor:
+                list(executor.map(_fit_tile_reusable_worker, chunks))
+    output = write_detector_rate_posterior(fit_root, output_root)
+    metadata = {
+        "detector": detector,
+        "fit_mode": "relative_response_production",
+        "response_cache_version": int(CACHE_VERSION),
+        "cache_policy": "pinned_current_run_rebuild_only_after_reprocessing_or_model_change",
+        "temperature_dependent_gain_uncorrected_data_supported": False,
+        "response_cache_root": str(cache_root.resolve()),
+        "statistics": str(statistics.resolve()),
+        "tile_size": int(tile_size),
+        "batch_size": int(batch_size),
+        "joint_batch": bool(joint_batch),
+        "allow_external_cache_source": bool(allow_external_cache_source),
+        "workers": int(workers),
+        "trajectory_rate_prior_mean_nm_day": float(
+            PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY
+        ),
+        "trajectory_rate_initialization_nm_day": float(rate_initialization_nm_day),
+        "trajectory_rate_prior_sigma_log": float(
+            relative_fit.production.TRAJECTORY_RATE_PRIOR_SIGMA_LOG
+        ),
+        "trajectory_entropy_weight": float(PRODUCTION_ENTROPY_WEIGHT),
+        "trajectory_regularization": "none",
+    }
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "relative_response_mode.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n"
+    )
+    if output is not None:
+        print(f"Wrote {output}", flush=True)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    run_detector(
+        args.detector,
+        args.statistics_dir,
+        args.response_cache_root,
+        selected_tile_ids=args.tile_id,
+        tile_size=args.tile_size,
+        output_root=args.output_root,
+        force=args.force,
+        workers=args.workers,
+        batch_size=args.batch_size,
+        joint_batch=args.joint_batch,
+        allow_external_cache_source=args.allow_external_cache_source,
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -16,7 +16,7 @@ from pathlib import Path
 
 TARGET_PROGRAM = "1063"
 EXPECTED_LEDS = frozenset(range(1, 7))
-STATISTICS_GLOB = "*_tile_log_statistics_512_count_corrected.csv"
+STATISTICS_GLOB_TEMPLATE = "*_tile_log_statistics_{tile_size}_count_corrected.csv"
 REQUIRED_FIELDS = frozenset(
     {"program", "repeat", "led", "exposure_start_time"}
 )
@@ -140,23 +140,34 @@ def thin_statistics_file(source, output, spacing_hours):
     }
 
 
-def thin_statistics_directory(source_dir, output_dir, spacing_hours, force=False):
+def thin_statistics_directory(
+    source_dir,
+    output_dir,
+    spacing_hours,
+    force=False,
+    tile_size=512,
+):
     source_dir = Path(source_dir)
     output_dir = Path(output_dir)
     if source_dir.resolve() == output_dir.resolve():
         raise ValueError("Source and output statistics directories must differ")
     if output_dir.exists() and not force:
-        existing = list(output_dir.glob(STATISTICS_GLOB))
+        existing = list(
+            output_dir.glob(
+                STATISTICS_GLOB_TEMPLATE.format(tile_size=int(tile_size))
+            )
+        )
         if existing:
             raise FileExistsError(
                 f"Output directory already contains statistics: {output_dir}; "
                 "use --force to replace them"
             )
 
-    source_paths = sorted(source_dir.glob(STATISTICS_GLOB))
+    statistics_glob = STATISTICS_GLOB_TEMPLATE.format(tile_size=int(tile_size))
+    source_paths = sorted(source_dir.glob(statistics_glob))
     if not source_paths:
         raise FileNotFoundError(
-            f"No corrected statistics files matching {STATISTICS_GLOB} in {source_dir}"
+            f"No corrected statistics files matching {statistics_glob} in {source_dir}"
         )
 
     files = {}
@@ -176,6 +187,7 @@ def thin_statistics_directory(source_dir, output_dir, spacing_hours, force=False
                 "cadence"
             ),
             "target_program": TARGET_PROGRAM,
+            "tile_size": int(tile_size),
             "spacing_hours": float(spacing_hours),
             "corrections": "preserve corrected sufficient statistics; apply no additional correction",
         },
@@ -208,6 +220,12 @@ def parse_args(argv=None):
         help="Minimum spacing between complete Program 1063 cycles; default: 1.",
     )
     parser.add_argument(
+        "--tile-size",
+        type=int,
+        default=512,
+        help="Tile edge length in the corrected-statistics filename; default: 512.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Replace existing derived statistics files.",
@@ -222,6 +240,7 @@ def main(argv=None):
         args.output_dir,
         args.spacing_hours,
         force=args.force,
+        tile_size=args.tile_size,
     )
     print(
         f"Wrote {len(manifest['files'])} detector files to "

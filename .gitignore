@@ -31,7 +31,9 @@ wfi01_*/
 
 # Keep the small reproducible fixtures used by the tests.
 !all_wfi_rcs_flat_index.csv
+!temperature_quadratic_coefficients.csv
 !wfi01_tile_log_statistics_512.csv
+!20261014/corrected_statistics_4h_thinned/production/tile_size_256/wfi05/fits/tile_136/plots/blackbody_sed_digitized.csv
 !README.md
 !docs/
 !docs/**

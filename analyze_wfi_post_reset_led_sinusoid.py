@@ -250,7 +250,7 @@ def plot_pooled(output_path, train_rows, test_rows, reset_day):
     for axis in axes[-1, :]:
         axis.set_xlabel("Days since first exposure")
     axes[0, 0].legend(frameon=False, fontsize=8)
-    figure.suptitle("Post-reset LED-specific sinusoid fit; Program 1063 held out")
+    figure.suptitle("Post-Decon2 LED-specific sinusoid fit; Program 1063 held out")
     figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
     figure.savefig(output_path, dpi=180)
     plt.close(figure)

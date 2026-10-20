@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import matplotlib.dates as mdates
 from matplotlib.ticker import FuncFormatter
@@ -14,8 +15,11 @@ import numpy as np
 
 
 UTC = timezone.utc
+EASTERN = ZoneInfo("America/New_York")
 SCE_TEMPERATURE_CHANGE_UTC = datetime(2026, 10, 17, 3, 30, tzinfo=UTC)
 SCE_TEMPERATURE_CHANGE_LABEL = "SCE 153.5 to 155 K"
+ENCLOSURE_TEMPERATURE_CHANGE_UTC = datetime(2026, 10, 17, 23, 0, tzinfo=UTC)
+ENCLOSURE_TEMPERATURE_CHANGE_LABEL = "Enclosure temperature +4 K"
 
 
 @dataclass(frozen=True)
@@ -49,10 +53,59 @@ def _read_rows(path):
         return list(csv.DictReader(handle))
 
 
+def _statistics_paths(statistics_path, tile_size=None):
+    statistics_path = Path(statistics_path)
+    if statistics_path.is_file():
+        return [statistics_path]
+    if not statistics_path.is_dir():
+        return []
+    pattern = "wfi*_tile_log_statistics_*.csv"
+    if tile_size is not None:
+        pattern = f"wfi*_tile_log_statistics_{int(tile_size)}*.csv"
+    return sorted(statistics_path.glob(pattern))
+
+
+def latest_observation_datetime(statistics_path, tile_size=None):
+    """Return the latest exposure timestamp normalized to UTC."""
+    latest = None
+    for path in _statistics_paths(statistics_path, tile_size):
+        for row in _read_rows(path):
+            value = str(row.get("exposure_start_time", "")).strip()
+            if not value:
+                continue
+            try:
+                observation = _parse_timestamp(value)
+            except ValueError:
+                continue
+            if latest is None or observation > latest:
+                latest = observation
+    return latest
+
+
+def _format_timestamp(value):
+    return value.strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip(".")
+
+
+def latest_observation_label(statistics_path, tile_size=None):
+    """Format the latest observation in both UTC and US Eastern time."""
+    latest = latest_observation_datetime(statistics_path, tile_size)
+    if latest is None:
+        return "Latest observation: unknown"
+    utc = latest.astimezone(UTC)
+    eastern = latest.astimezone(EASTERN)
+    return (
+        f"Latest observation: {_format_timestamp(utc)} UTC / "
+        f"{_format_timestamp(eastern)} {eastern.tzname()}"
+    )
+
+
 def _canonical_statistics_path(path):
     path = Path(path)
-    detector = path.name.split("_tile_log_statistics_", 1)[0].lower()
-    canonical_name = f"{detector}_tile_log_statistics_512_count_corrected.csv"
+    detector, suffix = path.name.split("_tile_log_statistics_", 1)
+    tile_size = suffix.split("_", 1)[0].split(".", 1)[0]
+    canonical_name = (
+        f"{detector.lower()}_tile_log_statistics_{tile_size}_count_corrected.csv"
+    )
     for parent in path.parents:
         candidate = parent / "corrected_statistics" / canonical_name
         if candidate.is_file():
@@ -170,6 +223,17 @@ def load_time_annotations(statistics_path):
         Event(
             label=SCE_TEMPERATURE_CHANGE_LABEL,
             day=(SCE_TEMPERATURE_CHANGE_UTC - start_utc).total_seconds() / 86400.0,
+            repeat=-1,
+            kind="temperature",
+        )
+    )
+    events.append(
+        Event(
+            label=ENCLOSURE_TEMPERATURE_CHANGE_LABEL,
+            day=(
+                ENCLOSURE_TEMPERATURE_CHANGE_UTC - start_utc
+            ).total_seconds()
+            / 86400.0,
             repeat=-1,
             kind="temperature",
         )

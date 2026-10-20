@@ -8,15 +8,25 @@ import bundle_wfi_production_prior as bundler
 
 
 class WfiProductionBundleTests(unittest.TestCase):
-    def write_archives(self, root, layout):
-        fit_root = root / "production" / "wfi01" / "fits"
+    def write_archives(
+        self,
+        root,
+        layout,
+        tile_size=bundler.DEFAULT_TILE_SIZE,
+        tile_count=64,
+    ):
+        fit_root = root / "production"
+        if tile_size != bundler.DEFAULT_TILE_SIZE:
+            fit_root /= f"tile_size_{tile_size}"
+        fit_root /= "wfi01"
+        fit_root /= "fits"
         if layout == "legacy":
             fit_root = (
                 root
                 / "wfi01_absolute_substrate_power_hgcdte_prior025_independent_tiles_least_squares"
                 / "fits"
             )
-        for tile_id in range(64):
+        for tile_id in range(tile_count):
             suffix = "_least_squares" if layout == "legacy" else ""
             path = fit_root / f"tile_{tile_id:03d}{suffix}"
             path.mkdir(parents=True)
@@ -43,6 +53,19 @@ class WfiProductionBundleTests(unittest.TestCase):
             self.write_archives(root, "legacy")
             archives, layout = bundler.find_fit_archives(root, "WFI01")
             self.assertEqual(layout, "legacy_independent_production")
+            self.assertEqual(sorted(archives), list(range(64)))
+
+    def test_complete_alternate_tile_layout_is_selected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_archives(root, "new", tile_size=512, tile_count=64)
+            archives, layout = bundler.find_fit_archives(
+                root,
+                "WFI01",
+                tile_size=512,
+                expected_tile_ids=range(64),
+            )
+            self.assertEqual(layout, "production")
             self.assertEqual(sorted(archives), list(range(64)))
 
     def test_ar_schema_exposes_raw_and_physical_thickness(self):

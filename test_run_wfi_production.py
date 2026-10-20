@@ -69,7 +69,7 @@ class ProductionRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             statistics,
-            Path("corrected/wfi03_tile_log_statistics_512_count_corrected.csv"),
+            Path("corrected/wfi03_tile_log_statistics_256_count_corrected.csv"),
         )
         self.assertEqual(
             output,
@@ -83,28 +83,28 @@ class ProductionRunnerTests(unittest.TestCase):
         statistics, output, split, fits, emcee = runner.detector_paths(
             "WFI03",
             Path("corrected"),
-            tile_size=256,
+            tile_size=512,
         )
         self.assertEqual(
             statistics,
-            Path("corrected/wfi03_tile_log_statistics_256_count_corrected.csv"),
+            Path("corrected/wfi03_tile_log_statistics_512_count_corrected.csv"),
         )
         self.assertEqual(
             output,
-            Path("corrected") / "production" / "tile_size_256" / "wfi03",
+            Path("corrected") / "production" / "tile_size_512" / "wfi03",
         )
         self.assertEqual(split, output / "tile_statistics")
         self.assertEqual(fits, output / "fits")
         self.assertEqual(emcee, output / "emcee")
 
-    def test_tile_size_argument_defaults_to_512(self):
+    def test_tile_size_argument_defaults_to_256(self):
         arguments = runner.parse_args(["--statistics-dir", "."])
-        self.assertEqual(arguments.tile_size, 512)
+        self.assertEqual(arguments.tile_size, 256)
         self.assertEqual(arguments.workers, 2)
         self.assertEqual(arguments.tile_timeout_seconds, 1800.0)
         self.assertEqual(
             arguments.absolute_hgcdte_n_scale_prior_sigma_log,
-            0.01,
+            0.25,
         )
         self.assertEqual(
             runner.parse_args(["--statistics-dir", ".", "--tile-size", "256"]).tile_size,
@@ -165,6 +165,8 @@ class ProductionRunnerTests(unittest.TestCase):
             output_root=None,
             force=False,
             workers=2,
+            batch_size=8,
+            joint_batch=False,
         )
 
     def test_response_cache_argument_requires_one_detector(self):
@@ -173,6 +175,22 @@ class ProductionRunnerTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "exactly one --detector"):
             runner.run_cached_response(arguments, list(runner.DETECTORS))
+
+    def test_response_cache_can_reuse_external_source_provenance(self):
+        arguments = runner.parse_args(
+            [
+                "--statistics-dir",
+                ".",
+                "--detector",
+                "WFI01",
+                "--response-cache-root",
+                "cache",
+                "--allow-external-cache-source",
+            ]
+        )
+        with patch.object(relative_runner, "run_detector") as run_detector:
+            runner.run_cached_response(arguments, ["WFI01"])
+        self.assertTrue(run_detector.call_args.kwargs["allow_external_cache_source"])
 
     def test_run_detector_uses_data_driven_alternate_layout(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -209,8 +227,24 @@ class ProductionRunnerTests(unittest.TestCase):
                     workers=1,
                 )
 
-            output_root = root / "production" / "tile_size_256" / "wfi01"
+            output_root = root / "production" / "wfi01"
             self.assertEqual(run_emcee.call_args.args[0].name, "wfi01_tile_log_statistics_256_tile_000.csv")
+            self.assertEqual(run_emcee.call_args.kwargs["trajectory"], "constant-rate")
+            self.assertFalse(run_emcee.call_args.kwargs["fit_incidence_angle"])
+            self.assertEqual(
+                run_emcee.call_args.kwargs["trajectory_rate_prior_mean_nm_day"],
+                runner.PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY,
+            )
+            self.assertEqual(
+                run_emcee.call_args.kwargs["absolute_hgcdte_n_scale_prior_sigma_log"],
+                runner.PRODUCTION_ABSOLUTE_HGCDTE_N_SCALE_PRIOR_SIGMA_LOG,
+            )
+            self.assertTrue(run_emcee.call_args.kwargs["fit_ice_n_constant"])
+            self.assertFalse(run_emcee.call_args.kwargs["fit_ar_k_constant"])
+            self.assertEqual(
+                run_emcee.call_args.kwargs["fixed_ice_n_log_constant"],
+                runner.PRODUCTION_FIXED_ICE_N_LOG_CONSTANT,
+            )
             self.assertEqual(len(run_tile_jobs.call_args.args[0]), 4)
             self.assertEqual(run_tile_jobs.call_args.args[1:], (1, 1800.0))
             self.assertTrue(output_root.is_dir())

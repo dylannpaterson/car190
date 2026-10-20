@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+from datetime import datetime, timezone
 from pathlib import Path
 
 import matplotlib
@@ -13,6 +14,17 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Rectangle
 import numpy as np
 
+from wfi_production_plot_annotations import latest_observation_label
+from wfi_production_layout import (
+    DEFAULT_TILE_SIZE,
+    complete_tile_ids,
+    detector_output_root as production_detector_output_root,
+    positive_integer,
+    production_output_root,
+    tile_directory_entries,
+    tile_grid_size_for_tile_size,
+)
+
 
 ROOT = Path(__file__).resolve().parent
 SCAS = tuple(f"WFI{index:02d}" for index in range(1, 19))
@@ -23,13 +35,20 @@ METRICS = (
     ("Mean rate", "mean_rate_nm_day_median"),
 )
 RESET_METRICS = (
-    ("Mean before reset", "pre_reset_mean_rate_nm_day"),
-    ("Mean after reset", "post_reset_mean_rate_nm_day"),
+    ("Mean before Decon2", "pre_reset_mean_rate_nm_day"),
+    ("Mean after Decon2", "post_reset_mean_rate_nm_day"),
 )
 TREND_METRICS = (
-    ("Linear trend before reset", "pre_reset_trend_rate_nm_day"),
-    ("Linear trend after reset", "post_reset_trend_rate_nm_day"),
+    ("Linear trend before Decon2", "pre_reset_trend_rate_nm_day"),
+    ("Linear trend after Decon2", "post_reset_trend_rate_nm_day"),
 )
+TREND_RATE_COLOR_LIMITS = (7.9, 10.9)
+RMS_METRICS = (("RMS residual", "rms_residual_millilog"),)
+LAST_48H_METRICS = (
+    ("Mean accumulation rate, last 48 h", "last_48h_mean_rate_nm_day"),
+)
+CURRENT_THICKNESS_METRICS = (("Current ice thickness", "current_ice_thickness_nm"),)
+CURRENT_THICKNESS_VMAX_PERCENTILE = 99.0
 
 # The Roman WFI layout is a staggered six-column by three-row mosaic.  The
 # offsets reproduce the smile-shaped focal plane shown in the Roman reference
@@ -80,9 +99,13 @@ def load_rate_map(path, expected_sca):
     if rows is None:
         return None
 
+    coordinates = [
+        (int(row["tile_row"]), int(row["tile_col"])) for row in rows
+    ]
+    tile_grid_size = max(max(row, column) for row, column in coordinates) + 1
     maps = {}
     for _, field in METRICS:
-        values = np.full((8, 8), np.nan)
+        values = np.full((tile_grid_size, tile_grid_size), np.nan)
         for row in rows:
             values[int(row["tile_row"]), int(row["tile_col"])] = float(row[field])
         # MAST L1/L2 arrays are already in the common WFI science frame.
@@ -93,12 +116,14 @@ def load_rate_map(path, expected_sca):
 
 
 def maxent_fit_set_complete(output_dir):
-    """Return whether all 64 tile archives are current MaxEnt production fits."""
+    """Return whether all tile archives are current MaxEnt production fits."""
     fit_root = Path(output_dir) / "fits"
-    fit_dirs = sorted(fit_root.glob("tile_*"))
-    if [path.name for path in fit_dirs] != [f"tile_{tile_id:03d}" for tile_id in range(64)]:
+    entries = tile_directory_entries(fit_root)
+    try:
+        complete_tile_ids(tile_id for tile_id, _path in entries)
+    except ValueError:
         return False
-    for fit_dir in fit_dirs:
+    for _tile_id, fit_dir in entries:
         try:
             with np.load(fit_dir / "posterior_samples.npz", allow_pickle=False) as samples:
                 if (
@@ -155,10 +180,17 @@ def load_reset_rate_values(posterior_path):
 
 
 def reset_rate_maps_from_rows(
-    rows, tile_ids, pre_values, post_values, posterior_path
+    rows, tile_ids, pre_values, post_values, posterior_path, tile_grid_size=None
 ):
     tile_indices = {int(tile_id): index for index, tile_id in enumerate(tile_ids)}
-    maps = {field: np.full((8, 8), np.nan) for _, field in RESET_METRICS}
+    if tile_grid_size is None:
+        tile_grid_size = max(
+            max(int(row["tile_row"]), int(row["tile_col"])) for row in rows
+        ) + 1
+    maps = {
+        field: np.full((tile_grid_size, tile_grid_size), np.nan)
+        for _, field in RESET_METRICS
+    }
     for row in rows:
         tile_id = int(row["tile_id"])
         if tile_id not in tile_indices:
@@ -190,10 +222,17 @@ def load_reset_rate_map(output_dir, expected_sca):
 
     # Independent MAP runs archive one posterior per tile rather than one
     # detector-level posterior. Reconstruct the detector map from those files.
-    tile_fit_dirs = sorted((output_dir / "fits").glob("tile_*"))
-    if len(tile_fit_dirs) != 64:
+    entries = tile_directory_entries(output_dir / "fits")
+    try:
+        tile_ids = complete_tile_ids(tile_id for tile_id, _path in entries)
+    except ValueError:
         return None
-    maps = {field: np.full((8, 8), np.nan) for _, field in RESET_METRICS}
+    tile_fit_dirs = [path for _tile_id, path in entries]
+    tile_grid_size = int(len(tile_ids) ** 0.5)
+    maps = {
+        field: np.full((tile_grid_size, tile_grid_size), np.nan)
+        for _, field in RESET_METRICS
+    }
     reset_days = []
     for tile_fit_dir in tile_fit_dirs:
         tile_rows = load_tile_rows(
@@ -212,6 +251,7 @@ def load_reset_rate_map(output_dir, expected_sca):
             pre_mean,
             post_mean,
             tile_posterior,
+            tile_grid_size=tile_grid_size,
         )
         for field in tile_maps:
             finite = np.isfinite(tile_maps[field])
@@ -241,19 +281,56 @@ def _load_tile_thickness(posterior_path):
     return days, thickness, reset_day
 
 
+def mean_rate_over_interval(days, thickness, duration_days=1.0):
+    """Return the time-mean fitted accumulation rate over a trailing interval."""
+    if duration_days <= 0.0:
+        raise ValueError("duration_days must be positive")
+    days = np.asarray(days, dtype=float).reshape(-1)
+    thickness = np.asarray(thickness, dtype=float).reshape(-1)
+    if days.size != thickness.size:
+        raise ValueError("Days and thickness must have the same size")
+    finite = np.isfinite(days) & np.isfinite(thickness)
+    days = days[finite]
+    thickness = thickness[finite]
+    if days.size < 2:
+        return None
+    order = np.argsort(days)
+    days = days[order]
+    thickness = thickness[order]
+    end_day = float(days[-1])
+    start_day = end_day - float(duration_days)
+    if start_day < days[0]:
+        return None
+    start_thickness = float(np.interp(start_day, days, thickness))
+    end_thickness = float(np.interp(end_day, days, thickness))
+    return (end_thickness - start_thickness) / float(duration_days)
+
+
 def load_trend_rate_map(output_dir, expected_sca):
     rows = load_tile_rows(output_dir / "tile_rate_posterior.csv", expected_sca)
     fit_root = Path(output_dir) / "fits"
-    if rows is None or len(rows) != 64:
+    if rows is None:
         return None
+    row_tile_ids = [int(row["tile_id"]) for row in rows]
+    if len(set(row_tile_ids)) != len(row_tile_ids):
+        return None
+    try:
+        tile_ids = complete_tile_ids(row_tile_ids)
+    except ValueError:
+        return None
+    fit_dirs = dict(tile_directory_entries(fit_root))
+    tile_grid_size = int(len(tile_ids) ** 0.5)
     maps = {
-        field: np.full((8, 8), np.nan)
+        field: np.full((tile_grid_size, tile_grid_size), np.nan)
         for _, field in TREND_METRICS
     }
     reset_days = []
     for row in rows:
         tile_id = int(row["tile_id"])
-        posterior_path = fit_root / f"tile_{tile_id:03d}" / "posterior_samples.npz"
+        fit_dir = fit_dirs.get(tile_id)
+        if fit_dir is None:
+            return None
+        posterior_path = fit_dir / "posterior_samples.npz"
         if not posterior_path.is_file():
             return None
         days, thickness, reset_day = _load_tile_thickness(posterior_path)
@@ -273,21 +350,184 @@ def load_trend_rate_map(output_dir, expected_sca):
     return maps, reset_days[0]
 
 
-def detector_output_dirs(root, sca, fit_suffix):
-    root = Path(root)
-    if fit_suffix == DEFAULT_FIT_SUFFIX:
-        return (root / DEFAULT_FIT_SUFFIX / sca.lower(),)
-    return (
-        root / f"{sca.lower()}_{fit_suffix}_prod",
-        root / f"{sca.lower()}_{fit_suffix}",
-        root / f"wfi_{fit_suffix}_{sca}_map10000_emcee1000",
-    )
+def load_last_48h_rate_map(output_dir, expected_sca):
+    rows = load_tile_rows(output_dir / "tile_rate_posterior.csv", expected_sca)
+    if rows is None:
+        return None
+    row_tile_ids = [int(row["tile_id"]) for row in rows]
+    if len(set(row_tile_ids)) != len(row_tile_ids):
+        return None
+    try:
+        tile_ids = complete_tile_ids(row_tile_ids)
+    except ValueError:
+        return None
+    fit_dirs = dict(tile_directory_entries(Path(output_dir) / "fits"))
+    tile_grid_size = int(len(tile_ids) ** 0.5)
+    maps = {
+        field: np.full((tile_grid_size, tile_grid_size), np.nan)
+        for _, field in LAST_48H_METRICS
+    }
+    for row in rows:
+        tile_id = int(row["tile_id"])
+        fit_dir = fit_dirs.get(tile_id)
+        if fit_dir is None:
+            return None
+        posterior_path = fit_dir / "posterior_samples.npz"
+        if not posterior_path.is_file():
+            return None
+        days, thickness, _reset_day = _load_tile_thickness(posterior_path)
+        rate = mean_rate_over_interval(days, thickness, duration_days=2.0)
+        if rate is None:
+            return None
+        maps["last_48h_mean_rate_nm_day"][
+            int(row["tile_row"]), int(row["tile_col"])
+        ] = rate
+    return maps
 
 
-def load_all_maps(root, fit_suffix, maxent_only=False):
+def load_rms_map(output_dir, expected_sca):
+    rows = load_tile_rows(output_dir / "tile_rate_posterior.csv", expected_sca)
+    if rows is None:
+        return None
+    row_tile_ids = [int(row["tile_id"]) for row in rows]
+    if len(set(row_tile_ids)) != len(row_tile_ids):
+        return None
+    try:
+        tile_ids = complete_tile_ids(row_tile_ids)
+    except ValueError:
+        return None
+    fit_dirs = dict(tile_directory_entries(Path(output_dir) / "fits"))
+    tile_grid_size = int(len(tile_ids) ** 0.5)
+    values = np.full((tile_grid_size, tile_grid_size), np.nan)
+    for row in rows:
+        tile_id = int(row["tile_id"])
+        fit_dir = fit_dirs.get(tile_id)
+        if fit_dir is None:
+            return None
+        prediction_path = fit_dir / "tile_group_predictions.csv"
+        if not prediction_path.is_file():
+            return None
+        with prediction_path.open(newline="") as handle:
+            prediction_rows = list(csv.DictReader(handle))
+        if not prediction_rows:
+            return None
+        repeats = np.asarray(
+            [int(prediction["repeat"]) for prediction in prediction_rows],
+            dtype=int,
+        )
+        residuals = np.asarray(
+            [float(prediction["residual_log"]) for prediction in prediction_rows],
+            dtype=float,
+        )
+        valid = (repeats > np.min(repeats)) & np.isfinite(residuals)
+        if not np.any(valid):
+            return None
+        values[int(row["tile_row"]), int(row["tile_col"])] = (
+            1000.0 * np.sqrt(np.mean(residuals[valid] ** 2))
+        )
+    return {"rms_residual_millilog": values}
+
+
+def load_current_ice_thickness_map(output_dir, expected_sca, tile_size):
+    """Load the latest fitted thickness from each complete tile archive."""
+    entries = tile_directory_entries(Path(output_dir) / "fits")
+    try:
+        complete_tile_ids(tile_id for tile_id, _path in entries)
+    except ValueError:
+        return None
+    tile_grid_size = tile_grid_size_for_tile_size(tile_size)
+    values = np.full((tile_grid_size, tile_grid_size), np.nan, dtype=float)
+    for tile_id, fit_dir in entries:
+        posterior_path = fit_dir / "posterior_samples.npz"
+        if not posterior_path.is_file():
+            return None
+        with np.load(posterior_path, allow_pickle=False) as samples:
+            days = np.asarray(samples["observation_days"], dtype=float).reshape(-1)
+            thickness = np.asarray(samples["tile_ice_thickness"], dtype=float).reshape(-1)
+        if days.size != thickness.size or days.size == 0:
+            raise ValueError(f"Unexpected thickness trajectory in {posterior_path}")
+        finite = np.isfinite(days) & np.isfinite(thickness)
+        if not np.any(finite):
+            continue
+        latest = int(np.flatnonzero(finite)[np.argmax(days[finite])])
+        values[tile_id // tile_grid_size, tile_id % tile_grid_size] = thickness[latest]
+    if not np.isfinite(values).any():
+        return None
+    return {"current_ice_thickness_nm": values}
+
+
+def load_all_current_ice_thickness_maps(
+    root,
+    fit_suffix,
+    tile_size=DEFAULT_TILE_SIZE,
+    fit_subdir=None,
+):
     maps = {}
     for sca in SCAS:
-        output_dirs = detector_output_dirs(root, sca, fit_suffix)
+        output_dirs = detector_output_dirs(
+            root, sca, fit_suffix, tile_size, fit_subdir
+        )
+        maps[sca] = next(
+            (
+                thickness_map
+                for output_dir in output_dirs
+                if (thickness_map := load_current_ice_thickness_map(
+                    output_dir, sca, tile_size
+                )) is not None
+            ),
+            None,
+        )
+    return maps
+
+
+def percentile_color_limits(maps, field, upper_percentile):
+    finite_values = np.concatenate(
+        [
+            values[field][np.isfinite(values[field])]
+            for values in maps.values()
+            if values is not None and np.isfinite(values[field]).any()
+        ]
+    )
+    lower = float(np.min(finite_values))
+    upper = float(np.percentile(finite_values, upper_percentile))
+    if not lower < upper:
+        upper = lower + 1.0
+    return lower, upper
+
+
+def detector_output_dirs(
+    root,
+    sca,
+    fit_suffix,
+    tile_size=DEFAULT_TILE_SIZE,
+    fit_subdir=None,
+):
+    root = Path(root)
+    if fit_suffix == DEFAULT_FIT_SUFFIX:
+        output_dirs = (production_detector_output_root(root, sca, tile_size),)
+    else:
+        output_dirs = (
+            root / f"{sca.lower()}_{fit_suffix}_prod",
+            root / f"{sca.lower()}_{fit_suffix}",
+            root / f"wfi_{fit_suffix}_{sca}_map10000_emcee1000",
+        )
+    if fit_subdir is None:
+        return output_dirs
+    return tuple(output_dir / fit_subdir for output_dir in output_dirs)
+
+
+def load_all_maps(
+    root,
+    fit_suffix,
+    maxent_only=False,
+    tile_size=DEFAULT_TILE_SIZE,
+    fit_subdir=None,
+):
+    maps = {}
+    for sca in SCAS:
+        output_dirs = detector_output_dirs(
+            root, sca, fit_suffix, tile_size, fit_subdir
+        )
         maps[sca] = next(
             (
                 rate_map
@@ -301,11 +541,19 @@ def load_all_maps(root, fit_suffix, maxent_only=False):
     return maps
 
 
-def load_all_reset_maps(root, fit_suffix, maxent_only=False):
+def load_all_reset_maps(
+    root,
+    fit_suffix,
+    maxent_only=False,
+    tile_size=DEFAULT_TILE_SIZE,
+    fit_subdir=None,
+):
     maps = {}
     reset_days = []
     for sca in SCAS:
-        output_dirs = detector_output_dirs(root, sca, fit_suffix)
+        output_dirs = detector_output_dirs(
+            root, sca, fit_suffix, tile_size, fit_subdir
+        )
         loaded = next(
             (
                 reset_map
@@ -325,11 +573,19 @@ def load_all_reset_maps(root, fit_suffix, maxent_only=False):
     return maps, (reset_days[0] if reset_days else None)
 
 
-def load_all_trend_maps(root, fit_suffix, maxent_only=False):
+def load_all_trend_maps(
+    root,
+    fit_suffix,
+    maxent_only=False,
+    tile_size=DEFAULT_TILE_SIZE,
+    fit_subdir=None,
+):
     maps = {}
     reset_days = []
     for sca in SCAS:
-        output_dirs = detector_output_dirs(root, sca, fit_suffix)
+        output_dirs = detector_output_dirs(
+            root, sca, fit_suffix, tile_size, fit_subdir
+        )
         loaded = next(
             (
                 trend_map
@@ -349,12 +605,62 @@ def load_all_trend_maps(root, fit_suffix, maxent_only=False):
     return maps, (reset_days[0] if reset_days else None)
 
 
+def load_all_last_48h_maps(
+    root,
+    fit_suffix,
+    maxent_only=False,
+    tile_size=DEFAULT_TILE_SIZE,
+    fit_subdir=None,
+):
+    maps = {}
+    for sca in SCAS:
+        output_dirs = detector_output_dirs(
+            root, sca, fit_suffix, tile_size, fit_subdir
+        )
+        maps[sca] = next(
+            (
+                rate_map
+                for output_dir in output_dirs
+                if not maxent_only or maxent_fit_set_complete(output_dir)
+                if (rate_map := load_last_48h_rate_map(output_dir, sca)) is not None
+            ),
+            None,
+        )
+    return maps
+
+
+def load_all_rms_maps(
+    root,
+    fit_suffix,
+    maxent_only=False,
+    tile_size=DEFAULT_TILE_SIZE,
+    fit_subdir=None,
+):
+    maps = {}
+    for sca in SCAS:
+        output_dirs = detector_output_dirs(
+            root, sca, fit_suffix, tile_size, fit_subdir
+        )
+        maps[sca] = next(
+            (
+                rms_map
+                for output_dir in output_dirs
+                if not maxent_only or maxent_fit_set_complete(output_dir)
+                if (rms_map := load_rms_map(output_dir, sca)) is not None
+            ),
+            None,
+        )
+    return maps
+
+
 def load_rate_histogram(output_dir, expected_sca):
     fit_root = Path(output_dir) / "fits"
-    fit_dirs = sorted(fit_root.glob("tile_*"))
-    expected = [fit_root / f"tile_{tile_id:03d}" for tile_id in range(64)]
-    if fit_dirs != expected:
+    entries = tile_directory_entries(fit_root)
+    try:
+        complete_tile_ids(tile_id for tile_id, _path in entries)
+    except ValueError:
         return None
+    fit_dirs = [path for _tile_id, path in entries]
 
     pre_values = []
     post_values = []
@@ -403,11 +709,19 @@ def load_rate_histogram(output_dir, expected_sca):
     }
 
 
-def load_all_rate_histograms(root, fit_suffix, maxent_only=False):
+def load_all_rate_histograms(
+    root,
+    fit_suffix,
+    maxent_only=False,
+    tile_size=DEFAULT_TILE_SIZE,
+    fit_subdir=None,
+):
     histograms = {}
     reset_days = []
     for sca in SCAS:
-        output_dirs = detector_output_dirs(root, sca, fit_suffix)
+        output_dirs = detector_output_dirs(
+            root, sca, fit_suffix, tile_size, fit_subdir
+        )
         loaded = next(
             (
                 histogram
@@ -427,21 +741,49 @@ def load_all_rate_histograms(root, fit_suffix, maxent_only=False):
     return histograms, (reset_days[0] if reset_days else None)
 
 
-def latest_statistics_date(statistics_path):
+def _statistics_paths(statistics_path, tile_size=None):
     if statistics_path.is_file():
-        paths = [statistics_path]
+        return [statistics_path]
     elif statistics_path.is_dir():
-        paths = sorted(statistics_path.glob("wfi*_tile_log_statistics_*.csv"))
+        pattern = "wfi*_tile_log_statistics_*.csv"
+        if tile_size is not None:
+            pattern = f"wfi*_tile_log_statistics_{tile_size}*.csv"
+        return sorted(statistics_path.glob(pattern))
     else:
+        return []
+
+
+def latest_statistics_observation(statistics_path, tile_size=None):
+    paths = _statistics_paths(statistics_path, tile_size)
+    if not paths:
         return "unknown"
-    latest_date = ""
+    latest_observation = None
     for path in paths:
         with path.open(newline="") as handle:
             for row in csv.DictReader(handle):
-                timestamp = str(row.get("exposure_start_time", ""))
-                if len(timestamp) >= 10:
-                    latest_date = max(latest_date, timestamp[:10])
-    return latest_date or "unknown"
+                value = str(row.get("exposure_start_time", "")).strip()
+                if not value:
+                    continue
+                if value.endswith("Z"):
+                    value = value[:-1] + "+00:00"
+                try:
+                    observation = datetime.fromisoformat(value)
+                except ValueError:
+                    continue
+                if observation.tzinfo is None:
+                    observation = observation.replace(tzinfo=timezone.utc)
+                observation = observation.astimezone(timezone.utc)
+                if latest_observation is None or observation > latest_observation:
+                    latest_observation = observation
+    if latest_observation is None:
+        return "unknown"
+    formatted = latest_observation.strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip(".")
+    return f"{formatted} UTC"
+
+
+def latest_statistics_date(statistics_path, tile_size=None):
+    observation = latest_statistics_observation(statistics_path, tile_size)
+    return observation[:10] if observation != "unknown" else "unknown"
 
 
 def draw_rate_histogram_mosaic(
@@ -451,6 +793,7 @@ def draw_rate_histogram_mosaic(
     pass_label,
     date_label,
     reset_day,
+    observation_label="unknown",
 ):
     available = [sca for sca in SCAS if histograms[sca] is not None]
     if not available:
@@ -554,8 +897,8 @@ def draw_rate_histogram_mosaic(
 
     figure.legend(
         handles=(
-            Patch(facecolor="#0072B2", alpha=0.60, label="Pre-reset"),
-            Patch(facecolor="#D55E00", alpha=0.55, label="Post-reset"),
+            Patch(facecolor="#0072B2", alpha=0.60, label="Pre-Decon2"),
+            Patch(facecolor="#D55E00", alpha=0.55, label="Post-Decon2"),
             Line2D([0], [0], color="black", linewidth=1.8, label="Latest-epoch fitted median"),
         ),
         loc="upper center",
@@ -565,9 +908,7 @@ def draw_rate_histogram_mosaic(
         fontsize=9,
     )
     figure.suptitle(
-        "Roman WFI focal-plane instantaneous ice-rate distributions\n"
-        f"Pre/post reset; reset day {reset_day:.3f}; data through {date_label} UTC\n"
-        f"{model_label}; {pass_label}; {len(available)}/18 detectors complete",
+        f"Focal-plane rate distributions\n{observation_label}",
         fontsize=14,
         y=0.985,
     )
@@ -590,7 +931,7 @@ def draw_rate_histogram_mosaic(
     figure.text(
         0.985,
         0.012,
-        f"Data date: {date_label} UTC",
+        observation_label,
         ha="right",
         fontsize=8,
         color="0.3",
@@ -601,12 +942,9 @@ def draw_rate_histogram_mosaic(
     plt.close(figure)
 
 
-def latest_pass_label(statistics_path):
-    if statistics_path.is_file():
-        paths = [statistics_path]
-    elif statistics_path.is_dir():
-        paths = sorted(statistics_path.glob("wfi*_tile_log_statistics_*.csv"))
-    else:
+def latest_pass_label(statistics_path, tile_size=None):
+    paths = _statistics_paths(statistics_path, tile_size)
+    if not paths:
         return "Pass unavailable"
     latest_repeat = -1
     for path in paths:
@@ -625,7 +963,13 @@ def draw_rate_mosaic(
     pass_label,
     local_contrast=False,
     metrics=METRICS,
-    title_prefix="Roman WFI full focal-plane ice accumulation rates",
+    title_prefix="Focal-plane accumulation rates",
+    observation_label="unknown",
+    suptitle_fontsize=14,
+    axis_title_fontsize=12,
+    color_limits=None,
+    colorbar_label=None,
+    metric_unit_label="nm/day",
 ):
     available = [sca for sca in SCAS if maps[sca] is not None]
     figure, axes = plt.subplots(
@@ -637,17 +981,22 @@ def draw_rate_mosaic(
     )
     axes = axes[0]
     if not local_contrast:
-        all_values = np.concatenate(
-            [
-                maps[sca][field][np.isfinite(maps[sca][field])]
-                for sca in available
-                for _, field in metrics
-            ]
-        )
-        global_min = float(np.min(all_values))
-        global_max = float(np.max(all_values))
-        if global_min == global_max:
-            global_max = global_min + 1.0
+        if color_limits is None:
+            all_values = np.concatenate(
+                [
+                    maps[sca][field][np.isfinite(maps[sca][field])]
+                    for sca in available
+                    for _, field in metrics
+                ]
+            )
+            global_min = float(np.min(all_values))
+            global_max = float(np.max(all_values))
+            if global_min == global_max:
+                global_max = global_min + 1.0
+        else:
+            global_min, global_max = map(float, color_limits)
+            if not global_min < global_max:
+                raise ValueError("color_limits must be an increasing pair")
 
     for axis, (title, field) in zip(axes, metrics):
         plotted = {}
@@ -717,9 +1066,11 @@ def draw_rate_mosaic(
                 color="white",
                 path_effects=None,
             )
-            for tile in range(1, 8):
+            tile_grid_size = plotted[sca].shape[0]
+            for tile in range(1, tile_grid_size):
+                position = SCA_SIZE * tile / tile_grid_size
                 axis.plot(
-                    (x + tile, x + tile),
+                    (x + position, x + position),
                     (y, y + SCA_SIZE),
                     color="white",
                     alpha=0.35,
@@ -727,18 +1078,18 @@ def draw_rate_mosaic(
                 )
                 axis.plot(
                     (x, x + SCA_SIZE),
-                    (y + tile, y + tile),
+                    (y + position, y + position),
                     color="white",
                     alpha=0.35,
                     linewidth=0.35,
                 )
         if image is not None:
-            colorbar_label = (
+            label = (
                 "Within-SCA relative rate (min to max)"
                 if local_contrast
-                else "nm/day"
+                else colorbar_label or "nm/day"
             )
-            figure.colorbar(image, ax=axis, fraction=0.035, pad=0.02, label=colorbar_label)
+            figure.colorbar(image, ax=axis, fraction=0.035, pad=0.02, label=label)
         axis.set_aspect("equal")
         axis.set_xlim(-1.0, SCA_PITCH * 6 - 1.0)
         min_y = min(COLUMN_Y_OFFSET) - 1.0
@@ -749,7 +1100,8 @@ def draw_rate_mosaic(
         axis.set_title(
             f"{title} (within-SCA contrast)"
             if local_contrast
-            else f"{title} (nm/day)"
+            else f"{title} ({metric_unit_label})",
+            fontsize=axis_title_fontsize,
         )
         axis.set_xlabel("Roman WFI focal-plane mosaic")
         center_x = SCA_PITCH * 3 - 0.5
@@ -771,12 +1123,12 @@ def draw_rate_mosaic(
             va="bottom",
         )
 
-    figure.suptitle(
-        f"{title_prefix}\n"
-        f"{model_label}; {pass_label}; {len(available)}/18 SCA rate fields available"
-        + ("; each SCA independently scaled" if local_contrast else ""),
-        fontsize=14,
-    )
+    title = title_prefix
+    if observation_label != "unknown":
+        title = f"{title_prefix}\n{observation_label}"
+    figure.suptitle(title, fontsize=suptitle_fontsize)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path, dpi=180)
     plt.close(figure)
 
@@ -790,6 +1142,12 @@ def parse_args():
         help="Use 'production' for the fixed input-directory layout or a legacy suffix.",
     )
     parser.add_argument(
+        "--fit-subdir",
+        type=Path,
+        default=None,
+        help="Read fits from a subdirectory below each detector output root.",
+    )
+    parser.add_argument(
         "--tile-statistics",
         type=Path,
         default=None,
@@ -801,33 +1159,74 @@ def parse_args():
         action="store_true",
         help="Use only complete per-tile MaxEnt production archives; reject stale aggregates.",
     )
+    parser.add_argument(
+        "--tile-size",
+        type=positive_integer,
+        default=DEFAULT_TILE_SIZE,
+        help=f"Tile edge length used by the production reduction; default: {DEFAULT_TILE_SIZE}.",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     output = args.output or (
-        args.root / DEFAULT_FIT_SUFFIX / "wfi_full_focal_plane_rate_maps.png"
+        production_output_root(args.root, args.tile_size)
+        / (args.fit_subdir if args.fit_subdir is not None else Path())
+        / "wfi_full_focal_plane_rate_maps.png"
     )
-    maps = load_all_maps(args.root, args.fit_suffix, args.maxent_only)
+    maps = load_all_maps(
+        args.root,
+        args.fit_suffix,
+        args.maxent_only,
+        args.tile_size,
+        args.fit_subdir,
+    )
+    current_thickness_maps = load_all_current_ice_thickness_maps(
+        args.root,
+        args.fit_suffix,
+        args.tile_size,
+        args.fit_subdir,
+    )
     reset_maps, reset_day = load_all_reset_maps(
         args.root,
         args.fit_suffix,
         args.maxent_only,
+        args.tile_size,
+        args.fit_subdir,
     )
     trend_maps, trend_day = load_all_trend_maps(
         args.root,
         args.fit_suffix,
         args.maxent_only,
+        args.tile_size,
+        args.fit_subdir,
+    )
+    last_48h_maps = load_all_last_48h_maps(
+        args.root,
+        args.fit_suffix,
+        args.maxent_only,
+        args.tile_size,
+        args.fit_subdir,
+    )
+    rms_maps = load_all_rms_maps(
+        args.root,
+        args.fit_suffix,
+        args.maxent_only,
+        args.tile_size,
+        args.fit_subdir,
     )
     statistics_path = args.tile_statistics
     if statistics_path is None:
         statistics_path = args.root
     elif not statistics_path.is_absolute():
         statistics_path = args.root / statistics_path
-    pass_label = latest_pass_label(statistics_path)
-    date_label = latest_statistics_date(statistics_path)
-    if args.fit_suffix == DEFAULT_FIT_SUFFIX:
+    pass_label = latest_pass_label(statistics_path, args.tile_size)
+    date_label = latest_statistics_date(statistics_path, args.tile_size)
+    observation_label = latest_observation_label(statistics_path, args.tile_size)
+    if args.fit_subdir is not None:
+        model_label = "cached fixed-optics independent ice-only fits"
+    elif args.fit_suffix == DEFAULT_FIT_SUFFIX:
         model_label = (
             "independent per-tile MaxEnt MAP fits"
             if args.maxent_only
@@ -842,7 +1241,13 @@ def main():
         model_label = "square-root + NP modulation"
     else:
         model_label = "fully nonparametric trajectory"
-    draw_rate_mosaic(output, maps, model_label, pass_label)
+    draw_rate_mosaic(
+        output,
+        maps,
+        model_label,
+        pass_label,
+        observation_label=observation_label,
+    )
     contrast_output = output.with_name(output.stem + "_tile_contrast.png")
     draw_rate_mosaic(
         contrast_output,
@@ -850,11 +1255,45 @@ def main():
         model_label,
         pass_label,
         local_contrast=True,
+        observation_label=observation_label,
     )
+    if any(value is not None for value in current_thickness_maps.values()):
+        current_thickness_output = output.with_name(
+            "wfi_full_focal_plane_current_ice_thickness.png"
+        )
+        draw_rate_mosaic(
+            current_thickness_output,
+            current_thickness_maps,
+            model_label,
+            pass_label,
+            metrics=CURRENT_THICKNESS_METRICS,
+            title_prefix=(
+                "Current fitted ice thickness "
+                f"(vmax={CURRENT_THICKNESS_VMAX_PERCENTILE:g}th percentile)"
+            ),
+            observation_label=observation_label,
+            color_limits=percentile_color_limits(
+                current_thickness_maps,
+                "current_ice_thickness_nm",
+                CURRENT_THICKNESS_VMAX_PERCENTILE,
+            ),
+            colorbar_label=(
+                "Ice thickness (nm; "
+                f"vmax={CURRENT_THICKNESS_VMAX_PERCENTILE:g}th percentile)"
+            ),
+            metric_unit_label="nm",
+            suptitle_fontsize=10,
+            axis_title_fontsize=10,
+        )
+        print(f"Wrote {current_thickness_output}")
+    else:
+        print("No complete current ice-thickness maps found")
     histogram_maps, histogram_reset_day = load_all_rate_histograms(
         args.root,
         args.fit_suffix,
         args.maxent_only,
+        args.tile_size,
+        args.fit_subdir,
     )
     if histogram_reset_day is not None:
         histogram_output = output.with_name(
@@ -867,6 +1306,7 @@ def main():
             pass_label,
             date_label,
             histogram_reset_day,
+            observation_label=observation_label,
         )
         print(f"Wrote {histogram_output}")
     else:
@@ -879,10 +1319,8 @@ def main():
             model_label,
             pass_label,
             metrics=RESET_METRICS,
-            title_prefix=(
-                "Roman WFI focal-plane time-mean ice accumulation rate by reset epoch\n"
-                f"Reset day {reset_day:.9f}"
-            ),
+            observation_label=observation_label,
+            title_prefix="Rate by Decon2 epoch",
         )
         reset_contrast_output = reset_output.with_name(
             reset_output.stem + "_tile_contrast.png"
@@ -894,10 +1332,8 @@ def main():
             pass_label,
             local_contrast=True,
             metrics=RESET_METRICS,
-            title_prefix=(
-                "Roman WFI focal-plane time-mean ice accumulation rate by reset epoch\n"
-                f"Reset day {reset_day:.9f}"
-            ),
+            observation_label=observation_label,
+            title_prefix="Rate by Decon2 epoch",
         )
         print(f"Wrote {reset_output}")
         print(f"Wrote {reset_contrast_output}")
@@ -913,10 +1349,10 @@ def main():
             model_label,
             pass_label,
             metrics=TREND_METRICS,
-            title_prefix=(
-                "Roman WFI focal-plane fitted linear trend rate by reset epoch\n"
-                f"Reset day {trend_day:.9f}"
-            ),
+            observation_label=observation_label,
+            title_prefix="Trend rate by Decon2 epoch",
+            color_limits=TREND_RATE_COLOR_LIMITS,
+            colorbar_label="Growth rate nm/day",
         )
         trend_contrast_output = trend_output.with_name(
             trend_output.stem + "_tile_contrast.png"
@@ -928,15 +1364,68 @@ def main():
             pass_label,
             local_contrast=True,
             metrics=TREND_METRICS,
-            title_prefix=(
-                "Roman WFI focal-plane fitted linear trend rate by reset epoch\n"
-                f"Reset day {trend_day:.9f}"
-            ),
+            observation_label=observation_label,
+            title_prefix="Trend rate by Decon2 epoch",
+            color_limits=TREND_RATE_COLOR_LIMITS,
+            colorbar_label="Growth rate nm/day",
         )
         print(f"Wrote {trend_output}")
         print(f"Wrote {trend_contrast_output}")
     else:
         print("No per-tile trend-rate maps found")
+    last_48h_available = [sca for sca in SCAS if last_48h_maps[sca] is not None]
+    if last_48h_available:
+        last_48h_output = output.with_name(
+            "wfi_full_focal_plane_mean_accumulation_rate_last_48h.png"
+        )
+        draw_rate_mosaic(
+            last_48h_output,
+            last_48h_maps,
+            model_label,
+            pass_label,
+            metrics=LAST_48H_METRICS,
+            observation_label=observation_label,
+            title_prefix=(
+                "WFI focal-plane mean accumulation rate, last 48 h"
+            ),
+            suptitle_fontsize=10,
+        )
+        last_48h_contrast_output = last_48h_output.with_name(
+            last_48h_output.stem + "_tile_contrast.png"
+        )
+        draw_rate_mosaic(
+            last_48h_contrast_output,
+            last_48h_maps,
+            model_label,
+            pass_label,
+            local_contrast=True,
+            metrics=LAST_48H_METRICS,
+            observation_label=observation_label,
+            title_prefix=(
+                "WFI focal-plane mean accumulation rate, last 48 h"
+            ),
+            suptitle_fontsize=10,
+        )
+        print(f"Wrote {last_48h_output}")
+        print(f"Wrote {last_48h_contrast_output}")
+    else:
+        print("No complete last-48-hour rate maps found")
+    if any(rms_maps[sca] is not None for sca in SCAS):
+        rms_output = output.with_name("wfi_full_focal_plane_rms_residual.png")
+        draw_rate_mosaic(
+            rms_output,
+            rms_maps,
+            model_label,
+            pass_label,
+            metrics=RMS_METRICS,
+            observation_label=observation_label,
+            title_prefix="Focal-plane RMS residual",
+            colorbar_label="RMS residual (millilog)",
+            metric_unit_label="millilog",
+        )
+        print(f"Wrote {rms_output}")
+    else:
+        print("No complete RMS residual maps found")
     available = [sca for sca in SCAS if maps[sca] is not None]
     pending = [sca for sca in SCAS if maps[sca] is None]
     print(f"Wrote {output}")

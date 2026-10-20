@@ -10,6 +10,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from wfi_production_layout import (
+    DEFAULT_TILE_SIZE,
+    detector_output_root,
+    positive_integer,
+    production_output_root,
+)
+
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_STATISTICS_DIR = ROOT / "20261008/corrected_statistics_program1063_4h"
@@ -22,10 +29,10 @@ PARAMETER_LABELS = (
     "AR raw 4",
     "AR raw 5",
     "Initial thickness (nm)",
-    "Reset thickness (nm)",
+    "Decon2 thickness (nm)",
     "Incidence angle (deg)",
     "Constant rate (nm/day)",
-    "Post-reset offset",
+    "Post-Decon2 offset",
     "HgCdTe n log scale",
     "HgCdTe k log scale",
 )
@@ -157,6 +164,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--statistics-dir", type=Path, default=DEFAULT_STATISTICS_DIR)
     parser.add_argument("--detector", action="append", choices=DETECTORS)
+    parser.add_argument("--tile-size", type=positive_integer, default=DEFAULT_TILE_SIZE)
     return parser.parse_args()
 
 
@@ -165,7 +173,9 @@ def main():
     detectors = tuple(args.detector) if args.detector else DETECTORS
     loaded = {}
     for detector in detectors:
-        emcee_root = args.statistics_dir / "production" / detector.lower() / "emcee"
+        emcee_root = detector_output_root(
+            args.statistics_dir, detector, args.tile_size
+        ) / "emcee"
         chain_path = emcee_root / "emcee_chain.npz"
         chain, log_probability, acceptance = load_chain(chain_path)
         tau = integrated_time(chain)
@@ -182,7 +192,10 @@ def main():
         loaded[detector] = (chain, log_probability, acceptance, tau)
         print(f"Wrote EMCEE diagnostics for {detector}", flush=True)
     if len(loaded) > 1:
-        comparison = args.statistics_dir / "production" / "wfi_production_emcee_objective_comparison.png"
+        comparison = (
+            production_output_root(args.statistics_dir, args.tile_size)
+            / "wfi_production_emcee_objective_comparison.png"
+        )
         plot_objective_comparison(comparison, loaded)
         print(f"Wrote {comparison}")
 

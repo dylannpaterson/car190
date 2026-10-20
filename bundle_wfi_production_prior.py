@@ -4,8 +4,8 @@ import argparse
 import csv
 from datetime import datetime, timezone
 import hashlib
+import math
 from pathlib import Path
-import re
 import subprocess
 
 from astropy.io import fits
@@ -26,19 +26,24 @@ from plot_wfi_full_focal_plane_rates import (
     SCA_SIZE,
     sca_position,
 )
+from wfi_production_layout import (
+    DEFAULT_TILE_SIZE,
+    complete_tile_ids,
+    corrected_statistics_path,
+    detector_output_root,
+    positive_integer,
+    production_output_root,
+    tile_directory_entries,
+)
 
 
 ROOT = Path(__file__).resolve().parent
-PRODUCTION_DIR_NAME = "production"
 LEGACY_MODEL_NAME = (
     "absolute_substrate_power_hgcdte_prior025_independent_tiles_least_squares"
 )
-TILE_COUNT = 64
-TILE_GRID_SIZE = 8
 # Current production decon2 boundary used by the independent MAP fits.
 RESET_DAY = 12.907397928240743
 AR_LAYERS = 3
-TILE_DIR_PATTERN = re.compile(r"tile_(\d+)(?:_least_squares)?$")
 OBSERVATION_FIELDS = (
     "group",
     "led",
@@ -119,12 +124,10 @@ def load_statistics(path, detector):
     rows_by_tile = {}
     for row in rows:
         rows_by_tile.setdefault(int(row["tile_id"]), []).append(row)
-    expected_tiles = set(range(TILE_COUNT))
-    if set(rows_by_tile) != expected_tiles:
-        raise ValueError(
-            f"{detector} statistics must contain tile IDs 0-63; "
-            f"found {sorted(rows_by_tile)}"
-        )
+    tile_ids = complete_tile_ids(
+        rows_by_tile,
+        label=f"{detector} statistics tile IDs",
+    )
 
     sorted_rows = {}
     for tile_id, tile_rows in rows_by_tile.items():
@@ -192,6 +195,8 @@ def load_statistics(path, detector):
         "path": path,
         "sha256": sha256_file(path),
         "rows_by_tile": sorted_rows,
+        "tile_ids": tile_ids,
+        "tile_grid_size": math.isqrt(len(tile_ids)),
         "observations": observations,
         "tile_metadata": tile_metadata,
         "node_days": node_days,
@@ -212,12 +217,21 @@ def _observation_key(row, detector):
     )
 
 
-def find_fit_archives(fit_root, detector):
+def find_fit_archives(
+    fit_root,
+    detector,
+    tile_size=DEFAULT_TILE_SIZE,
+    expected_tile_ids=None,
+):
     fit_root = Path(fit_root)
     candidates = (
         (
             "production",
-            fit_root / PRODUCTION_DIR_NAME / detector.lower() / "fits",
+            detector_output_root(fit_root, detector, tile_size) / "fits",
+        ),
+        (
+            "direct_production",
+            fit_root / detector.lower() / "fits",
         ),
         (
             "legacy_independent_production",
@@ -227,15 +241,22 @@ def find_fit_archives(fit_root, detector):
     partial = []
     for layout, candidate in candidates:
         found = {}
-        for path in sorted(candidate.glob("tile_*")):
-            match = TILE_DIR_PATTERN.fullmatch(path.name)
+        for tile_id, path in tile_directory_entries(candidate):
             posterior = path / "posterior_samples.npz"
-            if match is not None and posterior.is_file():
-                found[int(match.group(1))] = path
-        if set(found) == set(range(TILE_COUNT)):
+            if posterior.is_file():
+                found[tile_id] = path
+        if not found:
+            continue
+        expected = None if expected_tile_ids is None else set(expected_tile_ids)
+        if expected is None:
+            try:
+                complete_tile_ids(found, label=f"tile IDs in {candidate}")
+            except ValueError:
+                partial.append(f"{candidate} (incomplete tile IDs)")
+                continue
+        if expected is None or set(found) == expected:
             return found, layout
-        if found:
-            partial.append(f"{candidate} ({len(found)}/{TILE_COUNT} tiles)")
+        partial.append(f"{candidate} ({len(found)}/{len(expected)} tiles)")
     details = "; ".join(partial) if partial else "no fit archives found"
     raise FileNotFoundError(f"Complete production fits unavailable for {detector}: {details}")
 
@@ -369,6 +390,15 @@ def read_fit_archive(path, statistics, tile_id, fit_root):
             "mean_rate_nm_day": float(
                 _scalar(samples, ("tile_mean_rate_nm_day", "mean_rate_nm_day"))
             ),
+            "trajectory_rate_prior_mean_nm_day": float(
+                _scalar(samples, "trajectory_rate_prior_mean_nm_day")
+            ),
+            "trajectory_rate_prior_log_sigma": float(
+                _scalar(
+                    samples,
+                    ("trajectory_rate_prior_sigma_log", "trajectory_rate_prior_log_sigma"),
+                )
+            ),
             "map_objective": float(map_history[-1]) if map_history.size else np.nan,
             "map_steps": int(_scalar(samples, "map_steps", 10000)),
             "fit_incidence_angle": bool(_scalar(samples, "fit_incidence_angle", 1)),
@@ -471,16 +501,25 @@ def readme_hdu(lines):
     return make_table_hdu("README", specs, [{"text": line} for line in lines])
 
 
-def build_bundle(statistics_dir, fit_root):
+def build_bundle(
+    statistics_dir,
+    fit_root,
+    tile_size=DEFAULT_TILE_SIZE,
+):
     statistics_dir = Path(statistics_dir)
     fit_root = Path(fit_root).resolve()
     detector_data = {}
     fit_data = {}
     fit_layouts = {}
     for detector in SCAS:
-        stats_path = statistics_dir / f"{detector.lower()}_tile_log_statistics_512_count_corrected.csv"
+        stats_path = corrected_statistics_path(statistics_dir, detector, tile_size)
         statistics = load_statistics(stats_path, detector)
-        archives, layout = find_fit_archives(fit_root, detector)
+        archives, layout = find_fit_archives(
+            fit_root,
+            detector,
+            tile_size=tile_size,
+            expected_tile_ids=statistics["tile_ids"],
+        )
         detector_data[detector] = statistics
         fit_layouts[detector] = layout
         fit_data[detector] = {
@@ -528,7 +567,7 @@ def build_bundle(statistics_dir, fit_root):
                 "mosaic_y_pitch_units": mosaic_y,
                 "first_exposure_mjd_utc": statistics["first_mjd"],
                 "observation_count": len(statistics["observations"]),
-                "tile_count": TILE_COUNT,
+                "tile_count": len(statistics["tile_ids"]),
             }
         )
         for observation in statistics["observations"]:
@@ -546,11 +585,11 @@ def build_bundle(statistics_dir, fit_root):
                 "statistics_sha256": statistics["sha256"],
                 "fit_layout": fit_layouts[detector],
                 "fit_root": str(fit_root),
-                "fit_archive_count": TILE_COUNT,
+                "fit_archive_count": len(fit_data[detector]),
                 "observation_count": len(statistics["observations"]),
             }
         )
-        for tile_id in range(TILE_COUNT):
+        for tile_id in statistics["tile_ids"]:
             metadata = statistics["tile_metadata"][tile_id]
             fit = fit_data[detector][tile_id]
             tile_rows.append(
@@ -665,6 +704,7 @@ def build_bundle(statistics_dir, fit_root):
     schemas = bundle_schemas(response_grid.size)
     model_metadata_rows = model_rows(
         detector_data,
+        fit_data,
         fit_layouts,
         fit_root,
         len(observation_rows),
@@ -682,7 +722,12 @@ def build_bundle(statistics_dir, fit_root):
     header["TIMEDEF"] = "EXPOSURE_START"
     header["RELDEF"] = "DAYS_FROM_DETECTOR_FIRST_EXPOSURE"
     header["POSDEF"] = "ZERO_BASED_SCIENCE_FRAME_PIXELS"
-    header["TILEGRID"] = "8X8_PER_DETECTOR"
+    grid_sizes = {statistics["tile_grid_size"] for statistics in detector_data.values()}
+    header["TILEGRID"] = (
+        f"{next(iter(grid_sizes))}X{next(iter(grid_sizes))}_PER_DETECTOR"
+        if len(grid_sizes) == 1
+        else "VARIABLE_PER_DETECTOR"
+    )
     header["NDETECT"] = len(SCAS)
     header["NTILES"] = len(tile_rows)
     header["NOBS"] = len(observation_rows)
@@ -725,7 +770,7 @@ def readme_lines():
         "exposure_start_utc is the source exposure start in ISO-8601 UTC with a trailing Z.",
         "time_mjd_utc is the same exposure start in UTC Modified Julian Date.",
         "time_days_since_first_exposure is the source statistics days value for that detector.",
-        "tile_row/tile_col are zero-based 8x8 tile indices in the detector science frame.",
+        "tile_row/tile_col are zero-based tile indices in the detector science frame; grid dimensions are recorded per detector.",
         "row/col bounds are zero-based half-open pixel intervals: [start, stop_exclusive).",
         "The source statistics are corrected products; no correction table is applied here.",
         "The bundle contains checksums and per-tile statistics fingerprints for provenance.",
@@ -739,6 +784,7 @@ def readme_lines():
 
 def model_rows(
     detector_data,
+    fit_data,
     fit_layouts,
     fit_root,
     observation_count,
@@ -746,6 +792,25 @@ def model_rows(
     node_count,
     response_grid,
 ):
+    prior_values = [
+        (
+            fit["trajectory_rate_prior_mean_nm_day"],
+            fit["trajectory_rate_prior_log_sigma"],
+        )
+        for detector_fits in fit_data.values()
+        for fit in detector_fits.values()
+        if np.isfinite(fit["trajectory_rate_prior_mean_nm_day"])
+        and np.isfinite(fit["trajectory_rate_prior_log_sigma"])
+    ]
+    if prior_values:
+        prior_array = np.asarray(prior_values, dtype=float)
+        if not np.allclose(prior_array, prior_array[0], rtol=0.0, atol=1.0e-12):
+            raise ValueError("Trajectory-rate prior metadata differs across fit archives")
+        trajectory_rate_prior_mean, trajectory_rate_prior_log_sigma = prior_array[0]
+    else:
+        trajectory_rate_prior_mean = 5.0
+        trajectory_rate_prior_log_sigma = 1.5
+
     rows = [
         ("bundle_schema_version", "1.1", "", "Version of the embedded bundle schema."),
         ("product_type", "CAR190_WFI_PRODUCTION_PRIOR", "", "Product purpose."),
@@ -757,7 +822,12 @@ def model_rows(
         ("ice_index", "1.25", "", "Fixed lossless ice refractive index."),
         ("ice_reset_day", str(RESET_DAY), "day", "Fixed reset day in relative time."),
         ("initial_thickness_prior", "lognormal median 10, log sigma 1.5", "nm", "Initial/reset thickness prior."),
-        ("trajectory_rate_prior", "lognormal mean 5, log sigma 1.5", "nm/day", "Trajectory rate prior."),
+        (
+            "trajectory_rate_prior",
+            f"lognormal mean {trajectory_rate_prior_mean:g}, log sigma {trajectory_rate_prior_log_sigma:g}",
+            "nm/day",
+            "Trajectory rate prior recorded by the fit archives.",
+        ),
         ("post_reset_offset_prior_sigma", "0.1", "log", "Post-reset tile offset prior sigma."),
         ("absolute_hgcdte_scale_prior_sigma", "0.25", "log", "HgCdTe n/k scale prior sigma."),
         ("hgcdte_reference_model", "fit_wfi_tmm_production.hgcdte_reference_optical_constants", "", "Function that generated HGCDTE_REFERENCE."),
@@ -778,7 +848,12 @@ def model_rows(
         ("statistics_correction", "already applied in input corrected CSV", "", "No correction is reapplied."),
         ("source_fit_root", str(fit_root), "", "Fit archive root used to construct the bundle."),
         ("detector_count", str(len(detector_data)), "", "Number of bundled detectors."),
-        ("tile_count", str(len(detector_data) * TILE_COUNT), "", "Number of bundled tiles."),
+        (
+            "tile_count",
+            str(sum(len(statistics["tile_ids"]) for statistics in detector_data.values())),
+            "",
+            "Number of bundled tiles.",
+        ),
         ("observation_row_count", str(observation_count), "", "Rows in OBSERVATIONS."),
         ("tile_timeseries_row_count", str(timeseries_count), "", "Rows in TILE_TIMESERIES."),
         ("node_trajectory_row_count", str(node_count), "", "Rows in NODE_TRAJECTORIES."),
@@ -811,7 +886,7 @@ def bundle_schemas(reference_wavelength_count=567):
         "TILES": (
             ("detector", "A5", "", "Roman WFI SCA identifier."),
             ("sca_index", "I", "", "Zero-based detector index."),
-            ("tile_id", "I", "", "Zero-based tile identifier, tile_row*8+tile_col."),
+            ("tile_id", "I", "", "Zero-based tile identifier, with tile-row/column layout recorded per detector."),
             ("tile_row", "I", "", "Zero-based science-frame tile row."),
             ("tile_col", "I", "", "Zero-based science-frame tile column."),
             ("row_start", "J", "pixel", "Inclusive zero-based detector row start."),
@@ -876,7 +951,7 @@ def bundle_schemas(reference_wavelength_count=567):
             ("node_mjd_utc", "D", "d", "Derived UTC MJD: detector first MJD plus node day."),
             ("ice_thickness_nm", "D", "nm", "Fitted ice thickness at the node."),
             ("instantaneous_rate_nm_day", "D", "nm/day", "Fitted instantaneous rate at the node."),
-            ("rate_multiplier", "D", "", "Fitted rate multiplier relative to the 5 nm/day prior mean."),
+            ("rate_multiplier", "D", "", "Fitted rate multiplier relative to the trajectory-rate prior mean recorded in MODEL."),
         ),
         "PARAMETERS": (
             ("detector", "A5", "", "Roman WFI SCA identifier."),
@@ -939,6 +1014,12 @@ def parse_args():
         default=ROOT,
         help="Root containing production or legacy per-tile fit archives.",
     )
+    parser.add_argument(
+        "--tile-size",
+        type=positive_integer,
+        default=DEFAULT_TILE_SIZE,
+        help=f"Tile edge length used by the production reduction; default: {DEFAULT_TILE_SIZE}.",
+    )
     parser.add_argument("--output", type=Path, default=None)
     return parser.parse_args()
 
@@ -946,9 +1027,10 @@ def parse_args():
 def main():
     args = parse_args()
     output = args.output or (
-        args.statistics_dir / PRODUCTION_DIR_NAME / "wfi_production_map_prior_bundle.fits"
+        production_output_root(args.statistics_dir, args.tile_size)
+        / "wfi_production_map_prior_bundle.fits"
     )
-    hdul = build_bundle(args.statistics_dir, args.fit_root)
+    hdul = build_bundle(args.statistics_dir, args.fit_root, tile_size=args.tile_size)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     hdul.writeto(output, overwrite=True, checksum=True)

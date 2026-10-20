@@ -154,15 +154,18 @@ whose weights are exactly zero for every selected SCA, LED, and source interval
 are removed before TMM evaluation. This preserves the integral exactly while
 avoiding unnecessary autodiff work; the retained wavelength grid is archived
 with the fit metadata.
+The diagnostic runner can opt into `--sed-weighting photon` and
+`--qe-response-mode clean_relative`. The latter uses the measured clean-detector
+QE as a spectral weight and integrates the pointwise relative response
+`coated / clean`, avoiding a second multiplication by the clean AR throughput.
 Complex indices use `n + i k`; the characteristic matrix uses `-i sin(delta)`
 so positive `k` is passive absorption rather than optical gain.
 
 The published RCS SED is documented as relative spectral energy output. The
-default `--sed-weighting photon` therefore multiplies the SED by wavelength
-before integration to represent relative photon rate. The alternate
-`--sed-weighting energy` mode omits that factor and is only a source-table
-interpretation sensitivity test; its effect is largest for the broad clipped
-SED wings.
+`--sed-weighting photon` mode therefore multiplies the SED by wavelength
+before integration to represent relative photon rate. The `energy` mode omits
+that factor. The current production contract uses `energy`; `photon` is an
+optical sensitivity test whose effect is largest for broad SED wings.
 
 The preferred angular sensitivity is `--incidence-pupil-half-angle-deg`. It
 evaluates a two-dimensional circular pupil using four-point Gauss-Legendre

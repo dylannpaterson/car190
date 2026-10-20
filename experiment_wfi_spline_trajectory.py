@@ -235,8 +235,14 @@ def _load_initial_and_current_values(data, current_fit, initial_fit, initial_sta
                 "initial_thickness_log_nm",
                 "reset_initial_thickness_log_nm",
                 "post_reset_tile_log_offset",
+                "ar_tile_raw",
+                "absolute_hgcdte_n_log_scale",
+                "absolute_hgcdte_k_log_scale",
             )
         }
+        current_values["incidence_angle_deg"] = float(
+            np.asarray(source["incidence_angle_deg"]).reshape(-1)[0]
+        )
     current_values["np_log_rate_nodes"] = np.interp(
         knot_days,
         np.asarray(data["node_days"], dtype=float),
@@ -259,6 +265,221 @@ def _data_residuals(data, values, prediction, jnp):
         * jnp.sqrt(jnp.asarray(data["counts"]))
     )
     return scale * (prediction - observed)
+
+
+def _dynamic_prior_residuals(values, rate_reference, counts, sum_squared, jnp):
+    residuals = [
+        (
+            jnp.asarray(values["initial_thickness_log_nm"])
+            - np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM)
+        ).reshape(-1)
+        / production.INITIAL_THICKNESS_LOG_SIGMA,
+        (
+            jnp.asarray(values["reset_initial_thickness_log_nm"])
+            - np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM)
+        ).reshape(-1)
+        / production.INITIAL_THICKNESS_LOG_SIGMA,
+        (
+            jnp.asarray(values["np_log_rate_nodes"])
+            - jnp.asarray(rate_reference)
+        ).reshape(-1)
+        / production.TRAJECTORY_RATE_PRIOR_SIGMA_LOG,
+        jnp.asarray(values["post_reset_tile_log_offset"]).reshape(-1)
+        / production.POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA,
+    ]
+    likelihood_scale = (
+        0.5
+        * (1.0 / jnp.median(counts))
+        * jnp.sum(sum_squared)
+        / production.LOG_NOISE_SIGMA**2
+    )
+    entropy = production._signed_entropy_residual(
+        jnp.asarray(values["np_log_rate_nodes"]),
+        jnp.asarray(rate_reference),
+        jnp,
+    ).reshape(-1)
+    residuals.append(entropy * jnp.sqrt(likelihood_scale * 0.1 / entropy.size))
+    return jnp.concatenate(residuals)
+
+
+def build_spline_evaluator(data, initial_values, cache, knot_days, jax, jnp):
+    """Compile a spline residual/Jacobian reusable across same-shaped tiles."""
+    from jax.flatten_util import ravel_pytree
+
+    template = {
+        name: np.asarray(initial_values[name], dtype=float).copy()
+        for name in relative.VARIABLE_SITES
+    }
+    _, unravel = ravel_pytree(
+        {name: jnp.asarray(value) for name, value in template.items()}
+    )
+    layout_data = {
+        "days": np.asarray(data["days"], dtype=float),
+        "groups": np.asarray(data["groups"], dtype=int),
+        "led": np.asarray(data["led"], dtype=int),
+        "first_by_led": np.asarray(data["first_by_led"], dtype=int),
+        "reset_day": float(data["reset_day"]),
+    }
+    reset_mask = jnp.asarray(
+        layout_data["days"] >= layout_data["reset_day"]
+    )
+    grid = jnp.asarray(cache["grid_nm"])
+
+    def residual_function(
+        scaled_values,
+        flat_initial,
+        flat_scales,
+        rate_reference,
+        counts,
+        sums,
+        sum_squared,
+        curves,
+    ):
+        values = unravel(flat_initial + flat_scales * scaled_values)
+        state = spline_relative_state(
+            layout_data,
+            values,
+            {"grid_nm": grid, "relative_log_response": curves},
+            knot_days,
+            jax,
+            jnp,
+        )
+        observed = sums / counts + (
+            values["post_reset_tile_log_offset"].reshape(-1, 1)
+            * reset_mask[None, :]
+        )
+        data_residual = (
+            jnp.sqrt(1.0 / jnp.median(counts))
+            / production.LOG_NOISE_SIGMA
+            * jnp.sqrt(counts)
+            * (state["prediction"] - observed)
+        ).reshape(-1)
+        return jnp.concatenate(
+            (
+                data_residual,
+                _dynamic_prior_residuals(
+                    values,
+                    rate_reference,
+                    counts,
+                    sum_squared,
+                    jnp,
+                ),
+            )
+        )
+
+    return {
+        "residual": jax.jit(residual_function),
+        "jacobian": jax.jit(jax.jacfwd(residual_function)),
+        "unravel": unravel,
+    }
+
+
+def fit_spline_reusable(
+    data,
+    cache,
+    current_values,
+    rate_reference,
+    evaluator,
+    jax,
+    jnp,
+    max_nfev,
+):
+    """Fit one tile using a spline evaluator compiled for reuse."""
+    from jax.flatten_util import ravel_pytree
+    from scipy.optimize import least_squares
+
+    variable_initial = {
+        name: np.asarray(current_values[name], dtype=float).copy()
+        for name in relative.VARIABLE_SITES
+    }
+    fixed_values = {
+        name: np.asarray(value, dtype=float).copy()
+        for name, value in current_values.items()
+        if name not in relative.VARIABLE_SITES
+    }
+    flat_initial, unravel = ravel_pytree(
+        {name: jnp.asarray(value) for name, value in variable_initial.items()}
+    )
+    parameter_scales = production.map_parameter_scale_values(variable_initial)
+    flat_scales, _ = ravel_pytree(
+        {name: jnp.asarray(parameter_scales[name]) for name in relative.VARIABLE_SITES}
+    )
+    flat_initial = np.asarray(flat_initial, dtype=float)
+    flat_scales = np.asarray(flat_scales, dtype=float)
+    counts = jnp.asarray(data["counts"])
+    sums = jnp.asarray(data["sums"])
+    sum_squared = jnp.asarray(data["sum_squared"])
+    curves = jnp.asarray(cache["relative_log_response"])
+    rate_reference = jnp.asarray(rate_reference)
+
+    def full_values(scaled_values):
+        values = dict(fixed_values)
+        values.update(
+            unravel(
+                jnp.asarray(flat_initial) + jnp.asarray(flat_scales) * scaled_values
+            )
+        )
+        return values
+
+    def scipy_residual(scaled_values):
+        return np.asarray(
+            evaluator["residual"](
+                jnp.asarray(scaled_values),
+                jnp.asarray(flat_initial),
+                jnp.asarray(flat_scales),
+                rate_reference,
+                counts,
+                sums,
+                sum_squared,
+                curves,
+            ),
+            dtype=float,
+        )
+
+    def scipy_jacobian(scaled_values):
+        return np.asarray(
+            evaluator["jacobian"](
+                jnp.asarray(scaled_values),
+                jnp.asarray(flat_initial),
+                jnp.asarray(flat_scales),
+                rate_reference,
+                counts,
+                sums,
+                sum_squared,
+                curves,
+            ),
+            dtype=float,
+        )
+
+    initial_scaled = np.zeros_like(flat_initial)
+    started = time.perf_counter()
+    initial_residual = scipy_residual(initial_scaled)
+    compile_seconds = time.perf_counter() - started
+    result = least_squares(
+        scipy_residual,
+        initial_scaled,
+        jac=scipy_jacobian,
+        method="trf",
+        x_scale=1.0,
+        ftol=production.PRODUCTION_MAP_FTOL,
+        xtol=production.PRODUCTION_MAP_XTOL,
+        gtol=1.0e-9,
+        max_nfev=int(max_nfev),
+        verbose=0,
+    )
+    total_seconds = time.perf_counter() - started
+    values = full_values(np.asarray(result.x, dtype=float))
+    final_residual = scipy_residual(np.asarray(result.x, dtype=float))
+    return values, {
+        "converged": bool(result.success),
+        "message": str(result.message),
+        "nfev": int(result.nfev),
+        "parameter_count": int(flat_initial.size),
+        "compile_seconds": float(compile_seconds),
+        "total_seconds": float(total_seconds),
+        "residual_cost": float(0.5 * np.sum(final_residual**2)),
+        "initial_residual_cost": float(0.5 * np.sum(initial_residual**2)),
+    }
 
 
 def _fit_spline(data, cache, current_values, rate_reference, knot_days, jax, jnp, max_nfev):

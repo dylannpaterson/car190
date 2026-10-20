@@ -63,6 +63,23 @@ class PostResetInitialThicknessMosaicTests(unittest.TestCase):
             self.assertTrue(path.is_file())
             self.assertGreater(path.stat().st_size, 0)
 
+    def test_loads_256_tile_grid(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fit_root = root / "production" / "tile_size_256" / "wfi01" / "fits"
+            for tile_id in range(256):
+                self.write_archive(
+                    fit_root / f"tile_{tile_id:03d}",
+                    thickness=17.5 if tile_id == 255 else 5.0,
+                )
+            values = plotter.load_post_reset_initial_thickness_map(
+                root,
+                "WFI01",
+                tile_size=256,
+            )
+            self.assertEqual(values.shape, (16, 16))
+            self.assertAlmostEqual(values[15, 15], 17.5)
+
 
 if __name__ == "__main__":
     unittest.main()

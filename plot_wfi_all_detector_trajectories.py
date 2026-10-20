@@ -15,16 +15,30 @@ from matplotlib.lines import Line2D
 from wfi_production_plot_annotations import (
     annotate_time_axis,
     event_legend_handles,
+    latest_observation_label,
     load_time_annotations,
     split_time_series_at_reset,
+)
+from wfi_production_layout import (
+    DEFAULT_TILE_SIZE,
+    complete_tile_ids,
+    corrected_statistics_path,
+    detector_output_root as production_detector_output_root,
+    positive_integer,
+    production_output_root,
+    tile_directory_entries,
 )
 
 
 ROOT = Path(__file__).resolve().parent
 SCAS = tuple(f"WFI{index:02d}" for index in range(1, 19))
-TILES_PER_DETECTOR = 64
 DEFAULT_FIT_SUFFIX = "production"
 DEFAULT_RESET_DAY = 12.907397928240743
+
+
+def available_detector_label(trajectories):
+    names = tuple(trajectories)
+    return f"{len(names)} detectors"
 
 
 def _one_tile_series(samples, key):
@@ -36,19 +50,34 @@ def _one_tile_series(samples, key):
     return values.reshape(-1)
 
 
-def detector_output_dir(root, detector, fit_suffix):
+def detector_output_dir(
+    root,
+    detector,
+    fit_suffix,
+    tile_size=DEFAULT_TILE_SIZE,
+    fit_subdir=None,
+):
     root = Path(root)
     if fit_suffix == DEFAULT_FIT_SUFFIX:
-        return root / DEFAULT_FIT_SUFFIX / detector.lower()
-    return root / f"{detector.lower()}_{fit_suffix}"
+        output_dir = production_detector_output_root(root, detector, tile_size)
+    else:
+        output_dir = root / f"{detector.lower()}_{fit_suffix}"
+    return output_dir if fit_subdir is None else output_dir / fit_subdir
+
+
+def independent_fit_dirs(output_dir):
+    entries = tile_directory_entries(Path(output_dir) / "fits")
+    if not entries:
+        raise FileNotFoundError(f"No independent tile fits found in {output_dir}")
+    complete_tile_ids(
+        (tile_id for tile_id, _path in entries),
+        label=f"independent tile fit IDs in {output_dir}",
+    )
+    return [path for _tile_id, path in entries]
 
 
 def load_independent_trajectory(output_dir):
-    fit_dirs = sorted(
-        (Path(output_dir) / "fits").glob("tile_*")
-    )
-    if not fit_dirs:
-        raise FileNotFoundError(f"No independent tile fits found in {output_dir}")
+    fit_dirs = independent_fit_dirs(output_dir)
     thickness = []
     rates = []
     days = None
@@ -99,12 +128,7 @@ def load_trajectory(output_dir):
 
 
 def load_independent_tile_thickness(output_dir):
-    fit_dirs = sorted((Path(output_dir) / "fits").glob("tile_*"))
-    if len(fit_dirs) != TILES_PER_DETECTOR:
-        raise ValueError(
-            f"Expected {TILES_PER_DETECTOR} tile fits in {output_dir}, "
-            f"found {len(fit_dirs)}"
-        )
+    fit_dirs = independent_fit_dirs(output_dir)
     thickness = []
     days = None
     for fit_dir in fit_dirs:
@@ -122,7 +146,7 @@ def load_independent_tile_thickness(output_dir):
 
 def detrend_tile_trajectories(tile_trajectories, reset_day):
     detrended = {}
-    for detector in SCAS:
+    for detector in tile_trajectories:
         days, thickness = tile_trajectories[detector]
         pre_mask = days < reset_day
         post_mask = ~pre_mask
@@ -144,7 +168,7 @@ def detrend_tile_trajectories(tile_trajectories, reset_day):
 
 def fractional_tile_trajectories(detrended, tile_trajectories):
     fractional = {}
-    for detector in SCAS:
+    for detector in detrended:
         days, residual = detrended[detector]
         current_days, thickness = tile_trajectories[detector]
         if not np.array_equal(days, current_days):
@@ -188,7 +212,7 @@ def write_quantiles(path, trajectories):
 def detrend_ice_trajectories(trajectories, reset_day):
     days = next(iter(trajectories.values()))[0]
     median_ice = []
-    for detector in SCAS:
+    for detector in trajectories:
         detector_days, ice, _ = trajectories[detector]
         if not np.array_equal(days, detector_days):
             raise ValueError(f"Observation days differ for {detector}")
@@ -207,7 +231,7 @@ def detrend_ice_trajectories(trajectories, reset_day):
     trend[post_mask] = np.polyval(post_trend, days[post_mask])
 
     detrended = {}
-    for detector in SCAS:
+    for detector in trajectories:
         detector_days, ice, _ = trajectories[detector]
         detrended[detector] = (detector_days, ice - trend)
     return detrended, float(pre_trend[0]), float(post_trend[0])
@@ -215,7 +239,7 @@ def detrend_ice_trajectories(trajectories, reset_day):
 
 def fractional_detrended_ice_trajectories(detrended, trajectories):
     fractional = {}
-    for detector in SCAS:
+    for detector in detrended:
         days, residual = detrended[detector]
         current_days, current_ice, _ = trajectories[detector]
         if not np.array_equal(days, current_days):
@@ -234,14 +258,15 @@ def plot_detrended_ice_thickness(
     reset_day=None,
     time_annotations=None,
     fractional=False,
+    observation_label="unknown",
 ):
     figure, axis = plt.subplots(figsize=(15, 6.5))
-    colors = plt.get_cmap("tab20", len(SCAS))
+    colors = plt.get_cmap("tab20", len(trajectories))
     plot_reset_day = reset_day
     if plot_reset_day is None and time_annotations is not None:
         plot_reset_day = time_annotations.physical_reset_day
     legend_handles = []
-    for index, detector in enumerate(SCAS):
+    for index, detector in enumerate(trajectories):
         days, ice = trajectories[detector]
         days, ice_low, ice_median, ice_high = split_time_series_at_reset(
             days,
@@ -266,7 +291,7 @@ def plot_detrended_ice_thickness(
             linestyle=":",
             linewidth=0.9,
             alpha=0.8,
-            label="Ice reset",
+            label="Decon2",
         )
     axis.axhline(0.0, color="0.35", linewidth=0.7, alpha=0.6)
     axis.set_ylabel(
@@ -275,17 +300,16 @@ def plot_detrended_ice_thickness(
         else "Detrended tile-mean ice thickness (nm)"
     )
     axis.set_xlabel("Days since first exposure")
-    axis.set_title(
-        "WFI01–WFI18 detrended ice thickness"
-        + (" as a fraction of current thickness " if fractional else " ")
-        + f"(linear trends removed; {pre_rate:.3f} pre / {post_rate:.3f} post nm/day)"
-    )
+    title = "Detrended ice thickness fraction" if fractional else "Detrended ice thickness"
+    if observation_label != "unknown":
+        title = f"{title}\n{observation_label}"
+    axis.set_title(title)
     axis.set_xlim(left=0.0)
     axis.grid(alpha=0.2)
     figure.legend(
         handles=legend_handles,
         loc="lower center",
-        bbox_to_anchor=(0.5, -0.02),
+        bbox_to_anchor=(0.5, 0.035),
         ncol=6,
         frameon=False,
     )
@@ -298,7 +322,9 @@ def plot_detrended_ice_thickness(
             frameon=False,
             fontsize=7,
         )
-    figure.tight_layout(rect=(0.0, 0.10, 1.0, 0.90))
+    figure.tight_layout(rect=(0.0, 0.14, 1.0, 0.90))
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path, dpi=180)
     plt.close(figure)
 
@@ -309,13 +335,14 @@ def _plot_all_tile_axis(
     reset_day=None,
     time_annotations=None,
     fractional=False,
+    observation_label="unknown",
 ):
-    colors = plt.get_cmap("tab20", len(SCAS))
+    colors = plt.get_cmap("tab20", len(trajectories))
     plot_reset_day = reset_day
     if plot_reset_day is None and time_annotations is not None:
         plot_reset_day = time_annotations.physical_reset_day
     legend_handles = []
-    for index, detector in enumerate(SCAS):
+    for index, detector in enumerate(trajectories):
         days, values = trajectories[detector]
         plot_days, plot_values = split_time_series_at_reset(
             days,
@@ -344,7 +371,7 @@ def _plot_all_tile_axis(
             linestyle=":",
             linewidth=0.9,
             alpha=0.8,
-            label="Ice reset",
+            label="Decon2",
         )
     axis.axhline(0.0, color="0.35", linewidth=0.7, alpha=0.6)
     axis.set_ylabel(
@@ -353,11 +380,14 @@ def _plot_all_tile_axis(
         else "Per-tile detrended ice thickness (nm)"
     )
     axis.set_xlabel("Days since first exposure")
-    axis.set_title(
-        "WFI01–WFI18 all-tile detrended ice thickness"
-        + (" as a fraction of current thickness" if fractional else "")
-        + " (separate linear trend for each tile before and after reset)"
+    title = (
+        "Per-tile detrended ice thickness fraction"
+        if fractional
+        else "Per-tile detrended ice thickness"
     )
+    if observation_label != "unknown":
+        title = f"{title}\n{observation_label}"
+    axis.set_title(title)
     axis.set_xlim(left=0.0)
     axis.grid(alpha=0.2)
     return legend_handles
@@ -367,7 +397,7 @@ def _add_all_tile_legends(figure, legend_handles, time_annotations):
     figure.legend(
         handles=legend_handles,
         loc="lower center",
-        bbox_to_anchor=(0.5, -0.02),
+        bbox_to_anchor=(0.5, 0.035),
         ncol=6,
         frameon=False,
     )
@@ -388,6 +418,7 @@ def plot_all_tile_detrended_ice_thickness(
     reset_day=None,
     time_annotations=None,
     fractional=False,
+    observation_label="unknown",
 ):
     figure, axis = plt.subplots(figsize=(15, 6.5))
     legend_handles = _plot_all_tile_axis(
@@ -396,9 +427,10 @@ def plot_all_tile_detrended_ice_thickness(
         reset_day=reset_day,
         time_annotations=time_annotations,
         fractional=fractional,
+        observation_label=observation_label,
     )
     _add_all_tile_legends(figure, legend_handles, time_annotations)
-    figure.tight_layout(rect=(0.0, 0.10, 1.0, 0.90))
+    figure.tight_layout(rect=(0.0, 0.14, 1.0, 0.90))
     figure.savefig(path, dpi=180)
     plt.close(figure)
 
@@ -410,6 +442,7 @@ def plot_all_tile_detrended_ice_thickness_stacked(
     reset_day=None,
     time_annotations=None,
     alias_path=None,
+    observation_label="unknown",
 ):
     figure, axes = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
     legend_handles = _plot_all_tile_axis(
@@ -418,6 +451,7 @@ def plot_all_tile_detrended_ice_thickness_stacked(
         reset_day=reset_day,
         time_annotations=time_annotations,
         fractional=False,
+        observation_label=observation_label,
     )
     _plot_all_tile_axis(
         axes[1],
@@ -428,9 +462,10 @@ def plot_all_tile_detrended_ice_thickness_stacked(
     )
     axes[0].set_xlabel("")
     _add_all_tile_legends(figure, legend_handles, time_annotations)
-    figure.tight_layout(rect=(0.0, 0.11, 1.0, 0.90))
+    figure.tight_layout(rect=(0.0, 0.15, 1.0, 0.90))
     output_paths = (path,) if alias_path is None else (path, alias_path)
     for output_path in output_paths:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(output_path, dpi=180)
     plt.close(figure)
 
@@ -441,14 +476,18 @@ def plot_all_detector_trajectories(
     reset_day=None,
     independent_fit=False,
     time_annotations=None,
+    observation_label="unknown",
+    xlim_days=None,
 ):
     figure, axes = plt.subplots(2, 1, figsize=(13, 10), sharex=True)
-    colors = plt.get_cmap("tab20", len(SCAS))
+    colors = plt.get_cmap("tab20", len(trajectories))
     plot_reset_day = reset_day
     if plot_reset_day is None and time_annotations is not None:
         plot_reset_day = time_annotations.physical_reset_day
     legend_handles = []
-    for index, detector in enumerate(SCAS):
+    visible_ice = []
+    visible_rates = []
+    for index, detector in enumerate(trajectories):
         days, ice, rates = trajectories[detector]
         (
             days,
@@ -473,6 +512,14 @@ def plot_all_detector_trajectories(
         axes[0].plot(days, ice_median, color=color, linewidth=1.4)
         axes[1].fill_between(days, rate_low, rate_high, color=color, alpha=0.08)
         axes[1].plot(days, rate_median, color=color, linewidth=1.4)
+        if xlim_days is not None:
+            visible = (
+                np.isfinite(days)
+                & (days >= float(xlim_days[0]))
+                & (days <= float(xlim_days[1]))
+            )
+            visible_ice.extend((ice_low[visible], ice_high[visible]))
+            visible_rates.extend((rate_low[visible], rate_high[visible]))
         legend_handles.append(
             Line2D([], [], color=color, linewidth=2.0, label=detector)
         )
@@ -487,7 +534,7 @@ def plot_all_detector_trajectories(
                 linestyle=":",
                 linewidth=0.9,
                 alpha=0.8,
-                label="Ice reset",
+                label="Decon2",
             )
 
     axes[0].set_ylabel("Tile-mean ice thickness (nm)")
@@ -496,16 +543,28 @@ def plot_all_detector_trajectories(
     axes[1].set_title("Accumulation rate")
     for index, axis in enumerate(axes):
         axis.set_xlabel("Days since first exposure" if index == len(axes) - 1 else "")
-        axis.set_xlim(left=0.0)
+        if xlim_days is None:
+            axis.set_xlim(left=0.0)
+        else:
+            axis.set_xlim(*xlim_days)
         axis.grid(alpha=0.2)
-    title = "WFI01–WFI18 median trajectories with 16th–84th percentile bands"
-    if independent_fit:
-        title = "WFI01–WFI18 independent-fit trajectories; bands span tiles"
-    figure.suptitle(title, fontsize=14, y=0.985)
+    if xlim_days is not None:
+        for axis, values in ((axes[0], visible_ice), (axes[1], visible_rates)):
+            finite = np.concatenate(values)
+            finite = finite[np.isfinite(finite)]
+            if finite.size:
+                lower = float(np.min(finite))
+                upper = float(np.max(finite))
+                padding = max((upper - lower) * 0.06, 0.1)
+                axis.set_ylim(lower - padding, upper + padding)
+    title = "Ice trajectories and accumulation rates"
+    if observation_label != "unknown":
+        title = f"{title}\n{observation_label}"
+    figure.suptitle(title, fontsize=13, y=0.985)
     figure.legend(
         handles=legend_handles,
         loc="lower center",
-        bbox_to_anchor=(0.5, -0.02),
+        bbox_to_anchor=(0.5, 0.035),
         ncol=6,
         frameon=False,
     )
@@ -518,7 +577,9 @@ def plot_all_detector_trajectories(
             frameon=False,
             fontsize=7,
         )
-    figure.tight_layout(rect=(0.0, 0.10, 1.0, 0.90))
+    figure.tight_layout(rect=(0.0, 0.14, 1.0, 0.89))
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path, dpi=180)
     plt.close(figure)
 
@@ -526,43 +587,113 @@ def plot_all_detector_trajectories(
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
+    parser.add_argument(
+        "--detector",
+        dest="detectors",
+        action="append",
+        default=None,
+        help="Restrict the plot to the selected detector(s); may be repeated.",
+    )
+    parser.add_argument(
+        "--detector-output-root",
+        type=Path,
+        default=None,
+        help="Direct directory containing detector subdirectories (wfi01, wfi02, ...).",
+    )
     parser.add_argument("--fit-suffix", default=DEFAULT_FIT_SUFFIX)
+    parser.add_argument(
+        "--fit-subdir",
+        type=Path,
+        default=None,
+        help="Read fits from a subdirectory below each detector output root.",
+    )
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--tile-size",
+        type=positive_integer,
+        default=DEFAULT_TILE_SIZE,
+        help=f"Tile edge length used by the production reduction; default: {DEFAULT_TILE_SIZE}.",
+    )
     parser.add_argument(
         "--reset-day",
         type=float,
         default=None,
         help="Mark the ice reset day on both panels.",
     )
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Plot completed detectors while the remaining production fits are running.",
+    )
+    parser.add_argument(
+        "--last-days",
+        type=float,
+        default=None,
+        help="Restrict the main trajectory plot to this many days at the end of the series.",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    detectors = tuple(detector.upper() for detector in (args.detectors or SCAS))
+    unknown = set(detectors).difference(SCAS)
+    if unknown:
+        raise ValueError(f"Unknown detectors: {sorted(unknown)}")
     trajectories = {}
     independent_fit = args.fit_suffix == DEFAULT_FIT_SUFFIX
     tile_trajectories = {}
-    for detector in SCAS:
-        output_dir = detector_output_dir(args.root, detector, args.fit_suffix)
+    for detector in detectors:
+        if args.detector_output_root is not None:
+            output_dir = Path(args.detector_output_root) / detector.lower()
+        else:
+            output_dir = detector_output_dir(
+                args.root,
+                detector,
+                args.fit_suffix,
+                args.tile_size,
+                args.fit_subdir,
+            )
         posterior_path = output_dir / "posterior_samples.npz"
-        independent_paths = (output_dir / "fits").glob("tile_*/posterior_samples.npz")
-        if not posterior_path.is_file() and not any(independent_paths):
-            raise FileNotFoundError(f"Missing production posterior: {posterior_path}")
+        if not posterior_path.is_file():
+            try:
+                fit_dirs = independent_fit_dirs(output_dir)
+            except (FileNotFoundError, ValueError):
+                if args.allow_partial:
+                    continue
+                raise FileNotFoundError(f"Missing production posterior: {posterior_path}")
+            if not all((fit_dir / "posterior_samples.npz").is_file() for fit_dir in fit_dirs):
+                if args.allow_partial:
+                    continue
+                raise FileNotFoundError(f"Incomplete production posterior set: {output_dir}")
         trajectories[detector] = load_trajectory(output_dir)
         if independent_fit:
             tile_trajectories[detector] = load_independent_tile_thickness(output_dir)
-    statistics_path = args.root / "wfi01_tile_log_statistics_512_count_corrected.csv"
+    if not trajectories:
+        raise FileNotFoundError("No complete production detector trajectories are available")
+    if args.last_days is not None and args.last_days <= 0.0:
+        raise ValueError("last-days must be positive")
+    statistics_path = corrected_statistics_path(args.root, detectors[0], args.tile_size)
     time_annotations = load_time_annotations(statistics_path)
+    observation_label = latest_observation_label(args.root, args.tile_size)
     output = args.output or (
-        args.root / DEFAULT_FIT_SUFFIX / "wfi_all_detector_ice_rate_trajectories.png"
+        production_output_root(args.root, args.tile_size)
+        / (args.fit_subdir if args.fit_subdir is not None else Path())
+        / "wfi_all_detector_ice_rate_trajectories.png"
     )
     quantile_path = output.with_name(output.stem + "_quantiles.csv")
+    xlim_days = None
+    if args.last_days is not None:
+        latest_day = max(float(trajectory[0][-1]) for trajectory in trajectories.values())
+        xlim_days = (latest_day - float(args.last_days), latest_day)
     plot_all_detector_trajectories(
         output,
         trajectories,
         reset_day=args.reset_day,
         independent_fit=independent_fit,
         time_annotations=time_annotations,
+        observation_label=observation_label,
+        xlim_days=xlim_days,
     )
     detrended, pre_rate, post_rate = detrend_ice_trajectories(
         trajectories,
@@ -576,6 +707,7 @@ def main():
         post_rate,
         reset_day=args.reset_day if args.reset_day is not None else DEFAULT_RESET_DAY,
         time_annotations=time_annotations,
+        observation_label=observation_label,
     )
     fractional_output = output.with_name(
         "wfi_all_detector_detrended_ice_thickness_fraction.png"
@@ -588,6 +720,7 @@ def main():
         reset_day=args.reset_day if args.reset_day is not None else DEFAULT_RESET_DAY,
         time_annotations=time_annotations,
         fractional=True,
+        observation_label=observation_label,
     )
     if tile_trajectories:
         reset_day = (
@@ -607,6 +740,7 @@ def main():
             reset_day=reset_day,
             time_annotations=time_annotations,
             alias_path=tile_fraction_output,
+            observation_label=observation_label,
         )
     write_quantiles(quantile_path, trajectories)
     print(f"Wrote {output}")

@@ -8,15 +8,17 @@ to the statistics with NumPyro.
 The production model is intentionally fixed and is run through
 `run_wfi_production.py` as fresh-EMCEE-initialized independent per-tile MAP fits:
 
-- corrected `*_tile_log_statistics_512_count_corrected.csv` inputs, with no correction table reapplied;
+- corrected `*_tile_log_statistics_<tile-size>_count_corrected.csv` inputs,
+  with 256 pixels as the production default tile size and no correction table
+  reapplied;
 - absolute-substrate-power response with semi-infinite HgCdTe;
-- independent positive HgCdTe n/k log scales with prior sigma `0.25`;
+- independent positive HgCdTe n and k log scales with prior sigma `0.25`;
 - energy-weighted core SED integration using the pinned local reference files;
-- exactly three independent lossless AR layers and a fitted incidence angle;
+- exactly three independent lossless AR layers at fixed normal incidence;
 - fixed lossless ice index `n=1.25`, with the physical reset anchored at the
   first unified Program 1063 epoch;
 - independent per-tile lognormal initial and reset thickness priors, median `10` nm and log sigma `1.5`;
-- fully non-parametric, unwhitened per-tile trajectories with a `5` nm/day lognormal rate prior;
+- fully non-parametric, unwhitened per-tile trajectories with a `12` nm/day lognormal rate prior;
 - one fitted post-reset log offset per tile, with prior sigma `0.1`;
 - deterministic least-squares MAP optimization in prior-width coordinates for up to `10000` evaluations;
 - practical MAP convergence at `1e-9` function-reduction and step tolerances, with strict scaled-gradient convergence reported separately.
@@ -24,10 +26,18 @@ The production model is intentionally fixed and is run through
 The initializer is fixed at 52 walkers, 1,000 steps, seed `20261004`, no
 complex-q parameters, and a constant-in-time accumulation rate. Its best state
 is expanded across the non-parametric rate nodes for the MAP stage. Production
-has no model-selection CLI: conductive or
-finite HgCdTe, fitted optical-index branches, QE/ice modulation, ACM refits,
-shared or hierarchical tile trajectories, neighboring-tile smoothing, NUTS,
-and alternate MAP optimizers are not production features.
+has no model-selection CLI in the default full-TMM path: conductive or finite
+HgCdTe, fitted optical-index branches, QE/ice modulation, ACM refits, shared
+or hierarchical tile trajectories, neighboring-tile smoothing, NUTS, and
+alternate MAP optimizers are not production features. An explicit
+`--response-cache-root` dispatches to the definitive six-LED-integrated cached
+production branch documented in `docs/WFI_RELATIVE_RESPONSE_PRODUCTION.md`.
+That branch keeps the old cache's fixed optical state and interpolated response
+curves, but fits the current statistics with the current production ice/rate
+objective. It uses only a robust detector-level median of the source rates as a
+constant warm start; it never imports the source fit's time-dependent rate
+trajectory or entropy regularization, and the fitted rate prior remains centered
+at `12 nm/day`.
 
 The exploratory `fit_wfi_tmm_numpyro.py` workflow retains additional optical
 sensitivity branches. Those branches are not accepted by the production
@@ -45,10 +55,16 @@ installations. The current development environment is named `bulge_env`.
 in the requirements file; install it separately from the supplied local source
 archive after extracting it.
 
-The production TMM computes its own transfer-matrix response on the exact
-wavelength nodes in the pinned SED tables, covering approximately 480--2700 nm.
-Older SOC/effective-boundary tools still use their separate model tables; the
-production TMM has no model-path compatibility option.
+The default production TMM computes its own transfer-matrix response on the
+exact wavelength nodes in the pinned SED tables, covering approximately
+480--2700 nm. Older SOC/effective-boundary tools still use their separate model
+tables. The opt-in cached relative-response branch uses a provenance-checked
+six-LED cache and does not integrate the generic wavelength bundle during each
+fit evaluation. The current `20261012` cache is a pinned production artifact;
+ordinary reruns should reuse it rather than rebuild it. A new cache is expected
+only after full reprocessing, a reduction improvement, or a deliberate model
+change. Data without temperature-dependent gain correction is a future
+experiment and is not supported by the current cache path.
 
 ```bash
 python -m pip install -r requirements-wfi01-ice.txt
@@ -125,8 +141,9 @@ user-owned CAR190 directory. It lists calibrated ASDF products under the
 CAR190 S3 prefix, refreshes one unified all-detector MAST index for Programs
 1039 and 1063, explicitly fetches PD2 photodiode telemetry for each program,
 uses the first non-warm-up dark-subtracted signal per LED as the shared
-reference, uses the MAST supplement by default, and writes each run below a
-UTC `YYYYMMDD` directory.
+reference, fetches the sporadic `WFI_MCE_ADC_WTSM00` MPA/CPR-strap
+temperature telemetry, uses the MAST supplement by default, and writes each
+run below a UTC `YYYYMMDD` directory.
 Image products are streamed into memory only; the pipeline does not create an
 S3 image cache.
 
@@ -144,17 +161,42 @@ CSVs.
 
 Omit `--detector WFI01` to reduce every WFI detector, or replace it with one
 detector identifier such as `WFI02`. The source, default output root, MAST token
-path, MAST supplement, PD2 telemetry channel, tile sizes, and unified program
-set are fixed production defaults. Only the newest available `raw_statistics/`
+path, MAST supplement, PD2 telemetry channel, and unified program set are fixed
+production defaults. The tile edge length defaults to 512 pixels and can be
+overridden with `--tile-size`; for example, `--tile-size 256` emits
+256x256-pixel tiles. Only the newest available `raw_statistics/`
 file is reused by file-set name; existing scaled `statistics/` files are never
 used as inputs. Newly discovered products are streamed and reduced, and changed
 or removed source products trigger a safe full rebuild. At most the
-baseline/current image pair for the active LED is held in memory. The only
+baseline/current image pair for the active LED is held in memory. The default
 statistics output is the `512x512` tile grid, which is 64 tiles per detector.
+A `256x256` override produces 256 tiles per 4096x4096 detector and is for
+separate size-specific products. The production fit and plotting chain accepts
+the matching layout when `--tile-size 256` is passed to its entrypoints.
 Pass `--workers N` to reduce multiple detectors concurrently; each worker has
 its own MAST session and the default remains one worker for conservative
 single-detector operation. For example, use `--workers 18` when reducing the
 full WFI set on a 32-core host.
+
+The count-space temperature correction uses five-minute-binned
+`WFI_MCE_ADC_WTSM00` telemetry evaluated through one frozen pure quadratic per
+tile in log-correction space. The default coefficient table contains both
+256-pixel and production 512-pixel tile resolutions. The default coefficient table is
+`temperature_quadratic_coefficients.csv`; override it with
+`--temperature-quadratic-coefficients PATH`. If
+`--mpa-temperature-telemetry PATH` is omitted, the pipeline queries the MAST
+EDP sporadic engineering stream and writes the long-form telemetry to the
+dated `telemetry/` directory. A supplied CSV must contain `ObsTime`, `EUValue`,
+and `mnemonic` columns and must bracket every indexed exposure. The archived
+coefficient table contains one detector/tile-resolution parabola and is not
+refit during a reduction. Rebuild it from the archived 256-pixel statistics
+with `python build_wfi_temperature_quadratic_coefficients.py` when the archive
+or operational-temperature timestamp changes.
+When the next decon timestamp is known, pass `--decon-time ISO_TIMESTAMP`.
+The pipeline then fits a free local count-space step over a two-day window,
+using a time trend and WTSM00 when available; it does not assume a fixed
+post-decon baseline. If there are not observations on both sides, no decon
+correction is emitted.
 
 By default, the pipeline searches the default root for the most recent dated
 `raw_statistics/` output and reuses it by file-set name. Existing scaled
@@ -163,28 +205,29 @@ corrections. Changes to photodiode telemetry therefore do not force raw image
 reprocessing. Use `--run-root PATH` only when the existing reduction tree is
 outside the repository checkout.
 
-The pre-operational temperature-gain sine is fitted from Program 1039 only
-between the first ACM step (effective repeat `14`) and the pre-reset ACM step
-(effective repeat `35`), excluding both later data and the early day-two
-transient. The previous `15.064405023148149`-day anchor is the
+The archived temperature correction was calibrated from the nonzero correction
+points and is applied to every production count-statistics row with valid
+WTSM00 telemetry, without refitting. The fitted curve is normalized so its
+correction is exactly zero at the operational temperature; its original
+intercept is retained in the correction summary for provenance. The same
+per-tile quadratic is used before and after a future decon, while the decon
+itself remains a separate free count-space step. The legacy time sinusoid is
+retained only for embedded callers that explicitly omit temperature telemetry.
+The previous
+`15.064405023148149`-day anchor is the
 operational-temperature transition used to partition the ACM fit. The
-post-operational sine starts only
-after the additional ACM event (effective repeat `669` in the 20261009 WFI02
-timeline), after the base ACM correction is applied. The repeat-669 additional
+ACM repeat boundaries remain relevant to the ACM fit and legacy fallback. The
+repeat-669 additional
 ACM step and the day-22 step (effective repeat `682` in the 20261009 WFI02
 timeline) are fitted independently for each LED; the other ACM steps remain
-shared grey terms. The post-operational temperature sine ends before day 22;
+shared grey terms. The legacy post-operational fit ends before day 22;
 the per-LED day-22 step is estimated locally from neighboring reference
- observations rather than absorbed into that sine. A later day-26 ACM
- adjustment is mapped to effective repeat `691` and fitted as one shared-grey
- local step across the LEDs. The physical ice reset is
+observations rather than absorbed into that fallback. A later day-26 ACM
+adjustment is mapped to effective repeat `691` and fitted as one shared-grey
+local step across the LEDs. The physical ice reset is
 the first Program 1063 observation and is recorded per detector in
-`pipeline_manifest.json`. The post-operational sine is applied only to the
-first Program 1063 batch; later Program 1063 batches are outside that
-extrapolation and receive no temperature-dependent gain correction; the
-application cutoff is the operational ACM boundary, not the later sine-fit
-start. The existing pre-operational gain correction remains in the same
-correction table.
+`pipeline_manifest.json`. The existing ACM and side-swap corrections remain
+separate fields in the same count-space correction table.
 
 Each dated directory contains:
 
@@ -194,14 +237,16 @@ Each dated directory contains:
   uncorrected detector counts;
 - `corrections/`: per-detector side-swap calibration files plus fitted
   count-space gain/ACM correction tables and summaries;
-- `corrected_statistics/`: the photodiode-scaled 512-tile statistics with the
-  fitted count correction applied;
+- `corrected_statistics/`: the photodiode-scaled tile statistics with the
+  fitted count correction applied; the filename records the tile size;
 - `diagnostics/`: scaled-versus-corrected current-count plots for each detector,
   including LED3 pre- and post-operational temperature-fit diagnostics;
 - `telemetry/`: dark-subtracted per-exposure PD2 summaries fetched separately
   for Programs 1039 and 1063 by explicit `roman-telem --ice-monitor
-  --ice-program PROGRAM` calls before reduction; the first non-warm-up signal
-  per LED across those summaries is the shared production reference;
+  --ice-program PROGRAM` calls before reduction, plus the five-minute-binned
+  sporadic `WFI_MCE_ADC_WTSM00` engineering series used by the count-space
+  temperature fit; the first non-warm-up signal per LED across the PD2
+  summaries is the shared production reference;
 - `pipeline.log`: timestamped phase, detector, and product progress;
 - `all_wfi_rcs_flat_index.csv`: refreshed MAST supplement index;
 - `*_rrn_inventory.csv`: the source products and timestamps used;
@@ -256,18 +301,20 @@ Point it at a directory containing corrected per-detector tile-statistics files:
 ```
 
 Each input directory must contain files named
-`{detector_lower}_tile_log_statistics_512_count_corrected.csv`. All WFI01-WFI18
+`{detector_lower}_tile_log_statistics_<tile-size>_count_corrected.csv`; 256 is
+the production default and can be overridden with `--tile-size 512`. All WFI01-WFI18
 detectors are processed by default; repeat `--detector WFI##` to select a
 subset. Use `--tile-id 1` for a focused tile regression, and `--force` to
-refit a tile whose matching archive already exists.
+refit a tile whose matching archive already exists. The runner validates the
+contiguous tile IDs in the input rather than assuming 64 tiles.
 
 Each detector starts with a fresh 52-walker, 1,000-step constant-rate EMCEE
 basin search (seed `20261004`, no complex-q parameters). Its best state is
-expanded across the non-parametric rate nodes and initializes 64 independent
-tile fits using deterministic least-squares MAP optimization for up to 10,000
-evaluations. The fits use absolute semi-infinite HgCdTe power with free
+expanded across the non-parametric rate nodes and initializes one independent
+fit per input tile using deterministic least-squares MAP optimization for up to
+10,000 evaluations. The fits use absolute semi-infinite HgCdTe power with free
 positive n/k nuisance scales, independent tile AR parameters, lognormal initial
-thickness priors (median 10 nm, log sigma 1.5), the 5 nm/day trajectory prior,
+thickness priors (median 10 nm, log sigma 1.5), the 12 nm/day trajectory prior,
 tile-rate and trajectory variation, and no neighboring-tile rate smoothing.
 Corrections are expected to be already included in the input statistics; no
 fixed-correction CSV is passed to the model. Existing tile archives are reused
@@ -281,19 +328,30 @@ All production outputs are written below the input directory, not the
 repository root:
 
 ```text
-<statistics-dir>/production/<detector>/
+<statistics-dir>/production/<detector>/       # default 256-pixel layout
   emcee/                    # one constant-rate initializer
   tile_statistics/          # one split CSV per tile
   fits/tile_000/            # one deterministic MAP archive per tile
   tile_rate_posterior.csv   # detector-level aggregation
 ```
 
+For a non-default tile size, outputs are isolated under
+`<statistics-dir>/production/tile_size_<tile-size>/<detector>/` so they cannot
+mix with the default 256-pixel archives. Pass the same `--tile-size` to the
+production plotters and bundle command.
+
 `fit_wfi_tmm_production.py` contains only the fixed production TMM model and
 MAP writer. The independent runner is the supported entrypoint for the current
 cold-EMCEE plus per-tile least-squares production configuration.
 
+For the cached relative-response production branch, use the pinned-cache
+workflow in `docs/WFI_RELATIVE_RESPONSE_PRODUCTION.md`. It writes a separate
+`relative_response/` output subtree and never replaces the standard full-TMM
+`fits/` archives.
+
 Generate matching detector and all-detector plots from the same statistics
-directory with:
+directory with the default 256-pixel layout. Add `--tile-size 512` to each
+command when plotting the alternate layout:
 
 ```bash
 .venv/bin/python -u plot_wfi_independent_production.py --root /path/to/corrected_statistics
@@ -304,6 +362,8 @@ directory with:
   --root /path/to/corrected_statistics
 .venv/bin/python -u plot_wfi_post_reset_initial_thickness_mosaic.py \
   --root /path/to/fit_archive_root
+.venv/bin/python -u plot_wfi_full_focal_plane_rates.py \
+  --root /path/to/corrected_statistics
 ```
 
 The incidence-angle command writes
@@ -321,6 +381,9 @@ Bundle the complete production outputs into one self-describing FITS product:
   --statistics-dir /path/to/corrected_statistics \
   --fit-root /path/to/fit_archive_root
 ```
+
+Add `--tile-size 256` when bundling the alternate-size fit archives. The
+bundle records the discovered tile count and detector grid in its metadata.
 
 The default output is
 `production/wfi_production_map_prior_bundle.fits` below the statistics directory.
@@ -567,7 +630,11 @@ the separate legacy output format.
 - `fit_wfi_side_swap.py`: detector-local image/photodiode side-swap calibration;
 - `wfi_side_swap.py`: log-space spline-plus-step fitting utilities;
 - `build_wfi_tile_statistics_stream.py`: resumable MAST downloader;
+- `wfi_production_layout.py`: shared default and alternate tile-size layout rules;
 - `run_wfi_production.py`: fixed all-detector independent-tile production runner;
+- `run_wfi_relative_response_production.py`: provenance-checked six-LED cached-response runner;
+- `build_wfi_relative_response_cache.py`: build current-run six-LED response caches;
+- `compress_wfi_relative_response_cache.py`: compress six-LED response caches for production;
 - `run_wfi_tmm_emcee_warmup.py`: fixed one-tile EMCEE initializer;
 - `fit_wfi_tmm_production.py`: fixed production TMM model and MAP writer;
 - `fit_wfi_tmm_numpyro.py`: single- and all-SCA TMM model and output writer;
@@ -576,7 +643,26 @@ the separate legacy output format.
 - `analyze_rcs_soc_ice_model.py`: shared trajectory and sufficient-statistic utilities;
 - `fit_wfi01_joint_complex_q_soc.py`: response integration and effective-response diagnostics;
 - `fit_wfi01_effective_boundary_numpyro.py`: separate effective-boundary diagnostic;
+- `build_wfi_wavelength_response_bundle.py`: pack generic wavelength-space response caches;
+- `wfi_wavelength_response_bundle.py`: standalone bundle reader and MPA tile lookup;
 - `test_*.py`: synthetic and local fixture tests.
+
+## Portable Wavelength Response
+
+`docs/WFI_WAVELENGTH_RESPONSE_BUNDLE.md` documents the transportable compressed
+wavelength-space response product, including its nominal MPA focal-plane tile
+coordinates and standalone reader examples. The generated WFI01 bundle is
+written under the current run's
+`20261019/corrected_statistics_4h_thinned/production/wfi01/relative_response/wavelength_response_bundle/`.
+The bundle also carries
+the fitted MAP ice thickness and rate at each shared observation day and UTC
+exposure-start time for each tile.
+The bundle also carries the fitted post-reset grey throughput offset and its
+multiplicative factor.
+
+The portable wavelength bundle is a separate downstream product. It is not the
+production cache input; production cached fits use the provenance-controlled
+six-LED relative-response caches documented above.
 
 ## Verification
 

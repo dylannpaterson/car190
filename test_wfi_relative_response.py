@@ -1,0 +1,247 @@
+import numpy as np
+import pytest
+
+from wfi_relative_response import (
+    CACHE_VERSION,
+    MODEL_PROVENANCE_FIELDS,
+    PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY,
+    evaluate_spectral_response_cache,
+    integrate_spectral_response_cache,
+    load_warm_values,
+    load_spectral_response_cache,
+    load_response_cache,
+    load_optical_values,
+    statistics_fingerprint,
+    validate_response_cache_provenance,
+    write_response_cache,
+    write_spectral_response_cache,
+)
+
+
+def _write_provenance_fit(path, statistics_path):
+    values = {
+        "statistics_path": np.asarray(str(statistics_path.resolve())),
+        "statistics_fingerprint": np.asarray(statistics_fingerprint(statistics_path)),
+    }
+    for name in MODEL_PROVENANCE_FIELDS:
+        values[name] = np.asarray(
+            {
+                "sed_mode": "core",
+                "sed_weighting": "energy",
+                "map_optimizer": "least-squares",
+                "map_parameter_scaling": "prior",
+                "trajectory_regularization": "maxent",
+            }.get(name, 1.0)
+        )
+    np.savez_compressed(path, **values)
+
+
+def test_spectral_response_cache_round_trip(tmp_path):
+    wavelengths = np.linspace(480.0, 2700.0, 9)
+    thickness = np.linspace(0.0, 500.0, 7)
+    relative = (
+        0.001 * thickness[:, None]
+        + 0.00001 * wavelengths[None, :]
+        + 0.0000001 * thickness[:, None] * wavelengths[None, :]
+    )
+    spectral = {
+        "wavelengths_nm": wavelengths,
+        "ice_thickness_nm": thickness,
+        "clean_power": 0.5 + wavelengths / 5000.0,
+        "relative_log_response": relative,
+    }
+    path = write_spectral_response_cache(
+        tmp_path / "spectral_response.npz",
+        "WFI01",
+        44,
+        spectral,
+        "/workspace/source-fit.npz",
+        rank=3,
+    )
+    cache = load_spectral_response_cache(path, detector="WFI01", tile_id=44)
+    clean, response = evaluate_spectral_response_cache(
+        cache,
+        np.asarray([125.0, 375.0]),
+        np.asarray([757.5, 1867.5]),
+    )
+    expected_clean = np.interp([757.5, 1867.5], wavelengths, spectral["clean_power"])
+    query_thickness = np.asarray([125.0, 375.0])
+    expected_response = (
+        0.001 * query_thickness[:, None]
+        + 0.00001 * np.asarray([757.5, 1867.5])[None, :]
+        + 0.0000001 * query_thickness[:, None] * np.asarray([757.5, 1867.5])[None, :]
+    )
+    np.testing.assert_allclose(clean, expected_clean, rtol=0.0, atol=2.0e-7)
+    np.testing.assert_allclose(response, expected_response, rtol=0.0, atol=2.0e-7)
+
+
+def test_spectral_response_cache_rejects_out_of_range_queries(tmp_path):
+    spectral = {
+        "wavelengths_nm": np.asarray([480.0, 500.0]),
+        "ice_thickness_nm": np.asarray([0.0, 2.0]),
+        "clean_power": np.ones(2),
+        "relative_log_response": np.zeros((2, 2)),
+    }
+    path = write_spectral_response_cache(
+        tmp_path / "spectral_response.npz",
+        "WFI01",
+        0,
+        spectral,
+        "/workspace/source-fit.npz",
+        rank=1,
+    )
+    cache = load_spectral_response_cache(path)
+    with pytest.raises(ValueError, match="outside"):
+        evaluate_spectral_response_cache(cache, [3.0], [490.0])
+    with pytest.raises(ValueError, match="outside"):
+        evaluate_spectral_response_cache(cache, [1.0], [501.0])
+
+
+def test_spectral_response_cache_integrates_multiple_filters(tmp_path):
+    wavelengths = np.asarray([480.0, 500.0, 520.0, 540.0])
+    thickness = np.asarray([0.0, 2.0, 4.0])
+    relative = 0.0005 * thickness[:, None] * wavelengths[None, :]
+    spectral = {
+        "wavelengths_nm": wavelengths,
+        "ice_thickness_nm": thickness,
+        "clean_power": np.ones(4),
+        "relative_log_response": relative,
+    }
+    path = write_spectral_response_cache(
+        tmp_path / "spectral_response.npz",
+        "WFI01",
+        0,
+        spectral,
+        "/workspace/source-fit.npz",
+        rank=1,
+    )
+    cache = load_spectral_response_cache(path)
+    weights = np.asarray(
+        [
+            [1.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 1.0],
+        ]
+    )
+    result = integrate_spectral_response_cache(cache, [2.0], wavelengths, weights)
+    expected = np.log(
+        np.asarray(
+            [
+                np.trapezoid(np.exp(relative[1, :]) * weights[0], wavelengths)
+                / np.trapezoid(weights[0], wavelengths),
+                np.trapezoid(np.exp(relative[1, :]) * weights[1], wavelengths)
+                / np.trapezoid(weights[1], wavelengths),
+            ]
+        )
+    )
+    np.testing.assert_allclose(result[0], expected, rtol=0.0, atol=2.0e-7)
+
+
+def test_relative_response_cache_records_and_validates_current_provenance(tmp_path):
+    statistics = tmp_path / "tile_statistics.csv"
+    statistics.write_text(
+        "tile_id,group,n_pair_valid,sum_log_change,sum_squared_log_change\n"
+        "0,0,2,0.1,0.2\n"
+    )
+    fit = tmp_path / "posterior_samples.npz"
+    _write_provenance_fit(fit, statistics)
+    context = {
+        "wavelengths": np.asarray([480.0, 500.0]),
+        "model_weights": np.ones((1, 1, 2)),
+        "qe_columns": np.asarray([0]),
+    }
+    data = {
+        "tile_ids": np.asarray([0]),
+        "sca_names": np.asarray(["WFI01"]),
+    }
+    cache_path = tmp_path / "relative_response.npz"
+    write_response_cache(
+        cache_path,
+        data,
+        context,
+        {
+            "ar_tile_raw": np.zeros(9),
+            "absolute_hgcdte_n_log_scale": np.asarray(0.0),
+            "absolute_hgcdte_k_log_scale": np.asarray(0.0),
+            "ice_n_log_constant": np.asarray(0.0),
+            "ar_n_log_modulation": np.zeros((3, 6)),
+            "hgcdte_n_log_modulation": np.zeros(6),
+            "hgcdte_k_log_modulation": np.zeros(6),
+            "incidence_angle_deg": np.asarray(0.0),
+        },
+        np.asarray([0.0, 2.0]),
+        np.zeros((6, 2)),
+        fit,
+        statistics,
+        0.1,
+    )
+    with np.load(cache_path, allow_pickle=False) as source:
+        assert int(np.asarray(source["cache_version"]).item()) == CACHE_VERSION
+        assert "source_model_fingerprint" in source
+    load_response_cache(cache_path, data, context)
+    validate_response_cache_provenance(cache_path, fit, statistics)
+
+    statistics.write_text(
+        "tile_id,group,n_pair_valid,sum_log_change,sum_squared_log_change\n"
+        "0,1,2,0.3,0.4\n"
+    )
+    with pytest.raises(ValueError, match="statistics"):
+        validate_response_cache_provenance(cache_path, fit, statistics)
+
+
+def test_optical_values_default_missing_incidence_to_normal(tmp_path):
+    path = tmp_path / "fixed_normal_fit.npz"
+    np.savez_compressed(
+        path,
+        ar_tile_raw=np.zeros(9),
+        absolute_hgcdte_n_log_scale=np.asarray(0.0),
+        absolute_hgcdte_k_log_scale=np.asarray(0.0),
+        ice_n_log_constant=np.asarray(0.0),
+        ar_n_log_modulation=np.zeros((3, 6)),
+        hgcdte_n_log_modulation=np.zeros(6),
+        hgcdte_k_log_modulation=np.zeros(6),
+    )
+    values = load_optical_values(path)
+    assert float(np.asarray(values["incidence_angle_deg"]).item()) == 0.0
+
+
+def test_warm_values_use_current_rate_prior_not_source_trajectory(tmp_path, monkeypatch):
+    initial = {
+        "ar_tile_raw": np.zeros(9),
+        "initial_thickness_log_nm": np.asarray([[np.log(10.0)]]),
+        "reset_initial_thickness_log_nm": np.asarray([[np.log(10.0)]]),
+        "post_reset_tile_log_offset": np.zeros((1, 1)),
+        "absolute_hgcdte_n_log_scale": np.zeros((1, 1)),
+        "absolute_hgcdte_k_log_scale": np.zeros((1, 1)),
+        "incidence_angle_deg": np.asarray(0.0),
+        "np_log_rate_nodes": np.zeros((1, 1, 3)),
+    }
+    monkeypatch.setattr(
+        "wfi_relative_response.production.initial_values_for_data",
+        lambda data, constant_rate=False: {
+            name: np.asarray(value).copy() for name, value in initial.items()
+        },
+    )
+    source = tmp_path / "source_fit.npz"
+    np.savez_compressed(
+        source,
+        ar_tile_raw=np.full(9, 2.0),
+        absolute_hgcdte_n_log_scale=np.asarray([[0.1]]),
+        absolute_hgcdte_k_log_scale=np.asarray([[0.2]]),
+        ice_n_log_constant=np.asarray([[0.3]]),
+        ar_n_log_modulation=np.full((1, 1, 3, 6), 0.4),
+        hgcdte_n_log_modulation=np.full((1, 1, 6), 0.5),
+        hgcdte_k_log_modulation=np.full((1, 1, 6), 0.6),
+        incidence_angle_deg=np.asarray(0.0),
+        node_instantaneous_rate_nm_day=np.asarray([3.0, 4.0, 5.0]),
+    )
+    values = load_warm_values(
+        {"node_days": np.asarray([0.0, 1.0, 2.0])},
+        source,
+        tmp_path / "old_statistics.csv",
+    )
+    np.testing.assert_allclose(
+        values["np_log_rate_nodes"],
+        np.log(PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY),
+    )
+    np.testing.assert_allclose(values["ar_tile_raw"], 2.0)
+    np.testing.assert_allclose(values["absolute_hgcdte_n_log_scale"], 0.1)

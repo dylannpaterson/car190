@@ -308,8 +308,8 @@ def main():
     native_post_acceleration = native_acceleration(native_post_days, post_days, np.log(post_rates))
 
     fig, axes = plt.subplots(3, 1, figsize=(13, 12), sharex=True, constrained_layout=True)
-    axes[0].scatter(pre_days, pre_thickness, color="#0072B2", s=20, label="Pre-reset TMM nodes")
-    axes[0].scatter(post_days, post_thickness, color="#D55E00", s=20, label="Post-reset TMM nodes")
+    axes[0].scatter(pre_days, pre_thickness, color="#0072B2", s=20, label="Pre-Decon2 TMM nodes")
+    axes[0].scatter(post_days, post_thickness, color="#D55E00", s=20, label="Post-Decon2 TMM nodes")
     for segment, results in spline_results.items():
         color = "#0072B2" if segment == "pre-reset" else "#D55E00"
         for result in results:

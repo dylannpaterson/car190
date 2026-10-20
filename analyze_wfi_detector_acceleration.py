@@ -17,6 +17,11 @@ from analyze_wfi_tile_acceleration import (
     segment_natural_log_rate_splines,
 )
 from fit_wfi_tmm_production import load_tile_statistics
+from wfi_production_layout import (
+    DEFAULT_TILE_SIZE,
+    positive_integer,
+    tile_statistics_path,
+)
 
 
 def parse_args():
@@ -24,6 +29,7 @@ def parse_args():
     parser.add_argument("--detector-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--detector", default="WFI01")
+    parser.add_argument("--tile-size", type=positive_integer, default=DEFAULT_TILE_SIZE)
     return parser.parse_args()
 
 
@@ -110,7 +116,7 @@ def write_maps(path, rows, metrics, detector):
 def write_acceleration_distributions(path, rows, native_values, detector):
     """Plot pooled native interval and per-tile acceleration distributions."""
     colors = {"pre": "#0072B2", "post": "#D55E00"}
-    labels = {"pre": "Pre-reset", "post": "Post-reset"}
+    labels = {"pre": "Pre-Decon2", "post": "Post-Decon2"}
     figure, axes = plt.subplots(2, 3, figsize=(18, 10), constrained_layout=True)
 
     pooled = np.concatenate(
@@ -191,7 +197,7 @@ def write_acceleration_distributions(path, rows, native_values, detector):
         linewidth=0.25,
     )
     axes[1, 0].axhline(0.0, color="black", linewidth=0.8)
-    axes[1, 0].set_title("Post-reset strong-spline acceleration by column")
+    axes[1, 0].set_title("Post-Decon2 strong-spline acceleration by column")
     axes[1, 0].set_xlabel("Tile column")
     axes[1, 0].set_ylabel("Median d(rate)/dt (nm/day^2)")
     axes[1, 0].set_xticks(sorted(set(col_values)))
@@ -262,9 +268,9 @@ def main():
     rows = []
     native_values = {"pre": [], "post": []}
     for fit_dir in sorted((detector_root / "fits").glob("tile_*")):
-        tile_id = fit_dir.name[-3:]
-        statistics_path = detector_root / "tile_statistics" / (
-            f"{detector_prefix}_tile_log_statistics_512_tile_{tile_id}.csv"
+        tile_id = int(fit_dir.name.split("_")[1])
+        statistics_path = tile_statistics_path(
+            detector_root / "tile_statistics", detector, args.tile_size, tile_id
         )
         if not production_runner.archive_matches_statistics(fit_dir, statistics_path):
             continue
@@ -308,12 +314,12 @@ def main():
         writer.writerows(rows)
 
     map_metrics = (
-        ("Pre-reset linear log-rate slope (1/day)", "pre_linear_log_rate_slope_per_day", 1.0),
-        ("Post-reset linear log-rate slope (1/day)", "post_linear_log_rate_slope_per_day", 1.0),
-        ("Pre-reset native median acceleration (nm/day^2)", "pre_native_median_acceleration_nm_day2", 1.0),
-        ("Post-reset native median acceleration (nm/day^2)", "post_native_median_acceleration_nm_day2", 1.0),
-        ("Pre-reset strong natural spline (nm/day^2)", "pre_natural_strong_median_acceleration_nm_day2", 1.0),
-        ("Post-reset strong natural spline (nm/day^2)", "post_natural_strong_median_acceleration_nm_day2", 1.0),
+        ("Pre-Decon2 linear log-rate slope (1/day)", "pre_linear_log_rate_slope_per_day", 1.0),
+        ("Post-Decon2 linear log-rate slope (1/day)", "post_linear_log_rate_slope_per_day", 1.0),
+        ("Pre-Decon2 native median acceleration (nm/day^2)", "pre_native_median_acceleration_nm_day2", 1.0),
+        ("Post-Decon2 native median acceleration (nm/day^2)", "post_native_median_acceleration_nm_day2", 1.0),
+        ("Pre-Decon2 strong natural spline (nm/day^2)", "pre_natural_strong_median_acceleration_nm_day2", 1.0),
+        ("Post-Decon2 strong natural spline (nm/day^2)", "post_natural_strong_median_acceleration_nm_day2", 1.0),
     )
     write_maps(
         args.output_dir / f"{detector_prefix}_tile_acceleration_maps.png",

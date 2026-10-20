@@ -12,17 +12,25 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import numpy as np
 
+from wfi_production_layout import (
+    DEFAULT_TILE_SIZE,
+    complete_tile_ids,
+    detector_output_root as production_detector_output_root,
+    positive_integer,
+    production_output_root,
+    tile_directory_entries,
+)
+
 
 ROOT = Path(__file__).resolve().parent
 SCAS = tuple(f"WFI{index:02d}" for index in range(1, 19))
 DEFAULT_FIT_SUFFIX = "production"
-TILE_COUNT = 64
 
 
-def detector_output_dir(root, detector, fit_suffix):
+def detector_output_dir(root, detector, fit_suffix, tile_size=DEFAULT_TILE_SIZE):
     root = Path(root)
     if fit_suffix == DEFAULT_FIT_SUFFIX:
-        return root / DEFAULT_FIT_SUFFIX / detector.lower()
+        return production_detector_output_root(root, detector, tile_size)
     return root / f"{detector.lower()}_{fit_suffix}"
 
 
@@ -62,12 +70,12 @@ def _one_tile_thickness(samples, days):
 
 
 def load_detector_tile_trajectories(output_dir, sample_count=200):
-    fit_dirs = sorted((Path(output_dir) / "fits").glob("tile_*"))
-    if len(fit_dirs) != TILE_COUNT:
-        raise ValueError(
-            f"Expected {TILE_COUNT} independent tile fits in {output_dir / 'fits'}, "
-            f"found {len(fit_dirs)}"
-        )
+    entries = tile_directory_entries(Path(output_dir) / "fits")
+    complete_tile_ids(
+        (tile_id for tile_id, _path in entries),
+        label=f"independent tile fit IDs in {output_dir / 'fits'}",
+    )
+    fit_dirs = [path for _tile_id, path in entries]
 
     elapsed_days = None
     decon2_days = []
@@ -288,6 +296,12 @@ def parse_args():
     parser.add_argument("--detector", action="append", choices=SCAS)
     parser.add_argument("--sample-count", type=int, default=200)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--tile-size",
+        type=positive_integer,
+        default=DEFAULT_TILE_SIZE,
+        help=f"Tile edge length used by the production reduction; default: {DEFAULT_TILE_SIZE}.",
+    )
     return parser.parse_args()
 
 
@@ -296,13 +310,17 @@ def main():
     detectors = args.detector or SCAS
     trajectories = {}
     for detector in detectors:
-        output_dir = detector_output_dir(args.root, detector, args.fit_suffix)
+        output_dir = detector_output_dir(
+            args.root,
+            detector,
+            args.fit_suffix,
+            args.tile_size,
+        )
         trajectories[detector] = load_detector_tile_trajectories(
             output_dir, sample_count=args.sample_count
         )
     output = args.output or (
-        args.root
-        / DEFAULT_FIT_SUFFIX
+        production_output_root(args.root, args.tile_size)
         / "wfi_pre_post_decon2_ice_thickness_comparison_all_tiles.png"
     )
     output.parent.mkdir(parents=True, exist_ok=True)

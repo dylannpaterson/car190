@@ -21,7 +21,7 @@ import argparse
 import csv
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import shlex
@@ -34,7 +34,8 @@ import sys
 import tempfile
 import threading
 import time
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
+from urllib.request import Request, urlopen
 import warnings
 
 import numpy as np
@@ -99,6 +100,8 @@ PHOTODIODE_MNEMONICS = {
     "pd1": "WFI_MCE_SRCS_PD1_V",
     "pd2": "WFI_MCE_SRCS_PD2_V",
 }
+MPA_TEMPERATURE_MNEMONIC = "WFI_MCE_ADC_WTSM00"
+MPA_TEMPERATURE_BUCKET_SECONDS = 300
 
 INDEX_FIELDS = [
     "fileSetName",
@@ -147,6 +150,15 @@ CORRECTION_FIELDS = (
     "day22_acm_step_log_offset",
     "day26_acm_step_log_offset",
     "late_acm_step_log_offset",
+    "temperature_k",
+    "temperature_reference_k",
+    "temperature_quadratic_a_log_correction",
+    "temperature_quadratic_b_log_correction_per_k",
+    "temperature_quadratic_c_log_correction_per_k2",
+    "temperature_quadratic_normalization_offset_log_correction",
+    "temperature_quadratic_fit_r2",
+    "temperature_quadratic_fit_points",
+    "decon_step_log_correction",
 )
 SUMMARY_FIELDS = (
     "detector",
@@ -190,6 +202,25 @@ SUMMARY_FIELDS = (
     "reference_day26_acm_step_counts",
     "day26_acm_step_fit_scope",
     "reference_late_acm_step_counts",
+    "temperature_model",
+    "temperature_mnemonic",
+    "temperature_reference_k",
+    "temperature_quadratic_a_log_correction",
+    "temperature_quadratic_b_log_correction_per_k",
+    "temperature_quadratic_c_log_correction_per_k2",
+    "temperature_quadratic_normalization_offset_log_correction",
+    "temperature_quadratic_fit_r2",
+    "temperature_quadratic_fit_points",
+    "temperature_quadratic_rmse_percent",
+    "temperature_quadratic_max_abs_percent",
+    "pre_operational_temperature_slope_log_per_k",
+    "post_operational_temperature_slope_log_per_k",
+    "decon_step_time",
+    "decon_step_log_correction",
+    "decon_step_fit_points",
+    "decon_step_pre_points",
+    "decon_step_post_points",
+    "decon_step_rmse_log",
 )
 SIDE_SWAP_FIELDS = (
     "detector",
@@ -210,13 +241,23 @@ SIDE_SWAP_FIELDS = (
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_S3_SOURCE = "s3://roman-s3-romcom/activities/CAR190/"
-# A 4096x4096 detector produces 64 512x512 tiles. Do not emit 64x64 tiles.
+# A 4096x4096 detector produces 64 512x512 tiles by default. The CLI can
+# override this for separate tile-resolution reductions.
 DEFAULT_TILE_SIZES = (512,)
 DEFAULT_RUN_ROOT = ROOT / "CAR190_reduction"
 DEFAULT_MAST_TOKEN = ROOT / "mast_api_token.txt"
 DEFAULT_MAST_INDEX = ROOT / "all_wfi_rcs_flat_index.csv"
+DEFAULT_TEMPERATURE_QUADRATIC_COEFFICIENTS = (
+    ROOT / "temperature_quadratic_coefficients.csv"
+)
 DEFAULT_PHOTODIODE_CHANNEL = "pd2"
 DEFAULT_ROMAN_TELEM_BINARY = "roman-telem"
+DEFAULT_MAST_EDP_TEMPERATURE_URL = (
+    "https://mast.stsci.edu/edp/api/v0.1/mnemonics/spa/roman/data"
+)
+# A daily request stays below the EDP point limit for this approximately 1 Hz
+# stream while avoiding hundreds of slow per-hour requests.
+DEFAULT_TEMPERATURE_QUERY_CHUNK_HOURS = 24
 # This is the first post-reset observation in the original 1039 timeline. In
 # the unified timeline it marks the operational-temperature transition, not
 # the physical ice reset used by the downstream TMM.
@@ -230,7 +271,7 @@ DEFAULT_FIRST_ACM_STEP_REPEAT = 14
 DEFAULT_LATE_ACM_STEP_REPEAT = 56
 DEFAULT_FIRST_POST_OPERATIONAL_REPEAT = 36
 # These are legacy post-operational repeats and are mapped onto each unified
-# timeline in run_detector. The temperature sine stops at day 22; the day-22
+# timeline in run_detector. The legacy temperature application stops at day 22; the day-22
 # per-LED step and later day-26 shared-grey step are fitted separately.
 DEFAULT_TEMPERATURE_FIT_END_REPEAT = 52
 DEFAULT_DAY22_ACM_STEP_REPEAT = 52
@@ -239,6 +280,7 @@ DEFAULT_DAY22_ACM_STEP_REPEAT = 52
 DEFAULT_DAY26_ACM_STEP_REPEAT = 61
 DEFAULT_SIDE_SWAP_PRE_POINTS = 5
 DEFAULT_SIDE_SWAP_POST_POINTS = 5
+DEFAULT_DECON_FIT_WINDOW_DAYS = 2.0
 BASE_STATISTICS_FIELDS = tuple(field for field in FIELDS if field != "program")
 _LOG_HANDLE = None
 _LOG_LOCK = threading.Lock()
@@ -638,6 +680,230 @@ def parse_iso_time(value):
     if result.tzinfo is not None:
         result = result.astimezone(timezone.utc).replace(tzinfo=None)
     return result
+
+
+def _utc_timestamp(value):
+    return parse_iso_time(value).replace(tzinfo=timezone.utc).timestamp()
+
+
+def load_temperature_series(
+    path,
+    mnemonic=MPA_TEMPERATURE_MNEMONIC,
+    bucket_seconds=MPA_TEMPERATURE_BUCKET_SECONDS,
+):
+    """Load long-form MAST/roman-telem temperature samples.
+
+    The MAST engineering and ``roman-telem`` exports use ``ObsTime``,
+    ``EUValue``, and ``mnemonic`` columns. Samples are averaged into fixed
+    UTC buckets before they are interpolated to exposure timestamps.
+    """
+    path = Path(path)
+    required = {"ObsTime", "EUValue", "mnemonic"}
+    buckets = {}
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        missing = required.difference(reader.fieldnames or ())
+        if missing:
+            raise ValueError(
+                f"Temperature telemetry is missing {sorted(missing)}: {path}"
+            )
+        for row in reader:
+            if str(row.get("mnemonic", "")).strip() != mnemonic:
+                continue
+            try:
+                value = float(row["EUValue"])
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(value) or value <= 0.0:
+                continue
+            second = _utc_timestamp(row["ObsTime"])
+            bucket = int(second) // int(bucket_seconds)
+            total, count = buckets.get(bucket, (0.0, 0))
+            buckets[bucket] = (total + value, count + 1)
+    if not buckets:
+        raise ValueError(f"No telemetry samples found for {mnemonic}: {path}")
+    ordered = sorted(buckets.items())
+    seconds = np.asarray(
+        [(bucket + 0.5) * int(bucket_seconds) for bucket, _ in ordered],
+        dtype=float,
+    )
+    values = np.asarray(
+        [total / count for _, (total, count) in ordered],
+        dtype=float,
+    )
+    if seconds.size < 2 or np.ptp(seconds) <= 0.0:
+        raise ValueError(f"Temperature telemetry has no time span: {path}")
+    return seconds, values
+
+
+def interpolate_temperature(exposure_times, temperature_series):
+    """Interpolate WTSM00 without silently extrapolating beyond telemetry."""
+    seconds, values = temperature_series
+    exposure_seconds = np.asarray(
+        [_utc_timestamp(value) for value in exposure_times],
+        dtype=float,
+    )
+    if np.any(exposure_seconds < seconds[0]) or np.any(exposure_seconds > seconds[-1]):
+        raise ValueError(
+            "Temperature telemetry does not cover all exposure timestamps: "
+            f"[{exposure_seconds.min()}, {exposure_seconds.max()}] outside "
+            f"[{seconds[0]}, {seconds[-1]}]"
+        )
+    return np.interp(exposure_seconds, seconds, values)
+
+
+def temperature_series_covers(exposure_times, temperature_series):
+    """Return whether telemetry brackets every requested exposure time."""
+    seconds, _ = temperature_series
+    exposure_seconds = np.asarray(
+        [_utc_timestamp(value) for value in exposure_times],
+        dtype=float,
+    )
+    return bool(
+        exposure_seconds.size
+        and exposure_seconds.min() >= seconds[0]
+        and exposure_seconds.max() <= seconds[-1]
+    )
+
+
+def _mast_edp_time(value):
+    # MAST EDP accepts ISO timestamps without a trailing UTC designator.
+    return parse_iso_time(value).isoformat(timespec="milliseconds")
+
+
+def fetch_temperature_telemetry(
+    output_path,
+    token_path,
+    start_time,
+    end_time,
+    mnemonic=MPA_TEMPERATURE_MNEMONIC,
+    bucket_seconds=MPA_TEMPERATURE_BUCKET_SECONDS,
+    chunk_hours=DEFAULT_TEMPERATURE_QUERY_CHUNK_HOURS,
+):
+    """Fetch sporadic Roman engineering telemetry into the local CSV format."""
+    if chunk_hours <= 0:
+        raise ValueError("Temperature query chunk size must be positive")
+    start = parse_iso_time(start_time) - timedelta(seconds=bucket_seconds)
+    end = parse_iso_time(end_time) + timedelta(seconds=bucket_seconds)
+    if end <= start:
+        raise ValueError("Temperature telemetry query must span positive time")
+
+    token = _read_mast_token(token_path)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = output_path.with_name(output_path.name + ".partial")
+    last_second = -np.inf
+    row_count = 0
+    cursor = start
+    try:
+        with temporary_path.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=("ObsTime", "EUValue", "mnemonic"))
+            writer.writeheader()
+            while cursor < end:
+                chunk_end = min(
+                    cursor + timedelta(hours=int(chunk_hours)),
+                    end,
+                )
+                query = urlencode(
+                    {
+                        "mnemonic": mnemonic,
+                        "s_time": _mast_edp_time(cursor),
+                        "e_time": _mast_edp_time(chunk_end),
+                        "result_format": "json",
+                    }
+                )
+                request = Request(
+                    f"{DEFAULT_MAST_EDP_TEMPERATURE_URL}?{query}",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                try:
+                    with urlopen(request, timeout=120) as response:
+                        payload = json.load(response)
+                except Exception as error:
+                    raise RuntimeError(
+                        f"MAST temperature query failed for {mnemonic} "
+                        f"from {_mast_edp_time(cursor)} to {_mast_edp_time(chunk_end)}"
+                    ) from error
+                if not isinstance(payload, dict) or not isinstance(
+                    payload.get("Data"), list
+                ):
+                    raise ValueError(
+                        f"MAST temperature response has no Data list for {mnemonic}"
+                    )
+                chunk_rows = []
+                for row in payload["Data"]:
+                    timestamp = str(row.get("ObsTime", "")).strip()
+                    try:
+                        second = _utc_timestamp(timestamp)
+                        value = float(row["EUValue"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if not np.isfinite(value):
+                        continue
+                    chunk_rows.append((second, timestamp, value))
+                for second, timestamp, value in sorted(chunk_rows):
+                    if second <= last_second:
+                        continue
+                    writer.writerow(
+                        {
+                            "ObsTime": timestamp,
+                            "EUValue": repr(value),
+                            "mnemonic": mnemonic,
+                        }
+                    )
+                    last_second = second
+                    row_count += 1
+                cursor = chunk_end
+        if row_count < 2:
+            raise ValueError(
+                f"MAST returned fewer than two temperature samples for {mnemonic}"
+            )
+        temporary_path.replace(output_path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+    status(f"Fetched {row_count} {mnemonic} samples to {output_path}")
+    return output_path
+
+
+def prepare_temperature_telemetry(args, index_rows, run_dir):
+    """Load supplied WTSM00 data or fetch a covered local copy from MAST."""
+    missing_argument = object()
+    requested_path = getattr(args, "mpa_temperature_telemetry", missing_argument)
+    if requested_path is missing_argument:
+        # Keep embedded/unit-test callers that construct a partial argument object
+        # on the legacy path; the CLI always defines this option.
+        return None, None
+    exposure_times = [
+        row["exposure_start_time"]
+        for row in index_rows
+        if str(row.get("exposure_start_time", "")).strip()
+    ]
+    if not exposure_times:
+        raise ValueError("Temperature telemetry requires indexed exposure times")
+    if requested_path is None:
+        telemetry_path = Path(run_dir) / "telemetry" / "wfi_mce_adc_wtsm00.csv"
+        temperature_series = None
+        if telemetry_path.is_file():
+            temperature_series = load_temperature_series(telemetry_path)
+        if temperature_series is None or not temperature_series_covers(
+            exposure_times, temperature_series
+        ):
+            fetch_temperature_telemetry(
+                telemetry_path,
+                DEFAULT_MAST_TOKEN,
+                min(exposure_times, key=parse_iso_time),
+                max(exposure_times, key=parse_iso_time),
+            )
+    else:
+        telemetry_path = Path(requested_path)
+    temperature_series = load_temperature_series(telemetry_path)
+    if not temperature_series_covers(exposure_times, temperature_series):
+        raise ValueError(
+            f"Temperature telemetry does not cover all indexed exposures: {telemetry_path}"
+        )
+    interpolate_temperature(exposure_times, temperature_series)
+    return temperature_series, telemetry_path
 
 
 def _read_mast_token(path):
@@ -2435,6 +2701,246 @@ def _evaluate_count_sinusoid(fit, days):
     )
 
 
+def load_temperature_quadratic_coefficients(path):
+    """Load frozen per-detector/per-tile WTSM00 correction parabolas."""
+    if path is None:
+        return {}
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Temperature quadratic coefficient table does not exist: {path}"
+        )
+    required = {
+        "detector",
+        "tile_size",
+        "tile_id",
+        "reference_temperature_k",
+        "a_log_correction",
+        "b_log_correction_per_k",
+        "c_log_correction_per_k2",
+    }
+    coefficients = {}
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        missing = required.difference(reader.fieldnames or ())
+        if missing:
+            raise ValueError(
+                f"Temperature quadratic table is missing fields: {sorted(missing)}"
+            )
+        for row in reader:
+            detector = str(row["detector"]).strip().upper()
+            tile_size = int(row["tile_size"])
+            if tile_size < 1:
+                raise ValueError(
+                    f"Invalid temperature quadratic tile size for "
+                    f"{(detector, tile_size, row['tile_id'])}"
+                )
+            tile_id = int(row["tile_id"])
+            detector_coefficients = coefficients.setdefault(detector, {})
+            tile_coefficients = detector_coefficients.setdefault(tile_size, {})
+            if tile_id in tile_coefficients:
+                raise ValueError(
+                    f"Duplicate temperature quadratic coefficient for "
+                    f"{(detector, tile_size, tile_id)}"
+                )
+            values = {
+                "reference_temperature_k": float(row["reference_temperature_k"]),
+                "a_log_correction": float(row["a_log_correction"]),
+                "b_log_correction_per_k": float(row["b_log_correction_per_k"]),
+                "c_log_correction_per_k2": float(row["c_log_correction_per_k2"]),
+                "normalization_offset_log_correction": float(
+                    row.get("normalization_offset_log_correction", "0") or 0.0
+                ),
+                "fit_r2": float(row.get("r2_log", "nan")),
+                "fit_points": int(float(row.get("fit_points", "0"))),
+                "rmse_percent": float(row.get("rmse_percent", "nan")),
+                "max_abs_percent": float(row.get("max_abs_percent", "nan")),
+            }
+            if not all(
+                np.isfinite(values[name])
+                for name in (
+                    "reference_temperature_k",
+                    "a_log_correction",
+                    "b_log_correction_per_k",
+                    "c_log_correction_per_k2",
+                )
+            ):
+                raise ValueError(
+                    "Non-finite temperature quadratic coefficient for "
+                    f"{(detector, tile_size, tile_id)}"
+                )
+            tile_coefficients[tile_id] = values
+    if not coefficients:
+        raise ValueError(f"Temperature quadratic coefficient table is empty: {path}")
+    return coefficients
+
+
+def _temperature_quadratic_fit(coefficients):
+    """Return the frozen correction parabola in the local fit schema."""
+    raw_intercept = float(coefficients["a_log_correction"])
+    return {
+        "reference_temperature_k": float(coefficients["reference_temperature_k"]),
+        # The temperature correction is normalized to zero at the operating
+        # temperature; retain the original intercept only for provenance.
+        "a_log_correction": 0.0,
+        "b_log_correction_per_k": float(coefficients["b_log_correction_per_k"]),
+        "c_log_correction_per_k2": float(coefficients["c_log_correction_per_k2"]),
+        "normalization_offset_log_correction": float(
+            coefficients.get("normalization_offset_log_correction", raw_intercept)
+        ),
+        "r2": float(coefficients.get("fit_r2", np.nan)),
+        "fit_points": int(coefficients.get("fit_points", 0)),
+        "rmse_percent": float(coefficients.get("rmse_percent", np.nan)),
+        "max_abs_percent": float(coefficients.get("max_abs_percent", np.nan)),
+        # These legacy keys are retained for summary compatibility only.
+        "slope_log_per_k": float(coefficients["b_log_correction_per_k"]),
+        "rmse_counts": np.nan,
+    }
+
+
+def _evaluate_temperature_quadratic(fit, temperatures):
+    temperatures = np.asarray(temperatures, dtype=float)
+    delta_temperature = temperatures - fit["reference_temperature_k"]
+    return (
+        fit["a_log_correction"]
+        + fit["b_log_correction_per_k"] * delta_temperature
+        + fit["c_log_correction_per_k2"] * delta_temperature**2
+    )
+
+
+def _fit_count_temperature(temperatures, values, reference_temperature_k=None):
+    """Fit log count response as a linear function of detector temperature."""
+    temperatures = np.asarray(temperatures, dtype=float)
+    values = np.asarray(values, dtype=float)
+    if (
+        temperatures.shape != values.shape
+        or temperatures.size < 2
+        or np.any(~np.isfinite(temperatures))
+        or np.any(~np.isfinite(values))
+        or np.any(values <= 0.0)
+    ):
+        raise ValueError("Temperature-fit data must be finite and positive")
+    if np.ptp(temperatures) <= 0.0:
+        raise ValueError("Temperature-fit data must span a positive temperature interval")
+    if reference_temperature_k is None:
+        reference_temperature_k = float(np.median(temperatures))
+    reference_temperature_k = float(reference_temperature_k)
+    design = np.column_stack(
+        (np.ones_like(temperatures), temperatures - reference_temperature_k)
+    )
+    coefficients, _, _, _ = np.linalg.lstsq(
+        design, np.log(values), rcond=None
+    )
+    fitted_log = design @ coefficients
+    residual_log = np.log(values) - fitted_log
+    fitted = np.exp(fitted_log)
+    total_sum_squares = float(
+        np.sum((np.log(values) - np.mean(np.log(values))) ** 2)
+    )
+    return {
+        "reference_temperature_k": reference_temperature_k,
+        "offset_log_counts": float(coefficients[0]),
+        "slope_log_per_k": float(coefficients[1]),
+        "sse_log_squared": float(np.sum(residual_log * residual_log)),
+        "rmse_counts": float(np.sqrt(np.mean((values - fitted) ** 2))),
+        "r2": float(
+            1.0 - np.sum(residual_log * residual_log) / total_sum_squares
+        )
+        if total_sum_squares > 0.0
+        else np.nan,
+        "fitted": fitted,
+        "residual": values - fitted,
+    }
+
+
+def _evaluate_count_temperature(fit, temperatures):
+    temperatures = np.asarray(temperatures, dtype=float)
+    return np.exp(
+        fit["offset_log_counts"]
+        + fit["slope_log_per_k"]
+        * (temperatures - fit["reference_temperature_k"])
+    )
+
+
+def _fit_free_count_step(
+    entries,
+    acm_log_by_led,
+    decon_day,
+    fit_window_days=DEFAULT_DECON_FIT_WINDOW_DAYS,
+):
+    """Fit a local count-space step without imposing a post-step baseline."""
+    if decon_day is None:
+        return None
+    if fit_window_days <= 0.0:
+        raise ValueError("The decon fit window must be positive")
+    days_parts = []
+    log_values_parts = []
+    led_parts = []
+    temperature_parts = []
+    step_parts = []
+    for entry in entries:
+        step = entry.get("decon_step")
+        if step is None:
+            continue
+        days = np.asarray(entry["days"], dtype=float)
+        values = np.asarray(entry["values"], dtype=float)
+        mask = np.abs(days - float(decon_day)) <= float(fit_window_days)
+        if not np.any(mask):
+            continue
+        days_parts.append(days[mask])
+        log_values_parts.append(
+            np.log(values[mask]) + np.asarray(acm_log_by_led[int(entry["led"])])[mask]
+        )
+        led_parts.append(np.full(np.count_nonzero(mask), int(entry["led"]), dtype=int))
+        temperature = entry.get("temperature_k")
+        if temperature is None:
+            temperature_parts.append(None)
+        else:
+            temperature_parts.append(np.asarray(temperature, dtype=float)[mask])
+        step_parts.append(np.asarray(step, dtype=float)[mask])
+    if not days_parts:
+        return None
+    days = np.concatenate(days_parts)
+    log_values = np.concatenate(log_values_parts)
+    led_ids = np.concatenate(led_parts)
+    steps = np.concatenate(step_parts)
+    pre_points = int(np.count_nonzero(steps < 0.5))
+    post_points = int(np.count_nonzero(steps >= 0.5))
+    if pre_points < 2 or post_points < 2:
+        return None
+
+    unique_leds = tuple(int(value) for value in np.unique(led_ids))
+    columns = [
+        (led_ids == led).astype(float) for led in unique_leds
+    ]
+    centered_days = days - float(decon_day)
+    columns.append(centered_days)
+    has_temperature = bool(
+        temperature_parts
+        and all(part is not None for part in temperature_parts)
+    )
+    if has_temperature:
+        temperatures = np.concatenate(temperature_parts)
+        if np.any(~np.isfinite(temperatures)) or np.ptp(temperatures) <= 0.0:
+            has_temperature = False
+        else:
+            columns.append(temperatures - float(np.median(temperatures)))
+    columns.append(steps)
+    design = np.column_stack(columns)
+    coefficients, _, _, _ = np.linalg.lstsq(design, log_values, rcond=None)
+    residual = log_values - design @ coefficients
+    step_coefficient = float(coefficients[-1])
+    return {
+        "step_log_change": step_coefficient,
+        "step_log_correction": -step_coefficient,
+        "fit_points": int(log_values.size),
+        "pre_points": pre_points,
+        "post_points": post_points,
+        "rmse_log": float(np.sqrt(np.mean(residual * residual))),
+        "has_temperature": has_temperature,
+    }
+
+
 def load_count_statistics(
     path,
     additional_acm_step_repeat,
@@ -2443,8 +2949,11 @@ def load_count_statistics(
     disable_late_acm_step=False,
     day22_acm_step_repeat=None,
     day26_acm_step_repeat=None,
+    temperature_series=None,
+    decon_time=None,
 ):
     event_time = parse_iso_time(DEFAULT_STEP_TIME)
+    decon_event_time = None if decon_time is None else parse_iso_time(decon_time)
     rows_by_tile = {}
     with Path(path).open(newline="") as handle:
         reader = csv.DictReader(handle)
@@ -2467,6 +2976,22 @@ def load_count_statistics(
         for led in range(1, 7):
             led_rows = sorted(by_led[led], key=lambda row: float(row["days"]))
             days = np.asarray([float(row["days"]) for row in led_rows], dtype=float)
+            temperature_k = None
+            if temperature_series is not None:
+                temperature_k = interpolate_temperature(
+                    [row["exposure_start_time"] for row in led_rows],
+                    temperature_series,
+                )
+            decon_step = None
+            if decon_event_time is not None:
+                decon_step = np.asarray(
+                    [
+                        float(parse_iso_time(row["exposure_start_time"]) >= decon_event_time)
+                        for row in led_rows
+                    ],
+                    dtype=float,
+                )
+                decon_step -= decon_step[0]
             values = np.asarray(
                 [float(row["sum_current_counts"]) / float(row["n_pair_valid"]) for row in led_rows],
                 dtype=float,
@@ -2539,6 +3064,8 @@ def load_count_statistics(
                 "day26_step": day26_step,
                 "late_step": late_step,
                 "repeat": np.asarray([int(row["repeat"]) for row in led_rows]),
+                "temperature_k": temperature_k,
+                "decon_step": decon_step,
             }
         tiles[tile_id] = {"rows": rows, "led": led_data}
     return tiles
@@ -2562,36 +3089,72 @@ def fit_count_corrections(
     day22_acm_step_repeat=None,
     day26_acm_step_repeat=None,
     post_acm_fit_end_repeat=None,
+    temperature_mnemonic=MPA_TEMPERATURE_MNEMONIC,
+    temperature_quadratic_coefficients=None,
+    decon_time=None,
+    decon_day=None,
+    decon_fit_window_days=DEFAULT_DECON_FIT_WINDOW_DAYS,
 ):
-    """Fit grey ACM steps jointly and temperature corrections from one LED.
+    """Fit grey ACM steps jointly and apply the frozen temperature correction.
 
     The ACM fit pools all six LEDs with one coefficient per throughput step.
-    LED-specific offsets and sinusoids are nuisance terms and are never emitted
-    as corrections. Temperature factors are fitted only from ``reference_led``
-    after the shared ACM correction and interpolated identically for every LED.
-    ``post_acm_fit_start_repeat`` controls the ACM pre/post partition, while
-    ``post_temperature_fit_start_repeat`` controls the post-temperature sine
-    window. The latter may start after the additional ACM step without making
-    that step unidentifiable.
+    LED-specific offsets and time-sinusoid terms are nuisance terms and are never
+    emitted as corrections. When WTSM00 data are present in ``tile``, the
+    temperature term is instead the supplied per-tile WTSM00 quadratic in log
+    correction versus detector temperature. The frozen coefficients are applied
+    identically to every LED.
+    The frozen WTSM00 quadratic is applied to every finite-temperature row. The
+    repeat boundaries only control the legacy time-sinusoid fallback and the
+    ACM fit partitions.
     Names in ``per_led_acm_step_names`` receive separate step coefficients for
     each LED in the pooled ACM fit.
-    ``post_temperature_fit_end_repeat`` limits the post-operational temperature
-    sine. ``post_acm_fit_end_repeat`` separately limits the pooled ACM fit.
+    ``post_temperature_fit_end_repeat`` and ``post_acm_fit_end_repeat`` limit
+    the legacy temperature and pooled ACM fits respectively.
     When ``day22_acm_step_repeat`` is supplied, its per-LED coefficient is
     estimated locally from the neighboring reference rows.
     When ``day26_acm_step_repeat`` is supplied, its shared grey coefficient is
     estimated locally from the neighboring all-program rows.
-    The post-operational gain extrapolation is applied only to Program 1063
-    rows before the operational ACM split, not to later 1063 batches.
-    When supplied, the pre-operational temperature sine is fitted only on
+    The legacy post-operational gain extrapolation is applied only to the first
+    Program 1063 batch, not to later 1063 batches.
+    When temperature telemetry is omitted, the legacy pre-operational sine is
+    fitted only on
     ``[pre_temperature_fit_start_repeat, pre_temperature_fit_end_repeat)``.
-    The post-operational factor is applied only to the first Program 1063 batch;
-    later 1063 batches are outside that extrapolation and receive zero.
+    When ``decon_day`` is supplied, the independently fitted decon step remains
+    additive in log-correction space.
     """
     led_entries = [
         {"led": led, **tile["led"][led]} for led in range(1, 7)
     ]
     reference = tile["led"][reference_led]
+    use_mpa_temperature = reference.get("temperature_k") is not None
+    tile_id = int(tile["rows"][0]["tile_id"])
+    quadratic_fit = None
+    if use_mpa_temperature:
+        if temperature_quadratic_coefficients is None:
+            raise ValueError(
+                "WTSM00 temperature data requires frozen per-tile quadratic "
+                "coefficients"
+            )
+        tile_coefficients = temperature_quadratic_coefficients.get(tile_id)
+        if tile_coefficients is None:
+            raise ValueError(
+                f"Missing WTSM00 quadratic coefficients for tile {tile_id}"
+            )
+        quadratic_fit = _temperature_quadratic_fit(tile_coefficients)
+    if use_mpa_temperature and any(
+        entry.get("temperature_k") is None for entry in led_entries
+    ):
+        raise ValueError("WTSM00 temperature data must be present for every LED")
+    if use_mpa_temperature and any(
+        np.any(~np.isfinite(np.asarray(entry["temperature_k"], dtype=float)))
+        for entry in led_entries
+    ):
+        raise ValueError("WTSM00 temperature data must be finite for every LED")
+    temperature_model = (
+        "mpa_wtsm00_quadratic_per_tile"
+        if use_mpa_temperature
+        else "legacy_time_sinusoid"
+    )
     if post_acm_fit_start_repeat is None:
         post_acm_fit_start_repeat = post_temperature_fit_start_repeat
     if post_temperature_fit_end_repeat is None:
@@ -2663,7 +3226,7 @@ def fit_count_corrections(
             mask & post_operational(entry)
             for entry, mask in zip(led_entries, source_masks)
         ]
-        # Keep the temperature sine cutoff separate from the ACM fit cutoff.
+        # Keep the legacy temperature cutoff separate from the ACM fit cutoff.
         if post_acm_fit_end_repeat is not None:
             post_masks = [
                 mask
@@ -2818,6 +3381,12 @@ def fit_count_corrections(
         acm_log_by_led[int(reference_led)]
     )
     reference_source_mask = reference["program"] == REFERENCE_PROGRAM
+    decon_fit = _fit_free_count_step(
+        led_entries,
+        acm_log_by_led,
+        decon_day,
+        fit_window_days=decon_fit_window_days,
+    )
 
     if operational_temperature_day is None:
         pre_temperature_mask = reference_source_mask & (
@@ -2861,28 +3430,39 @@ def fit_count_corrections(
             )
         )
     pre_temperature_fit_points = int(np.count_nonzero(pre_temperature_mask))
-    pre_temperature_fit = _fit_count_sinusoid(
-        reference["days"][pre_temperature_mask],
-        reference_acm_values[pre_temperature_mask],
-    )
+    if use_mpa_temperature:
+        pre_temperature_fit = quadratic_fit
+    else:
+        pre_temperature_fit = _fit_count_sinusoid(
+            reference["days"][pre_temperature_mask],
+            reference_acm_values[pre_temperature_mask],
+        )
 
     early_reference_mask = reference_source_mask & (
         reference["days"] <= minimum_day
     )
     early_reference_repeats = reference["repeat"][early_reference_mask]
     if early_reference_repeats.size:
-        early_reference_log_factor = np.log(
-            _evaluate_count_sinusoid(
+        if use_mpa_temperature:
+            early_reference_factor = np.exp(
+                _evaluate_temperature_quadratic(
+                    pre_temperature_fit,
+                    reference["temperature_k"][early_reference_mask],
+                )
+            )
+        else:
+            fitted_early = _evaluate_count_sinusoid(
                 pre_temperature_fit,
                 reference["days"][early_reference_mask],
             )
-            / reference_acm_values[early_reference_mask]
-        )
-        early_reference_factor = np.exp(early_reference_log_factor)
+            early_reference_log_factor = np.log(
+                fitted_early / reference_acm_values[early_reference_mask]
+            )
+            early_reference_factor = np.exp(early_reference_log_factor)
     else:
         early_reference_factor = np.asarray([], dtype=float)
 
-    post_temperature_fit = None
+    post_temperature_fit = quadratic_fit if use_mpa_temperature else None
     post_reference_repeats = np.asarray([], dtype=int)
     post_reference_factor = np.asarray([], dtype=float)
     post_temperature_fit_points = 0
@@ -2898,20 +3478,31 @@ def fit_count_corrections(
             post_temperature_fit_end_repeat
         )
         post_temperature_fit_points = int(np.count_nonzero(post_temperature_mask))
-        post_temperature_fit = _fit_count_sinusoid(
-            reference["days"][post_temperature_mask],
-            reference_acm_values[post_temperature_mask],
-        )
+        if use_mpa_temperature:
+            post_temperature_fit = quadratic_fit
+        else:
+            post_temperature_fit = _fit_count_sinusoid(
+                reference["days"][post_temperature_mask],
+                reference_acm_values[post_temperature_mask],
+            )
         reference_temperature_rows = first_temperature_batch_mask(reference)
         post_reference_repeats = reference["repeat"][reference_temperature_rows]
         if post_reference_repeats.size:
-            post_reference_factor = (
-                _evaluate_count_sinusoid(
+            if use_mpa_temperature:
+                post_reference_factor = np.exp(
+                    _evaluate_temperature_quadratic(
+                        post_temperature_fit,
+                        reference["temperature_k"][reference_temperature_rows],
+                    )
+                )
+            else:
+                fitted_post = _evaluate_count_sinusoid(
                     post_temperature_fit,
                     reference["days"][reference_temperature_rows],
                 )
-                / reference_acm_values[reference_temperature_rows]
-            )
+                post_reference_factor = fitted_post / reference_acm_values[
+                    reference_temperature_rows
+                ]
 
     def shared_step_coefficient(name, entry=None):
         if name in pre_acm_fit["step_coefficients"]:
@@ -2926,35 +3517,54 @@ def fit_count_corrections(
     correction_rows = []
     for entry in led_entries:
         led = int(entry["led"])
-        early_rows = (entry["days"] <= minimum_day) & (
-            entry["program"] == REFERENCE_PROGRAM
-        )
         early_log_factor = np.zeros_like(entry["days"], dtype=float)
-        if early_reference_repeats.size and np.any(early_rows):
-            early_factors = np.interp(
-                entry["repeat"][early_rows],
-                early_reference_repeats,
-                early_reference_factor,
-            )
-            if np.any(~np.isfinite(early_factors)) or np.any(early_factors <= 0.0):
-                raise ValueError("LED 3 early temperature factors are invalid")
-            early_log_factor[early_rows] = np.log(early_factors)
-
         post_log_factor = np.zeros_like(entry["days"], dtype=float)
-        temperature_rows = first_temperature_batch_mask(entry)
-        if post_reference_repeats.size and np.any(temperature_rows):
-            post_factors = np.interp(
-                entry["repeat"][temperature_rows],
-                post_reference_repeats,
-                post_reference_factor,
+        if use_mpa_temperature:
+            temperature_log_factor = _evaluate_temperature_quadratic(
+                quadratic_fit,
+                entry["temperature_k"],
             )
-            if np.any(~np.isfinite(post_factors)) or np.any(post_factors <= 0.0):
-                raise ValueError("LED 3 post-temperature factors are invalid")
-            post_log_factor[temperature_rows] = np.log(post_factors)
+            reference_rows = entry["program"] == REFERENCE_PROGRAM
+            early_log_factor[reference_rows] = temperature_log_factor[reference_rows]
+            post_log_factor[~reference_rows] = temperature_log_factor[~reference_rows]
+        else:
+            early_rows = (entry["days"] <= minimum_day) & (
+                entry["program"] == REFERENCE_PROGRAM
+            )
+            if early_reference_repeats.size and np.any(early_rows):
+                early_factors = np.interp(
+                    entry["repeat"][early_rows],
+                    early_reference_repeats,
+                    early_reference_factor,
+                )
+                if np.any(~np.isfinite(early_factors)) or np.any(early_factors <= 0.0):
+                    raise ValueError("LED 3 early temperature factors are invalid")
+                early_log_factor[early_rows] = np.log(early_factors)
+
+            temperature_rows = first_temperature_batch_mask(entry)
+            if np.any(temperature_rows):
+                if post_reference_repeats.size:
+                    post_factors = np.interp(
+                        entry["repeat"][temperature_rows],
+                        post_reference_repeats,
+                        post_reference_factor,
+                    )
+                    if np.any(~np.isfinite(post_factors)) or np.any(
+                        post_factors <= 0.0
+                    ):
+                        raise ValueError("LED 3 post-temperature factors are invalid")
+                    post_log_factor[temperature_rows] = np.log(post_factors)
 
         total_log_correction = (
             acm_log_by_led[led] + early_log_factor + post_log_factor
         )
+        decon_log_factor = np.zeros_like(entry["days"], dtype=float)
+        if decon_fit is not None and entry.get("decon_step") is not None:
+            decon_log_factor = (
+                decon_fit["step_log_correction"]
+                * np.asarray(entry["decon_step"], dtype=float)
+            )
+            total_log_correction += decon_log_factor
         for index, row in enumerate(entry["rows"]):
             correction_rows.append(
                 {
@@ -2985,6 +3595,53 @@ def fit_count_corrections(
                     "late_acm_step_log_offset": float(
                         shared_step_coefficient("late_step", entry)
                     ),
+                    "temperature_k": (
+                        float(entry["temperature_k"][index])
+                        if use_mpa_temperature
+                        else np.nan
+                    ),
+                    "temperature_reference_k": (
+                        float(
+                            pre_temperature_fit["reference_temperature_k"]
+                        )
+                        if use_mpa_temperature
+                        else np.nan
+                    ),
+                    "temperature_quadratic_a_log_correction": (
+                        float(pre_temperature_fit["a_log_correction"])
+                        if use_mpa_temperature
+                        else np.nan
+                    ),
+                    "temperature_quadratic_b_log_correction_per_k": (
+                        float(pre_temperature_fit["b_log_correction_per_k"])
+                        if use_mpa_temperature
+                        else np.nan
+                    ),
+                    "temperature_quadratic_c_log_correction_per_k2": (
+                        float(pre_temperature_fit["c_log_correction_per_k2"])
+                        if use_mpa_temperature
+                        else np.nan
+                    ),
+                    "temperature_quadratic_normalization_offset_log_correction": (
+                        float(
+                            pre_temperature_fit[
+                                "normalization_offset_log_correction"
+                            ]
+                        )
+                        if use_mpa_temperature
+                        else np.nan
+                    ),
+                    "temperature_quadratic_fit_r2": (
+                        float(pre_temperature_fit["r2"])
+                        if use_mpa_temperature
+                        else np.nan
+                    ),
+                    "temperature_quadratic_fit_points": (
+                        int(pre_temperature_fit["fit_points"])
+                        if use_mpa_temperature
+                        else 0
+                    ),
+                    "decon_step_log_correction": float(decon_log_factor[index]),
                 }
             )
 
@@ -2993,10 +3650,12 @@ def fit_count_corrections(
         "tile_id": tile_id,
         "reference_program": REFERENCE_PROGRAM,
         "temperature_correction_program": TEMPERATURE_CORRECTION_PROGRAM,
-        "pre_operational_temperature_period_days": pre_temperature_fit[
-            "period_days"
-        ],
-        "pre_operational_temperature_rmse_counts": pre_temperature_fit["rmse"],
+        "pre_operational_temperature_period_days": pre_temperature_fit.get(
+            "period_days", np.nan
+        ),
+        "pre_operational_temperature_rmse_counts": pre_temperature_fit.get(
+            "rmse", pre_temperature_fit.get("rmse_counts", np.nan)
+        ),
         "pre_operational_temperature_r2": pre_temperature_fit["r2"],
         "pre_operational_temperature_fit_points": pre_temperature_fit_points,
         "pre_operational_temperature_fit_start_repeat": pre_temperature_fit_start,
@@ -3004,12 +3663,14 @@ def fit_count_corrections(
         "post_operational_temperature_period_days": (
             np.nan
             if post_temperature_fit is None
-            else post_temperature_fit["period_days"]
+            else post_temperature_fit.get("period_days", np.nan)
         ),
         "post_operational_temperature_rmse_counts": (
             np.nan
             if post_temperature_fit is None
-            else post_temperature_fit["rmse"]
+            else post_temperature_fit.get(
+                "rmse", post_temperature_fit.get("rmse_counts", np.nan)
+            )
         ),
         "post_operational_temperature_r2": (
             np.nan if post_temperature_fit is None else post_temperature_fit["r2"]
@@ -3052,6 +3713,85 @@ def fit_count_corrections(
             "shared_grey" if day26_acm_step_repeat is not None else "none"
         ),
         "reference_late_acm_step_counts": shared_step_coefficient("late_step"),
+        "temperature_model": temperature_model,
+        "temperature_mnemonic": temperature_mnemonic if use_mpa_temperature else "",
+        "temperature_reference_k": (
+            float(pre_temperature_fit["reference_temperature_k"])
+            if use_mpa_temperature
+            else np.nan
+        ),
+        "temperature_quadratic_a_log_correction": (
+            float(pre_temperature_fit["a_log_correction"])
+            if use_mpa_temperature
+            else np.nan
+        ),
+        "temperature_quadratic_b_log_correction_per_k": (
+            float(pre_temperature_fit["b_log_correction_per_k"])
+            if use_mpa_temperature
+            else np.nan
+        ),
+        "temperature_quadratic_c_log_correction_per_k2": (
+            float(pre_temperature_fit["c_log_correction_per_k2"])
+            if use_mpa_temperature
+            else np.nan
+        ),
+        "temperature_quadratic_normalization_offset_log_correction": (
+            float(pre_temperature_fit["normalization_offset_log_correction"])
+            if use_mpa_temperature
+            else np.nan
+        ),
+        "temperature_quadratic_fit_r2": (
+            float(pre_temperature_fit["r2"])
+            if use_mpa_temperature
+            else np.nan
+        ),
+        "temperature_quadratic_fit_points": (
+            int(pre_temperature_fit["fit_points"])
+            if use_mpa_temperature
+            else 0
+        ),
+        "temperature_quadratic_rmse_percent": (
+            float(pre_temperature_fit["rmse_percent"])
+            if use_mpa_temperature
+            else np.nan
+        ),
+        "temperature_quadratic_max_abs_percent": (
+            float(pre_temperature_fit["max_abs_percent"])
+            if use_mpa_temperature
+            else np.nan
+        ),
+        "pre_operational_temperature_slope_log_per_k": (
+            float(pre_temperature_fit["slope_log_per_k"])
+            if use_mpa_temperature
+            else np.nan
+        ),
+        "post_operational_temperature_slope_log_per_k": (
+            np.nan
+            if post_temperature_fit is None or not use_mpa_temperature
+            else float(post_temperature_fit["slope_log_per_k"])
+        ),
+        "decon_step_time": (
+            ""
+            if decon_time is None
+            else parse_iso_time(decon_time).isoformat() + "Z"
+        ),
+        "decon_step_log_correction": (
+            np.nan
+            if decon_fit is None
+            else float(decon_fit["step_log_correction"])
+        ),
+        "decon_step_fit_points": (
+            0 if decon_fit is None else decon_fit["fit_points"]
+        ),
+        "decon_step_pre_points": (
+            0 if decon_fit is None else decon_fit["pre_points"]
+        ),
+        "decon_step_post_points": (
+            0 if decon_fit is None else decon_fit["post_points"]
+        ),
+        "decon_step_rmse_log": (
+            np.nan if decon_fit is None else decon_fit["rmse_log"]
+        ),
     }
     if post_acm_fit is not None:
         additional_coefficients = post_acm_fit.get("led_step_coefficients", {}).get(
@@ -3089,6 +3829,12 @@ def build_corrections(
     day22_acm_step_repeat=None,
     day26_acm_step_repeat=None,
     post_acm_fit_end_repeat=None,
+    temperature_series=None,
+    temperature_mnemonic=MPA_TEMPERATURE_MNEMONIC,
+    temperature_quadratic_coefficients=None,
+    decon_time=None,
+    decon_day=None,
+    decon_fit_window_days=DEFAULT_DECON_FIT_WINDOW_DAYS,
 ):
     detector = Path(path).name.split("_tile_log_statistics_", 1)[0].upper()
     tiles = load_count_statistics(
@@ -3099,6 +3845,8 @@ def build_corrections(
         disable_late_acm_step=disable_late_acm_step,
         day22_acm_step_repeat=day22_acm_step_repeat,
         day26_acm_step_repeat=day26_acm_step_repeat,
+        temperature_series=temperature_series,
+        decon_time=decon_time,
     )
     correction_rows = []
     summary_rows = []
@@ -3121,6 +3869,11 @@ def build_corrections(
             day22_acm_step_repeat=day22_acm_step_repeat,
             day26_acm_step_repeat=day26_acm_step_repeat,
             post_acm_fit_end_repeat=post_acm_fit_end_repeat,
+            temperature_mnemonic=temperature_mnemonic,
+            temperature_quadratic_coefficients=temperature_quadratic_coefficients,
+            decon_time=decon_time,
+            decon_day=decon_day,
+            decon_fit_window_days=decon_fit_window_days,
         )
         if operational_temperature_day is not None:
             reference = tiles[tile_id]["led"][reference_led]
@@ -3717,7 +4470,7 @@ def select_post_temperature_fit_rows(
     post_temperature_fit_end_repeat,
     post_temperature_fit_start_repeat=None,
 ):
-    """Select reference-program rows for the post-operational sine fit."""
+    """Select reference-program rows for the post-operational fit window."""
     if post_temperature_fit_start_repeat is None:
         start_rows = [
             row
@@ -3756,6 +4509,11 @@ def _load_led_temperature_plot_rows(
         (int(row["tile_id"]), int(row["group"])): row
         for row in correction_rows
     }
+    def optional_float(value):
+        if value is None or str(value).strip() == "":
+            return np.nan
+        return float(value)
+
     rows = []
     for row in statistics_rows:
         if int(row["tile_id"]) != int(tile_id) or int(row["led"]) != int(reference_led):
@@ -3774,11 +4532,33 @@ def _load_led_temperature_plot_rows(
         removed_temperature_log_correction = float(
             correction.get(removed_temperature_field) or 0.0
         )
+        quadratic_coefficients = tuple(
+            optional_float(correction.get(field))
+            for field in (
+                "temperature_quadratic_a_log_correction",
+                "temperature_quadratic_b_log_correction_per_k",
+                "temperature_quadratic_c_log_correction_per_k2",
+            )
+        )
+        if all(np.isfinite(value) for value in quadratic_coefficients):
+            temperature_log_correction = float(
+                correction.get("log_gain_correction") or 0.0
+            ) + float(correction.get("temperature_gain_log_correction") or 0.0)
+        else:
+            temperature_log_correction = removed_temperature_log_correction
         rows.append(
             {
                 "days": float(row["days"]),
                 "repeat": int(row["repeat"]),
                 "program": str(row.get("program") or REFERENCE_PROGRAM),
+                "temperature_k": optional_float(correction.get("temperature_k")),
+                "temperature_reference_k": optional_float(
+                    correction.get("temperature_reference_k")
+                ),
+                "temperature_log_correction": temperature_log_correction,
+                "temperature_quadratic_a": quadratic_coefficients[0],
+                "temperature_quadratic_b": quadratic_coefficients[1],
+                "temperature_quadratic_c": quadratic_coefficients[2],
                 "acm_corrected_mean": raw_mean
                 * np.exp(count_log_correction - removed_temperature_log_correction),
             }
@@ -3786,6 +4566,101 @@ def _load_led_temperature_plot_rows(
     if not rows:
         raise ValueError(f"No valid LED {reference_led} rows found for {statistics_path}")
     return rows
+
+
+def _plot_quadratic_temperature_fit(
+    output_path,
+    detector,
+    tile_id,
+    reference_led,
+    fit_rows,
+    regime_label,
+):
+    """Plot the frozen log-correction parabola without refitting a sinusoid."""
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError as error:
+        raise ModuleNotFoundError(
+            "The quadratic temperature-fit plot requires matplotlib"
+        ) from error
+    valid_rows = [
+        row
+        for row in fit_rows
+        if all(
+            np.isfinite(row[field])
+            for field in (
+                "temperature_k",
+                "temperature_reference_k",
+                "temperature_log_correction",
+                "temperature_quadratic_a",
+                "temperature_quadratic_b",
+                "temperature_quadratic_c",
+            )
+        )
+    ]
+    if not valid_rows:
+        raise ValueError("No quadratic temperature rows are available for plotting")
+    reference_temperature = valid_rows[0]["temperature_reference_k"]
+    coefficient = tuple(
+        valid_rows[0][field]
+        for field in (
+            "temperature_quadratic_a",
+            "temperature_quadratic_b",
+            "temperature_quadratic_c",
+        )
+    )
+    delta_temperature = np.asarray(
+        [row["temperature_k"] - reference_temperature for row in valid_rows],
+        dtype=float,
+    )
+    log_correction = np.asarray(
+        [row["temperature_log_correction"] for row in valid_rows],
+        dtype=float,
+    )
+    curve_delta_temperature = np.linspace(
+        float(np.min(delta_temperature)),
+        float(np.max(delta_temperature)),
+        500,
+    )
+    curve_log_correction = (
+        coefficient[0]
+        + coefficient[1] * curve_delta_temperature
+        + coefficient[2] * curve_delta_temperature**2
+    )
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure, axis = plt.subplots(figsize=(12, 7), constrained_layout=True)
+    axis.scatter(
+        delta_temperature,
+        log_correction,
+        color="tab:blue",
+        s=32,
+        label=f"LED {reference_led} {regime_label} correction ({len(valid_rows)})",
+        zorder=4,
+    )
+    axis.plot(
+        curve_delta_temperature,
+        curve_log_correction,
+        color="tab:red",
+        linewidth=2.0,
+        label="frozen per-tile quadratic",
+        zorder=3,
+    )
+    axis.axvline(0.0, color="0.2", linestyle="--", linewidth=1.0)
+    axis.set_title(
+        f"{detector} tile {tile_id} LED {reference_led} "
+        f"{regime_label} WTSM00 correction"
+    )
+    axis.set_xlabel("WFI_MCE_ADC_WTSM00 - operational temperature (K)")
+    axis.set_ylabel("Log count correction")
+    axis.grid(alpha=0.25)
+    axis.legend(frameon=False)
+    figure.savefig(output_path, dpi=180)
+    plt.close(figure)
+    return output_path
 
 
 def plot_led3_pre_temperature_fit(
@@ -3839,6 +4714,18 @@ def plot_led3_pre_temperature_fit(
     ]
     if not fit_rows:
         raise ValueError("No pre-operational rows between the ACM step boundaries")
+    if any(
+        np.isfinite(row["temperature_quadratic_a"])
+        for row in fit_rows
+    ):
+        return _plot_quadratic_temperature_fit(
+            output_path,
+            detector,
+            tile_id,
+            reference_led,
+            fit_rows,
+            "pre-operational",
+        )
     fit_rows.sort(key=lambda row: row["days"])
     fit = _fit_count_sinusoid(
         np.asarray([row["days"] for row in fit_rows], dtype=float),
@@ -3931,7 +4818,7 @@ def plot_led3_post_temperature_fit(
     reference_led=3,
     post_acm_step_repeat=None,
 ):
-    """Plot the LED 3 post-temperature sine and the points used to fit it."""
+    """Plot the LED 3 post-temperature correction and its selected points."""
     try:
         import matplotlib
 
@@ -3979,6 +4866,18 @@ def plot_led3_post_temperature_fit(
     ]
     if not fit_rows:
         raise ValueError("LED 3 has no post-operational pre-step points for the fit")
+    if any(
+        np.isfinite(row["temperature_quadratic_a"])
+        for row in fit_rows
+    ):
+        return _plot_quadratic_temperature_fit(
+            output_path,
+            detector,
+            tile_id,
+            reference_led,
+            fit_rows,
+            "post-operational",
+        )
     fit_rows.sort(key=lambda row: row["days"])
     fit = _fit_count_sinusoid(
         np.asarray([row["days"] for row in fit_rows], dtype=float),
@@ -4338,6 +5237,13 @@ def run_detector(
     fetch_image,
     manifest,
     write_manifest=True,
+    tile_size=None,
+    temperature_series=None,
+    temperature_telemetry_path=None,
+    temperature_quadratic_coefficients=None,
+    temperature_quadratic_coefficients_path=None,
+    decon_time=None,
+    decon_fit_window_days=DEFAULT_DECON_FIT_WINDOW_DAYS,
 ):
     status(f"Starting reduction for {detector}")
     s3_records = [
@@ -4353,19 +5259,35 @@ def run_detector(
     observations = build_observations(records)
     attach_photodiode_corrections(observations, telemetry)
 
-    tile_sizes = DEFAULT_TILE_SIZES
+    selected_tile_size = (
+        DEFAULT_TILE_SIZES[0] if tile_size is None else int(tile_size)
+    )
+    tile_sizes = (selected_tile_size,)
     statistics_dir = run_dir / "statistics"
     raw_statistics_dir = run_dir / "raw_statistics"
     inventory_path = run_dir / f"{detector.lower()}_rrn_inventory.csv"
     previous_inventory = inventory_path if inventory_path.is_file() else None
     if previous_inventory is None:
-        previous_inventory = find_previous_inventory(output_root, run_dir, detector)
+        previous_inventory = find_previous_inventory(
+            output_root,
+            run_dir,
+            detector,
+            tile_size=selected_tile_size,
+        )
     previous_raw_statistics = find_previous_raw_statistics(
-        output_root, run_dir, detector, tile_size=512
+        output_root,
+        run_dir,
+        detector,
+        tile_size=selected_tile_size,
     )
     operational_temperature_day = day_for_timestamp(
         observations,
         DEFAULT_OPERATIONAL_TEMPERATURE_TIME,
+    )
+    decon_day = (
+        None
+        if decon_time is None
+        else day_for_timestamp(observations, decon_time)
     )
     physical_reset = first_program_observation(
         observations,
@@ -4508,6 +5430,37 @@ def run_detector(
             "day26_acm_step_repeat": effective_day26_step_repeat,
             "post_acm_fit_end_repeat": post_acm_fit_end_repeat,
         },
+        "temperature_telemetry": {
+            "enabled": temperature_series is not None,
+            "mnemonic": (
+                MPA_TEMPERATURE_MNEMONIC if temperature_series is not None else None
+            ),
+            "path": (
+                str(temperature_telemetry_path)
+                if temperature_telemetry_path is not None
+                else None
+            ),
+            "quadratic_coefficients": (
+                str(
+                    temperature_quadratic_coefficients_path
+                    or DEFAULT_TEMPERATURE_QUADRATIC_COEFFICIENTS
+                )
+                if temperature_series is not None
+                else None
+            ),
+            "tile_size": selected_tile_size,
+            "model": (
+                "mpa_wtsm00_quadratic_per_tile"
+                if temperature_series is not None
+                else "legacy_time_sinusoid"
+            ),
+        },
+        "decon_step": {
+            "enabled": decon_time is not None,
+            "time": str(decon_time) if decon_time is not None else None,
+            "fit_window_days": decon_fit_window_days,
+            "baseline_assumption": "none",
+        },
     }
     for tile_size in tile_sizes:
         output_path = statistics_dir / (
@@ -4533,9 +5486,11 @@ def run_detector(
             "mode": mode,
         }
 
-    raw_512 = raw_statistics_dir / f"{detector.lower()}_tile_log_statistics_512.csv"
+    raw_statistics = raw_statistics_dir / (
+        f"{detector.lower()}_tile_log_statistics_{selected_tile_size}.csv"
+    )
     actual_post_temperature_repeats = post_temperature_repeats_by_tile(
-        raw_512,
+        raw_statistics,
         effective_post_temperature_start_repeat,
         post_temperature_end_repeat,
     )
@@ -4558,22 +5513,29 @@ def run_detector(
         mode = reduce_statistics(
             observations,
             records,
-            statistics_dir / f"{detector.lower()}_tile_log_statistics_512.csv",
-            512,
+            statistics_dir
+            / f"{detector.lower()}_tile_log_statistics_{selected_tile_size}.csv",
+            selected_tile_size,
             output_root,
             run_dir,
             True,
             fetch_image=fetch_image,
-            raw_output_path=raw_512,
+            raw_output_path=raw_statistics,
         )
-        detector_manifest["statistics"]["512"]["mode"] = mode
+        detector_manifest["statistics"][str(selected_tile_size)]["mode"] = mode
 
     correction_dir = run_dir / "corrections"
     corrected_dir = run_dir / "corrected_statistics"
     correction_dir.mkdir(parents=True, exist_ok=True)
-    scaled_512 = statistics_dir / f"{detector.lower()}_tile_log_statistics_512.csv"
+    scaled_statistics = statistics_dir / (
+        f"{detector.lower()}_tile_log_statistics_{selected_tile_size}.csv"
+    )
     side_swap_pre_points_available, side_swap_post_points_available = (
-        available_side_swap_points(raw_512, inventory_path, effective_late_repeat)
+        available_side_swap_points(
+            raw_statistics,
+            inventory_path,
+            effective_late_repeat,
+        )
     )
     side_swap_pre_points = min(
         DEFAULT_SIDE_SWAP_PRE_POINTS,
@@ -4590,7 +5552,7 @@ def run_detector(
             f"{side_swap_post_points_available} for {detector}"
         )
     side_swap_rows = fit_side_swap_series(
-        raw_512,
+        raw_statistics,
         inventory_path,
         effective_late_repeat,
         pre_points=side_swap_pre_points,
@@ -4604,8 +5566,8 @@ def run_detector(
     ]
     write_csv(side_swap_calibration_path, SIDE_SWAP_FIELDS, side_swap_output_rows)
     write_side_swap_scaled_statistics(
-        raw_512,
-        scaled_512,
+        raw_statistics,
+        scaled_statistics,
         observations,
         side_swap_rows,
         effective_late_repeat,
@@ -4623,7 +5585,7 @@ def run_detector(
         f"{detector.lower()}_count_space_unified_temperature_corrections.csv"
     )
     correction_summary_path = correction_dir / (
-            f"{detector.lower()}_count_space_unified_temperature_fit_summary.csv"
+        f"{detector.lower()}_count_space_unified_temperature_fit_summary.csv"
     )
     day22_step_day = min(
         float(row["days"])
@@ -4640,23 +5602,34 @@ def run_detector(
         int(row["repeat"]) >= effective_day26_step_repeat for row in observations
     ) else None
     correction_rows, summary_rows = build_corrections(
-        scaled_512,
+        scaled_statistics,
         3,
         1.0,
-            effective_additional_repeat,
-            operational_temperature_day,
-            effective_pre_reset_repeat,
-            effective_late_repeat,
-            post_temperature_fit_start_repeat=effective_post_temperature_start_repeat,
-            post_acm_fit_start_repeat=effective_post_acm_fit_start_repeat,
-            per_led_acm_step_names=("additional_step",),
-            post_temperature_fit_end_repeat=post_temperature_end_repeat,
-            pre_temperature_fit_start_repeat=effective_first_acm_repeat,
-            pre_temperature_fit_end_repeat=effective_pre_reset_repeat,
-            day22_acm_step_repeat=effective_day22_step_repeat,
-            day26_acm_step_repeat=effective_day26_step_repeat,
-            post_acm_fit_end_repeat=post_acm_fit_end_repeat,
-            disable_late_acm_step=True,
+        effective_additional_repeat,
+        operational_temperature_day,
+        effective_pre_reset_repeat,
+        effective_late_repeat,
+        post_temperature_fit_start_repeat=effective_post_temperature_start_repeat,
+        post_acm_fit_start_repeat=effective_post_acm_fit_start_repeat,
+        per_led_acm_step_names=("additional_step",),
+        post_temperature_fit_end_repeat=post_temperature_end_repeat,
+        pre_temperature_fit_start_repeat=effective_first_acm_repeat,
+        pre_temperature_fit_end_repeat=effective_pre_reset_repeat,
+        day22_acm_step_repeat=effective_day22_step_repeat,
+        day26_acm_step_repeat=effective_day26_step_repeat,
+        post_acm_fit_end_repeat=post_acm_fit_end_repeat,
+        disable_late_acm_step=True,
+        temperature_series=temperature_series,
+        temperature_mnemonic=MPA_TEMPERATURE_MNEMONIC,
+        temperature_quadratic_coefficients=(
+            temperature_quadratic_coefficients.get(detector, {})
+            .get(selected_tile_size, {})
+            if temperature_quadratic_coefficients is not None
+            else None
+        ),
+        decon_time=decon_time,
+        decon_day=decon_day,
+        decon_fit_window_days=decon_fit_window_days,
     )
     status(
         f"{detector}: post-temperature fit points="
@@ -4667,10 +5640,10 @@ def run_detector(
     write_csv(correction_path, CORRECTION_FIELDS, correction_rows)
     write_csv(correction_summary_path, SUMMARY_FIELDS, summary_rows)
     corrected_path = corrected_dir / (
-        f"{detector.lower()}_tile_log_statistics_512_count_corrected.csv"
+        f"{detector.lower()}_tile_log_statistics_{selected_tile_size}_count_corrected.csv"
     )
     write_corrected_statistics(
-        scaled_512,
+        scaled_statistics,
         correction_path,
         corrected_path,
     )
@@ -4680,7 +5653,7 @@ def run_detector(
     with _PLOT_LOCK:
         plot_count_diagnostic(
             diagnostic_plot,
-            scaled_512,
+            scaled_statistics,
             correction_path,
             detector,
             operational_temperature_day,
@@ -4706,7 +5679,7 @@ def run_detector(
         )
         plot_led3_post_temperature_fit(
             led3_temperature_fit_plot,
-            scaled_512,
+            scaled_statistics,
             correction_path,
             detector,
             operational_temperature_day,
@@ -4718,7 +5691,7 @@ def run_detector(
         )
         plot_led3_pre_temperature_fit(
             led3_pre_temperature_fit_plot,
-            scaled_512,
+            scaled_statistics,
             correction_path,
             detector,
             effective_first_acm_repeat,
@@ -4736,8 +5709,27 @@ def run_detector(
         "led3_post_temperature_fit_plot": str(led3_temperature_fit_plot),
         "led3_pre_temperature_fit_plot": str(led3_pre_temperature_fit_plot),
         "correction_space": "counts",
-        "input_statistics": str(scaled_512),
-        "raw_statistics": str(raw_512),
+        "temperature_mnemonic": (
+            MPA_TEMPERATURE_MNEMONIC if temperature_series is not None else ""
+        ),
+        "temperature_model": (
+            "mpa_wtsm00_quadratic_per_tile"
+            if temperature_series is not None
+            else "legacy_time_sinusoid"
+        ),
+        "temperature_quadratic_coefficients": (
+            str(
+                temperature_quadratic_coefficients_path
+                or DEFAULT_TEMPERATURE_QUADRATIC_COEFFICIENTS
+            )
+            if temperature_series is not None
+            else ""
+        ),
+        "temperature_quadratic_tile_size": selected_tile_size,
+        "decon_step_time": str(decon_time) if decon_time is not None else "",
+        "decon_step_baseline_assumption": "none",
+        "input_statistics": str(scaled_statistics),
+        "raw_statistics": str(raw_statistics),
         "additional_acm_step_fit_scope": "per_led",
         "day22_acm_step_fit_scope": "per_led",
         "day26_acm_step_fit_scope": "shared_grey",
@@ -4767,6 +5759,13 @@ def run_detector_worker(
     index_rows,
     telemetry,
     mast_token,
+    tile_size,
+    temperature_series=None,
+    temperature_telemetry_path=None,
+    temperature_quadratic_coefficients=None,
+    temperature_quadratic_coefficients_path=None,
+    decon_time=None,
+    decon_fit_window_days=DEFAULT_DECON_FIT_WINDOW_DAYS,
 ):
     """Run one detector with an isolated MAST session for threaded execution."""
     missions = login_to_mast(mast_token)
@@ -4781,6 +5780,15 @@ def run_detector_worker(
         make_image_fetcher(missions),
         {"detectors": {}},
         write_manifest=False,
+        tile_size=tile_size,
+        temperature_series=temperature_series,
+        temperature_telemetry_path=temperature_telemetry_path,
+        temperature_quadratic_coefficients=temperature_quadratic_coefficients,
+        temperature_quadratic_coefficients_path=(
+            temperature_quadratic_coefficients_path
+        ),
+        decon_time=decon_time,
+        decon_fit_window_days=decon_fit_window_days,
     )
 
 
@@ -4818,6 +5826,45 @@ def parse_args(argv=None):
             f"{DEFAULT_RUN_ROOT}."
         ),
     )
+    parser.add_argument(
+        "--tile-size",
+        type=positive_integer,
+        default=DEFAULT_TILE_SIZES[0],
+        help=(
+            "Tile edge length in detector pixels; default: "
+            f"{DEFAULT_TILE_SIZES[0]}. A 4096-pixel detector produces "
+            "64 tiles at 512 or 256 tiles at 256."
+        ),
+    )
+    parser.add_argument(
+        "--mpa-temperature-telemetry",
+        type=Path,
+        default=None,
+        help=(
+            "Long-form CSV for WFI_MCE_ADC_WTSM00. When omitted, fetch the "
+            "required sporadic MAST engineering telemetry automatically. "
+            "The telemetry is evaluated through the frozen per-tile quadratic "
+            "correction table."
+        ),
+    )
+    parser.add_argument(
+        "--temperature-quadratic-coefficients",
+        type=Path,
+        default=DEFAULT_TEMPERATURE_QUADRATIC_COEFFICIENTS,
+        help=(
+            "Frozen detector/tile WTSM00 log-correction parabolas; default: "
+            f"{DEFAULT_TEMPERATURE_QUADRATIC_COEFFICIENTS}."
+        ),
+    )
+    parser.add_argument(
+        "--decon-time",
+        default=None,
+        help=(
+            "Optional UTC timestamp for the expected decon. Fit its local "
+            "count-space step as a free offset without assuming a post-decon "
+            "baseline; omit until the event time is known."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -4847,7 +5894,7 @@ def main(argv=None):
         "mast_supplement": True,
         "programs": list(UNIFIED_PROGRAMS),
         "photodiode_channel": DEFAULT_PHOTODIODE_CHANNEL,
-        "tile_sizes": list(DEFAULT_TILE_SIZES),
+        "tile_sizes": [args.tile_size],
         "correction_settings": {
             "reference_led": 3,
             "acm_fit_scope": (
@@ -4864,6 +5911,15 @@ def main(argv=None):
             "side_swap_pre_points": DEFAULT_SIDE_SWAP_PRE_POINTS,
             "side_swap_post_points": DEFAULT_SIDE_SWAP_POST_POINTS,
             "operational_temperature_time": DEFAULT_OPERATIONAL_TEMPERATURE_TIME,
+            "temperature_model": "mpa_wtsm00_quadratic_per_tile",
+            "temperature_quadratic_coefficients": str(
+                getattr(
+                    args,
+                    "temperature_quadratic_coefficients",
+                    DEFAULT_TEMPERATURE_QUADRATIC_COEFFICIENTS,
+                )
+            ),
+            "temperature_quadratic_tile_size": args.tile_size,
             "post_temperature_fit_starts_after_additional_acm": True,
             "temperature_fit_end_legacy_repeat": DEFAULT_TEMPERATURE_FIT_END_REPEAT,
             "day22_acm_step_legacy_repeat": DEFAULT_DAY22_ACM_STEP_REPEAT,
@@ -4871,6 +5927,7 @@ def main(argv=None):
             "day26_acm_step_legacy_repeat": DEFAULT_DAY26_ACM_STEP_REPEAT,
             "day26_acm_step_fit_scope": "shared_grey",
             "physical_ice_reset": "first_program_1063_observation",
+            "decon_step": "optional_free_count_space_step",
         },
         "detectors": {},
     }
@@ -4910,6 +5967,37 @@ def main(argv=None):
                 f"Selected detector {detector} is missing unified program(s): "
                 f"{missing_programs}"
             )
+    temperature_series, temperature_telemetry_path = prepare_temperature_telemetry(
+        args,
+        index_rows,
+        run_dir,
+    )
+    temperature_quadratic_coefficients_path = getattr(
+        args,
+        "temperature_quadratic_coefficients",
+        DEFAULT_TEMPERATURE_QUADRATIC_COEFFICIENTS,
+    )
+    temperature_quadratic_coefficients = (
+        load_temperature_quadratic_coefficients(
+            temperature_quadratic_coefficients_path
+        )
+        if temperature_series is not None
+        else {}
+    )
+    if temperature_series is not None:
+        missing_detectors = sorted(
+            detector
+            for detector in selected_detectors
+            if not temperature_quadratic_coefficients.get(detector, {}).get(
+                args.tile_size
+            )
+        )
+        if missing_detectors:
+            raise ValueError(
+                "Temperature quadratic coefficients are missing detector/tile-size "
+                f"entries for {missing_detectors} at tile size {args.tile_size}"
+            )
+    decon_time = getattr(args, "decon_time", None)
     index_metadata = read_optional_index(DEFAULT_MAST_INDEX)
     shutil.copy2(DEFAULT_MAST_INDEX, run_dir / DEFAULT_MAST_INDEX.name)
 
@@ -4944,6 +6032,30 @@ def main(argv=None):
         "exposure_rows": len(telemetry["values"]),
         "reference_mode": telemetry["reference_mode"],
         "reference_values": telemetry["reference_values"],
+    }
+    manifest["temperature_telemetry"] = {
+        "enabled": temperature_series is not None,
+        "mnemonic": (
+            MPA_TEMPERATURE_MNEMONIC if temperature_series is not None else None
+        ),
+        "path": (
+            str(temperature_telemetry_path)
+            if temperature_telemetry_path is not None
+            else None
+        ),
+        "quadratic_coefficients": (
+            str(temperature_quadratic_coefficients_path)
+            if temperature_series is not None
+            else None
+        ),
+        "tile_size": args.tile_size,
+        "source": "mast-edp-sporadic" if temperature_series is not None else None,
+        "bucket_seconds": MPA_TEMPERATURE_BUCKET_SECONDS,
+        "model": (
+            "mpa_wtsm00_quadratic_per_tile"
+            if temperature_series is not None
+            else "legacy_time_sinusoid"
+        ),
     }
 
     s3_detectors = {
@@ -4982,6 +6094,16 @@ def main(argv=None):
                 telemetry,
                 fetch_image,
                 manifest,
+                tile_size=args.tile_size,
+                temperature_series=temperature_series,
+                temperature_telemetry_path=temperature_telemetry_path,
+                temperature_quadratic_coefficients=(
+                    temperature_quadratic_coefficients
+                ),
+                temperature_quadratic_coefficients_path=(
+                    temperature_quadratic_coefficients_path
+                ),
+                decon_time=decon_time,
             )
     else:
         status(f"Running detectors concurrently with {workers} workers")
@@ -4997,6 +6119,12 @@ def main(argv=None):
                     index_rows,
                     telemetry,
                     DEFAULT_MAST_TOKEN,
+                    args.tile_size,
+                    temperature_series,
+                    temperature_telemetry_path,
+                    temperature_quadratic_coefficients,
+                    temperature_quadratic_coefficients_path,
+                    decon_time,
                 )
                 for detector in detectors
             }

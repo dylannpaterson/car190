@@ -22,32 +22,62 @@ from plot_wfi_full_focal_plane_rates import (
 )
 
 
-TILE_GRID_SIZE = 8
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--production-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--tile-size",
+        type=int,
+        default=256,
+        help="Production tile size used to resolve the output layout (default: 256)",
+    )
     return parser.parse_args()
 
 
-def load_detector_map(production_root, detector):
-    detector_root = Path(production_root) / "production" / detector.lower()
-    rate_path = detector_root / "tile_rate_posterior.csv"
+def detector_root(production_root, detector, tile_size=256):
+    """Resolve either a statistics root or an already-selected production root."""
+    root = Path(production_root)
+    detector_name = detector.lower()
+    candidates = (
+        root / "production" / f"tile_size_{tile_size}" / detector_name,
+        root / "production" / detector_name,
+        root / f"tile_size_{tile_size}" / detector_name,
+        root / detector_name,
+    )
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return candidates[0]
+
+
+def load_detector_map(production_root, detector, tile_size=256):
+    output_dir = detector_root(production_root, detector, tile_size)
+    rate_path = output_dir / "tile_rate_posterior.csv"
     if not rate_path.is_file():
         return None
     with rate_path.open(newline="") as handle:
         rows = list(csv.DictReader(handle))
-    values = np.full((TILE_GRID_SIZE, TILE_GRID_SIZE), np.nan)
+    if not rows:
+        return None
+    tile_ids = {int(row["tile_id"]) for row in rows}
+    tile_rows = {int(row["tile_row"]) for row in rows}
+    tile_cols = {int(row["tile_col"]) for row in rows}
+    grid_size = max(max(tile_rows), max(tile_cols)) + 1
+    expected_tile_ids = set(range(grid_size * grid_size))
+    if tile_ids != expected_tile_ids or len(rows) != len(expected_tile_ids):
+        raise ValueError(
+            f"Expected a complete {grid_size}x{grid_size} tile map in {rate_path}"
+        )
+    values = np.full((grid_size, grid_size), np.nan)
     for row in rows:
         tile_id = int(row["tile_id"])
         tile_row = int(row["tile_row"])
         tile_col = int(row["tile_col"])
-        if tile_id != tile_row * TILE_GRID_SIZE + tile_col:
+        if tile_id != tile_row * grid_size + tile_col:
             raise ValueError(f"Invalid tile coordinates in {rate_path}: {row}")
         posterior_path = (
-            detector_root / "fits" / f"tile_{tile_id:03d}" / "posterior_samples.npz"
+            output_dir / "fits" / f"tile_{tile_id:03d}" / "posterior_samples.npz"
         )
         if not posterior_path.is_file():
             raise FileNotFoundError(posterior_path)
@@ -59,13 +89,14 @@ def load_detector_map(production_root, detector):
             )
         values[tile_row, tile_col] = 100.0 * np.expm1(offset)
     if not np.isfinite(values).all():
-        raise ValueError(f"Expected 64 grey offsets in {detector_root}")
+        raise ValueError(f"Expected a complete grey-offset map in {output_dir}")
     return values
 
 
-def load_maps(production_root):
+def load_maps(production_root, tile_size=256):
     return {
-        detector: load_detector_map(production_root, detector) for detector in SCAS
+        detector: load_detector_map(production_root, detector, tile_size)
+        for detector in SCAS
     }
 
 
@@ -147,7 +178,8 @@ def draw_mosaic(path, maps):
             fontsize=6.5,
             color="white",
         )
-        for tile in range(1, TILE_GRID_SIZE):
+        grid_size = values.shape[0]
+        for tile in range(1, grid_size):
             axis.plot(
                 (x + tile, x + tile),
                 (y, y + SCA_SIZE),
@@ -186,7 +218,7 @@ def draw_mosaic(path, maps):
 
 def main():
     args = parse_args()
-    maps = load_maps(args.production_root)
+    maps = load_maps(args.production_root, args.tile_size)
     values = draw_mosaic(args.output, maps)
     print(f"Available detectors: {sum(value is not None for value in maps.values())}")
     print(f"Grey offset range: {np.min(values):+.6g}% to {np.max(values):+.6g}%")

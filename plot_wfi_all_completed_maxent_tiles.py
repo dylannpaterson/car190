@@ -178,7 +178,7 @@ def plot_detector_rate_envelopes(records, output, reset_day):
         linestyle=":",
         linewidth=0.9,
         alpha=0.8,
-        label="Ice reset",
+        label="Decon2",
     )
     axis.set_xlabel("Days since first exposure")
     axis.set_ylabel("Instantaneous ice accumulation rate (nm/day)")

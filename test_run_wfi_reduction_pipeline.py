@@ -69,11 +69,194 @@ class ReductionPipelineTests(unittest.TestCase):
             pipeline.parse_args(["--run-root", "/tmp/car190"]).run_root,
             Path("/tmp/car190"),
         )
+        self.assertEqual(pipeline.parse_args([]).tile_size, 512)
+        self.assertEqual(
+            pipeline.parse_args(["--tile-size", "256"]).tile_size,
+            256,
+        )
         self.assertIsNone(pipeline.parse_args([]).detector)
         with self.assertRaises(SystemExit):
             pipeline.parse_args(["--detector", "WFI99"])
         with self.assertRaises(SystemExit):
             pipeline.parse_args(["--workers", "0"])
+
+    def test_temperature_quadratic_table_keeps_tile_resolutions_separate(self):
+        fields = (
+            "detector",
+            "tile_size",
+            "tile_id",
+            "reference_temperature_k",
+            "a_log_correction",
+            "b_log_correction_per_k",
+            "c_log_correction_per_k2",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "temperature_coefficients.csv"
+            with path.open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(
+                    (
+                        {
+                            "detector": "WFI01",
+                            "tile_size": 256,
+                            "tile_id": 0,
+                            "reference_temperature_k": 89.5,
+                            "a_log_correction": 0.0,
+                            "b_log_correction_per_k": 0.01,
+                            "c_log_correction_per_k2": 0.001,
+                        },
+                        {
+                            "detector": "WFI01",
+                            "tile_size": 512,
+                            "tile_id": 0,
+                            "reference_temperature_k": 89.5,
+                            "a_log_correction": 0.02,
+                            "b_log_correction_per_k": 0.03,
+                            "c_log_correction_per_k2": 0.002,
+                        },
+                    )
+                )
+
+            coefficients = pipeline.load_temperature_quadratic_coefficients(path)
+
+        self.assertEqual(set(coefficients["WFI01"]), {256, 512})
+        self.assertEqual(coefficients["WFI01"][256][0]["a_log_correction"], 0.0)
+        self.assertEqual(coefficients["WFI01"][512][0]["a_log_correction"], 0.02)
+
+    def test_decon_step_is_fitted_without_a_post_baseline(self):
+        days = np.arange(-2.0, 3.0)
+        entries = [
+            {
+                "led": led,
+                "days": days.copy(),
+                "values": np.exp(
+                    2.0 + 0.01 * led + 0.1 * days + 0.3 * (days >= 0)
+                ),
+                "temperature_k": 100.0 + 0.4 * days + 0.2 * np.sin(days),
+                "decon_step": np.asarray(days >= 0, dtype=float),
+            }
+            for led in range(1, 7)
+        ]
+
+        fit = pipeline._fit_free_count_step(
+            entries,
+            {led: np.zeros(days.size) for led in range(1, 7)},
+            decon_day=0.0,
+        )
+
+        self.assertAlmostEqual(fit["step_log_change"], 0.3, places=10)
+        self.assertAlmostEqual(fit["step_log_correction"], -0.3, places=10)
+        self.assertEqual(fit["pre_points"], 12)
+        self.assertEqual(fit["post_points"], 18)
+
+    def test_frozen_temperature_quadratic_applies_to_all_rows_and_future_decon(self):
+        coefficients = {
+            "reference_temperature_k": 90.0,
+            "a_log_correction": 0.01,
+            "b_log_correction_per_k": 0.02,
+            "c_log_correction_per_k2": 0.003,
+            "fit_r2": 0.99,
+            "fit_points": 12,
+            "rmse_percent": 0.1,
+            "max_abs_percent": 0.2,
+        }
+        rows = []
+        led_data = {}
+        programs = np.asarray(("1039", "1063", "1039", "1039"), dtype=object)
+        for led in range(1, 7):
+            led_rows = []
+            days = np.asarray((0.0, 1.0, 2.0, 3.0), dtype=float) + 0.001 * led
+            temperatures = np.asarray((90.0, 91.0, 92.0, 93.0), dtype=float)
+            values = np.full(4, 100.0)
+            for repeat, (day, program) in enumerate(zip(days, programs)):
+                row = {
+                    "tile_id": 0,
+                    "group": repeat * 6 + led - 1,
+                    "days": float(day),
+                    "repeat": repeat,
+                    "led": led,
+                    "program": str(program),
+                }
+                rows.append(row)
+                led_rows.append(row)
+            led_data[led] = {
+                "rows": led_rows,
+                "days": days,
+                "values": values,
+                "program": programs.copy(),
+                "first_step": None,
+                "additional_step": None,
+                "pre_reset_step": None,
+                "day22_step": None,
+                "day26_step": None,
+                "late_step": None,
+                "repeat": np.arange(4),
+                "temperature_k": temperatures,
+                "decon_step": None,
+            }
+        tile = {"rows": rows, "led": led_data}
+
+        def fake_shared_fit(*args, **kwargs):
+            return {
+                "step_coefficients": {},
+                "led_step_coefficients": {},
+                "r2": 1.0,
+            }
+
+        with patch.object(
+            pipeline, "_fit_shared_log_curve", side_effect=fake_shared_fit
+        ):
+            corrections, summary = pipeline.fit_count_corrections(
+                tile,
+                reference_led=3,
+                minimum_day=0.1,
+                additional_acm_step_repeat=None,
+                operational_temperature_day=0.5,
+                pre_reset_acm_step_repeat=None,
+                late_acm_step_repeat=None,
+                disable_late_acm_step=True,
+                post_temperature_fit_start_repeat=1,
+                post_acm_fit_start_repeat=2,
+                post_temperature_fit_end_repeat=4,
+                post_acm_fit_end_repeat=4,
+                temperature_quadratic_coefficients={0: coefficients},
+                decon_day=2.5,
+            )
+
+        by_led_repeat = {
+            (int(row["tile_id"]), int(row["group"]) % 6 + 1, int(row["group"]) // 6): row
+            for row in corrections
+        }
+
+        def expected(temperature):
+            delta = temperature - coefficients["reference_temperature_k"]
+            return (
+                coefficients["b_log_correction_per_k"] * delta
+                + coefficients["c_log_correction_per_k2"] * delta**2
+            )
+
+        for led in range(1, 7):
+            for repeat, temperature, field in (
+                (0, 90.0, "log_gain_correction"),
+                (1, 91.0, "temperature_gain_log_correction"),
+                (2, 92.0, "log_gain_correction"),
+                (3, 93.0, "log_gain_correction"),
+            ):
+                row = by_led_repeat[(0, led, repeat)]
+                self.assertAlmostEqual(float(row[field]), expected(temperature))
+                self.assertAlmostEqual(
+                    float(row["count_log_correction"]), expected(temperature)
+                )
+        self.assertEqual(summary["temperature_model"], "mpa_wtsm00_quadratic_per_tile")
+        self.assertEqual(summary["temperature_quadratic_a_log_correction"], 0.0)
+        self.assertAlmostEqual(
+            summary["temperature_quadratic_c_log_correction_per_k2"], 0.003
+        )
+        self.assertAlmostEqual(
+            summary["temperature_quadratic_normalization_offset_log_correction"],
+            0.01,
+        )
 
     def test_main_dispatches_all_detectors_to_worker_pool(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -105,6 +288,7 @@ class ReductionPipelineTests(unittest.TestCase):
                     detector=None,
                     workers=2,
                     run_root=root / "runs",
+                    tile_size=512,
                 ),
             ), patch.object(pipeline, "utc_run_date", return_value="20261007"), patch.object(
                 pipeline, "DEFAULT_RUN_ROOT", root / "runs"
@@ -132,6 +316,7 @@ class ReductionPipelineTests(unittest.TestCase):
                 set(manifest["detectors"]), set(pipeline.DEFAULT_DETECTORS)
             )
             self.assertEqual(manifest["photodiode_channel"], "pd2")
+            self.assertEqual(manifest["tile_sizes"], [512])
 
     def test_statistics_writer_preserves_raw_and_scaled_counts(self):
         observations = []
@@ -1115,6 +1300,7 @@ class ReductionPipelineTests(unittest.TestCase):
                     None,
                     None,
                     manifest,
+                    tile_size=256,
                 )
 
         self.assertIn("WFI01", manifest["detectors"])
@@ -1122,7 +1308,13 @@ class ReductionPipelineTests(unittest.TestCase):
         self.assertEqual(len(write_corrected.call_args.args), 3)
         self.assertEqual(
             reduce.call_args.kwargs["raw_output_path"],
-            run_dir / "raw_statistics" / "wfi01_tile_log_statistics_512.csv",
+            run_dir / "raw_statistics" / "wfi01_tile_log_statistics_256.csv",
+        )
+        self.assertEqual(
+            write_corrected.call_args.args[2],
+            run_dir
+            / "corrected_statistics"
+            / "wfi01_tile_log_statistics_256_count_corrected.csv",
         )
         self.assertEqual(plot_diagnostic.call_count, 1)
         self.assertEqual(reset_plot.call_count, 1)

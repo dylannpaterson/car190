@@ -45,6 +45,20 @@ class FittedIncidenceAngleMosaicTests(unittest.TestCase):
             self.assertAlmostEqual(values[0, 0], 1.25)
             self.assertTrue(np.isnan(values[0, 1]))
 
+    def test_loads_256_tile_grid(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fit_root = root / "production" / "tile_size_256" / "wfi01" / "fits"
+            for tile_id in range(256):
+                self.write_archive(
+                    fit_root / f"tile_{tile_id:03d}",
+                    tile_id,
+                    3.5 if tile_id == 255 else 1.0,
+                )
+            values = plotter.load_incidence_angle_map(root, "WFI01", tile_size=256)
+            self.assertEqual(values.shape, (16, 16))
+            self.assertAlmostEqual(values[15, 15], 3.5)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -36,12 +36,13 @@ MAX_MAP_WORKERS = 2
 DEFAULT_MAP_WORKERS = 2
 DEFAULT_TILE_TIMEOUT_SECONDS = 1800.0
 PRODUCTION_MODEL_VERSION = (
-    "constant_ice_n_normal_incidence_arhgcdte_no_penalty_no_maxent_nprior001_rate12_v5"
+    "fixed_ice_n125_normal_incidence_arhgcdte_no_penalty_no_maxent_rate12_v6"
 )
 PRODUCTION_FIT_ICE_N_CONSTANT = True
+PRODUCTION_FIXED_ICE_N_LOG_CONSTANT = 0.0
 PRODUCTION_ICE_N_CONSTANT_PRIOR_SIGMA_LOG = 0.01
 PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY = 12.0
-PRODUCTION_ABSOLUTE_HGCDTE_N_SCALE_PRIOR_SIGMA_LOG = 0.01
+PRODUCTION_ABSOLUTE_HGCDTE_N_SCALE_PRIOR_SIGMA_LOG = 0.25
 PRODUCTION_THICKNESS_PENALTY_ENABLED = False
 PRODUCTION_THICKNESS_PENALTY_LAMBDA_SHARED = 4.0e8
 PRODUCTION_THICKNESS_PENALTY_LAMBDA_DISAGREEMENT = 1.0e8
@@ -290,6 +291,8 @@ def fit_tile(
         output_dir=tile_fit_dir,
         map_init_from=emcee_output,
         smoothness_weight=0.0,
+        rate_prior_log_mean=np.log(PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY),
+        trajectory_rate_prior_sigma_log=production.TRAJECTORY_RATE_PRIOR_SIGMA_LOG,
         absolute_hgcdte_n_scale_prior_sigma_log=(
             absolute_hgcdte_n_scale_prior_sigma_log
         ),
@@ -299,6 +302,7 @@ def fit_tile(
         fit_ice_n_constant=PRODUCTION_FIT_ICE_N_CONSTANT,
         ice_n_constant_prior_sigma_log=ice_n_constant_prior_sigma_log,
         ice_n_constant_reference=ice_n_constant_reference,
+        fixed_ice_n_log_constant=PRODUCTION_FIXED_ICE_N_LOG_CONSTANT,
         fit_ar_hgcdte_modulation=PRODUCTION_FIT_AR_HGCDTE_MODULATION,
         ar_hgcdte_modulation_prior_sigma_log=(
             PRODUCTION_AR_HGCDTE_MODULATION_PRIOR_SIGMA_LOG
@@ -365,6 +369,7 @@ def fit_tile(
             fit_ice_n_constant=PRODUCTION_FIT_ICE_N_CONSTANT,
             ice_n_constant_prior_sigma_log=ice_n_constant_prior_sigma_log,
             ice_n_constant_reference=ice_n_constant_reference,
+            fixed_ice_n_log_constant=PRODUCTION_FIXED_ICE_N_LOG_CONSTANT,
             fit_ar_hgcdte_modulation=PRODUCTION_FIT_AR_HGCDTE_MODULATION,
             ar_hgcdte_modulation_prior_sigma_log=(
                 PRODUCTION_AR_HGCDTE_MODULATION_PRIOR_SIGMA_LOG
@@ -398,6 +403,11 @@ def fit_tile(
                     float(ice_n_constant_prior_sigma_log)
                 ),
                 "ice_n_constant_reference": float(ice_n_constant_reference),
+                "ice_n_fixed_log_constant": PRODUCTION_FIXED_ICE_N_LOG_CONSTANT,
+                "ice_n_fixed_value": float(
+                    production.ICE_INDEX_DEFAULT
+                    * np.exp(PRODUCTION_FIXED_ICE_N_LOG_CONSTANT)
+                ),
                 "fit_ar_hgcdte_modulation": int(
                     PRODUCTION_FIT_AR_HGCDTE_MODULATION
                 ),
@@ -596,10 +606,13 @@ def _run_tile_jobs(
 
 
 def _configure_parallel_environment(workers):
+    # Avoid reserving most of the device before a one-tile or multi-worker fit
+    # has established its actual working set.
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     if workers <= 1:
         return
-    # Let independent ROCm workers share the device instead of preallocating it.
-    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    # Let independent ROCm workers share the device instead of oversubscribing
+    # host-side numerical thread pools.
     for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
         os.environ.setdefault(name, "1")
 
@@ -800,6 +813,31 @@ def parse_args(argv=None):
         help=f"Parallel tile MAP workers; default: {DEFAULT_MAP_WORKERS}.",
     )
     parser.add_argument(
+        "--batch-size",
+        type=positive_integer,
+        default=8,
+        help=(
+            "Cached-response tiles per joint JAX fit batch when --joint-batch is "
+            "set; default: 8."
+        ),
+    )
+    parser.add_argument(
+        "--joint-batch",
+        action="store_true",
+        help=(
+            "Fit cached-response tiles jointly in batches; by default each worker "
+            "reuses one compiled evaluator across independent tiles."
+        ),
+    )
+    parser.add_argument(
+        "--allow-external-cache-source",
+        action="store_true",
+        help=(
+            "Reuse the source fit/statistics embedded in a pinned response cache "
+            "from another production run."
+        ),
+    )
+    parser.add_argument(
         "--tile-timeout-seconds",
         type=float,
         default=DEFAULT_TILE_TIMEOUT_SECONDS,
@@ -846,15 +884,22 @@ def run_cached_response(selected_args, detectors):
 
     import run_wfi_relative_response_production as relative_runner
 
-    relative_runner.run_detector(
-        detectors[0],
-        selected_args.statistics_dir,
-        selected_args.response_cache_root,
+    run_kwargs = dict(
         selected_tile_ids=selected_args.tile_id,
         tile_size=selected_args.tile_size,
         output_root=selected_args.output_root,
         force=selected_args.force,
         workers=selected_args.workers,
+        batch_size=selected_args.batch_size,
+        joint_batch=selected_args.joint_batch,
+    )
+    if selected_args.allow_external_cache_source:
+        run_kwargs["allow_external_cache_source"] = True
+    relative_runner.run_detector(
+        detectors[0],
+        selected_args.statistics_dir,
+        selected_args.response_cache_root,
+        **run_kwargs,
     )
 
 
@@ -903,6 +948,7 @@ def run_detector(
         )
         if not np.isfinite(fixed_absolute_hgcdte_n_log_scale):
             raise ValueError("fixed_absolute_hgcdte_n_log_scale must be finite")
+    _configure_parallel_environment(min(workers, MAX_MAP_WORKERS))
     statistics, output_root, statistics_root, fit_root, emcee_output = detector_paths(
         detector,
         statistics_dir,
@@ -940,7 +986,27 @@ def run_detector(
             stale_path.unlink()
     if reuse_emcee_from is None:
         print(f"Starting fresh one-tile EMCEE for {detector}", flush=True)
-        emcee_warmup.run_emcee(paths[sorted(paths)[0]], emcee_output)
+        emcee_warmup.run_emcee(
+            paths[sorted(paths)[0]],
+            emcee_output,
+            trajectory="constant-rate",
+            fit_incidence_angle=PRODUCTION_FIT_INCIDENCE_ANGLE,
+            trajectory_rate_prior_mean_nm_day=(
+                PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY
+            ),
+            trajectory_rate_prior_sigma_log=(
+                production.TRAJECTORY_RATE_PRIOR_SIGMA_LOG
+            ),
+            absolute_hgcdte_n_scale_prior_sigma_log=(
+                PRODUCTION_ABSOLUTE_HGCDTE_N_SCALE_PRIOR_SIGMA_LOG
+            ),
+            fixed_absolute_hgcdte_n_log_scale=fixed_absolute_hgcdte_n_log_scale,
+            fit_ice_n_constant=PRODUCTION_FIT_ICE_N_CONSTANT,
+            ice_n_constant_prior_sigma_log=ice_n_constant_prior_sigma_log,
+            ice_n_constant_reference=ice_n_constant_reference,
+            fixed_ice_n_log_constant=PRODUCTION_FIXED_ICE_N_LOG_CONSTANT,
+            fit_ar_k_constant=False,
+        )
     else:
         emcee_output = Path(reuse_emcee_from)
         warm_start = emcee_output / "posterior_samples.npz"

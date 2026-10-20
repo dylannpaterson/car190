@@ -14,9 +14,12 @@ import numpy as np
 
 import run_wfi_production as production_runner
 from fit_wfi_tmm_production import load_tile_statistics
-
-
-TILE_GRID_SIZE = 8
+from wfi_production_layout import (
+    DEFAULT_TILE_SIZE,
+    partial_tile_grid_size,
+    positive_integer,
+    tile_statistics_path,
+)
 
 
 def parse_args():
@@ -24,6 +27,7 @@ def parse_args():
     parser.add_argument("--detector-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--detector", required=True)
+    parser.add_argument("--tile-size", type=positive_integer, default=DEFAULT_TILE_SIZE)
     return parser.parse_args()
 
 
@@ -55,13 +59,13 @@ def residual_summary(rows, reset_day):
     }
 
 
-def load_residual_rows(detector_root, detector):
+def load_residual_rows(detector_root, detector, tile_size=DEFAULT_TILE_SIZE):
     detector_prefix = detector.lower()
     rows = []
     for fit_dir in sorted((detector_root / "fits").glob("tile_*")):
-        tile_id = fit_dir.name[-3:]
-        statistics_path = detector_root / "tile_statistics" / (
-            f"{detector_prefix}_tile_log_statistics_512_tile_{tile_id}.csv"
+        tile_id = int(fit_dir.name.split("_")[1])
+        statistics_path = tile_statistics_path(
+            detector_root / "tile_statistics", detector, tile_size, tile_id
         )
         if not production_runner.archive_matches_statistics(fit_dir, statistics_path):
             continue
@@ -84,8 +88,8 @@ def load_residual_rows(detector_root, detector):
     return sorted(rows, key=lambda row: row["tile_id"])
 
 
-def map_values(rows, field):
-    values = np.full((TILE_GRID_SIZE, TILE_GRID_SIZE), np.nan)
+def map_values(rows, field, grid_size):
+    values = np.full((grid_size, grid_size), np.nan)
     for row in rows:
         values[row["tile_row"], row["tile_col"]] = row[field]
     return values
@@ -116,13 +120,13 @@ def draw_map(axis, values, title, signed):
     axis.set_title(title)
     axis.set_xlabel("Tile column")
     axis.set_ylabel("Tile row")
-    axis.set_xticks(range(TILE_GRID_SIZE))
-    axis.set_yticks(range(TILE_GRID_SIZE))
+    axis.set_xticks(range(values.shape[1]))
+    axis.set_yticks(range(values.shape[0]))
     axis.grid(color="white", alpha=0.35, linewidth=0.5)
     return image
 
 
-def write_outputs(output_dir, detector, rows):
+def write_outputs(output_dir, detector, rows, grid_size):
     output_dir.mkdir(parents=True, exist_ok=True)
     fields = list(rows[0])
     with (output_dir / f"{detector.lower()}_model_residual_summary.csv").open(
@@ -136,15 +140,15 @@ def write_outputs(output_dir, detector, rows):
     maps = (
         ("mean_residual_log", "Mean observed - model residual", True),
         ("rms_residual_log", "RMS observed - model residual", False),
-        ("pre_mean_residual_log", "Pre-reset mean observed - model residual", True),
-        ("post_mean_residual_log", "Post-reset mean observed - model residual", True),
+        ("pre_mean_residual_log", "Pre-Decon2 mean observed - model residual", True),
+        ("post_mean_residual_log", "Post-Decon2 mean observed - model residual", True),
     )
     for axis, (field, title, signed) in zip(axes.flat, maps):
-        image = draw_map(axis, map_values(rows, field), title, signed)
+        image = draw_map(axis, map_values(rows, field, grid_size), title, signed)
         figure.colorbar(image, ax=axis, fraction=0.046, pad=0.04, label="10^-3 log")
     figure.suptitle(
         f"{detector} production model residuals; reference groups excluded\n"
-        f"{len(rows)} of {TILE_GRID_SIZE * TILE_GRID_SIZE} tiles"
+        f"{len(rows)} of {grid_size * grid_size} tiles"
     )
     figure.savefig(output_dir / f"{detector.lower()}_model_residual_maps.png", dpi=180)
     plt.close(figure)
@@ -176,8 +180,11 @@ def write_outputs(output_dir, detector, rows):
 
 def main():
     args = parse_args()
-    rows = load_residual_rows(args.detector_root, args.detector)
-    write_outputs(args.output_dir, args.detector, rows)
+    rows = load_residual_rows(args.detector_root, args.detector, args.tile_size)
+    grid_size = partial_tile_grid_size(
+        [row["tile_id"] for row in rows]
+    )
+    write_outputs(args.output_dir, args.detector, rows, grid_size)
     print(f"Matching tiles: {len(rows)}")
     print(f"Wrote {args.output_dir}")
 

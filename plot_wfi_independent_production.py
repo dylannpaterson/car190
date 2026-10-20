@@ -26,30 +26,36 @@ from wfi_production_plot_annotations import (
     non_annotation_legend_handles,
     split_time_series_at_reset,
 )
+from wfi_production_layout import (
+    DEFAULT_TILE_SIZE,
+    complete_tile_ids,
+    corrected_statistics_path,
+    detector_output_root,
+    positive_integer,
+    tile_directory_entries,
+)
 
 
 ROOT = Path(__file__).resolve().parent
-PRODUCTION_DIR_NAME = "production"
 DETECTORS = tuple(f"WFI{index:02d}" for index in range(1, 19))
-TILE_COUNT = 64
 DEFAULT_RESET_DAY = 12.907397928240743
 
 
-def detector_root(detector, root=ROOT):
-    return root / PRODUCTION_DIR_NAME / detector.lower()
+def detector_root(detector, root=ROOT, tile_size=DEFAULT_TILE_SIZE):
+    return detector_output_root(root, detector, tile_size)
 
 
 def tile_fit_dirs(output_root):
-    paths = sorted((output_root / "fits").glob("tile_*"))
-    if len(paths) != TILE_COUNT:
-        raise ValueError(
-            f"Expected {TILE_COUNT} independent tile fits in {output_root / 'fits'}, "
-            f"found {len(paths)}"
-        )
-    expected = [f"tile_{tile_id:03d}" for tile_id in range(TILE_COUNT)]
-    if [path.name for path in paths] != expected:
-        raise ValueError(f"Independent tile fit IDs are incomplete in {output_root / 'fits'}")
-    return paths
+    entries = [
+        (tile_id, path)
+        for tile_id, path in tile_directory_entries(output_root / "fits")
+        if (path / "posterior_samples.npz").is_file()
+    ]
+    complete_tile_ids(
+        (tile_id for tile_id, _path in entries),
+        label=f"independent tile fit IDs in {output_root / 'fits'}",
+    )
+    return [path for _tile_id, path in entries]
 
 
 def read_csv_rows(path):
@@ -218,8 +224,9 @@ def save_independent_trajectory_plot(path, data, reset_day, time_annotations=Non
         reset_day=reset_day,
     )
     figure, axes = plt.subplots(2, 1, figsize=(11, 9), sharex=True)
-    colors = plt.get_cmap("viridis", TILE_COUNT)
-    for tile_id, color_index in enumerate(range(TILE_COUNT)):
+    tile_count = data["thickness"].shape[0]
+    colors = plt.get_cmap("viridis", tile_count)
+    for tile_id, color_index in enumerate(range(tile_count)):
         color = colors(color_index)
         axes[0].plot(
             plot_days,
@@ -258,7 +265,7 @@ def save_independent_trajectory_plot(path, data, reset_day, time_annotations=Non
             linestyle=":",
             linewidth=0.9,
             alpha=0.8,
-            label="Ice reset",
+            label="Decon2",
         )
         axis.set_xlabel("Days since first exposure" if index == len(axes) - 1 else "")
         axis.grid(alpha=0.2)
@@ -266,9 +273,9 @@ def save_independent_trajectory_plot(path, data, reset_day, time_annotations=Non
         if handles:
             axis.legend(handles, labels, frameon=False, fontsize=8)
     axes[0].set_ylabel("Ice thickness (nm)")
-    axes[0].set_title("Per-tile ice trajectories (64 tiles)")
+    axes[0].set_title(f"Per-tile ice trajectories ({tile_count} tiles)")
     axes[1].set_ylabel("Instantaneous accumulation rate (nm/day)")
-    axes[1].set_title("Per-tile instantaneous rates (64 tiles)")
+    axes[1].set_title(f"Per-tile instantaneous rates ({tile_count} tiles)")
     figure.suptitle(f"{data['detector']} independent per-tile TMM fits", y=0.98)
     if time_annotations is not None:
         figure.legend(
@@ -319,7 +326,7 @@ def save_rate_histogram(path, data, reset_day):
         density=True,
         color="#0072B2",
         alpha=0.60,
-        label=f"Pre-reset (N={pre_rates.size:,})",
+        label=f"Pre-Decon2 (N={pre_rates.size:,})",
     )
     axis.hist(
         post_rates,
@@ -327,7 +334,7 @@ def save_rate_histogram(path, data, reset_day):
         density=True,
         color="#D55E00",
         alpha=0.55,
-        label=f"Post-reset (N={post_rates.size:,})",
+        label=f"Post-Decon2 (N={post_rates.size:,})",
     )
     axis.axvline(
         current_rate,
@@ -338,8 +345,8 @@ def save_rate_histogram(path, data, reset_day):
     axis.set_xlabel("Instantaneous ice accumulation rate (nm/day)")
     axis.set_ylabel("Probability density")
     axis.set_title(
-        f"{data['detector']} instantaneous ice accumulation rates by reset epoch\n"
-        f"Reset day {reset_day:.3f}; current epoch day {days[latest_index]:.3f}"
+        f"{data['detector']} instantaneous ice accumulation rates by Decon2 epoch\n"
+        f"Decon2 day {reset_day:.3f}; current epoch day {days[latest_index]:.3f}"
     )
     axis.grid(alpha=0.2)
     axis.legend(frameon=False)
@@ -373,13 +380,16 @@ def save_detector_plots(
     reset_day=DEFAULT_RESET_DAY,
     output_root=None,
     statistics_path=None,
+    tile_size=DEFAULT_TILE_SIZE,
 ):
-    output_root = detector_root(detector, root) if output_root is None else Path(output_root)
+    output_root = (
+        detector_root(detector, root, tile_size)
+        if output_root is None
+        else Path(output_root)
+    )
     fit_dirs = tile_fit_dirs(output_root)
     if statistics_path is None:
-        statistics_path = Path(root) / (
-            f"{detector.lower()}_tile_log_statistics_512_count_corrected.csv"
-        )
+        statistics_path = corrected_statistics_path(root, detector, tile_size)
     else:
         statistics_path = Path(statistics_path)
     time_annotations = load_time_annotations(statistics_path)
@@ -475,6 +485,12 @@ def parse_args():
         default=None,
         help="Statistics CSV used for event annotations with --fit-root.",
     )
+    parser.add_argument(
+        "--tile-size",
+        type=positive_integer,
+        default=DEFAULT_TILE_SIZE,
+        help=f"Tile edge length used by the production reduction; default: {DEFAULT_TILE_SIZE}.",
+    )
     return parser.parse_args()
 
 
@@ -494,6 +510,7 @@ def main():
             args.reset_day,
             output_root=args.fit_root,
             statistics_path=args.statistics_path,
+            tile_size=args.tile_size,
         )
         print(f"Wrote plots under {output_root}", flush=True)
 

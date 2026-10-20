@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import math
 from pathlib import Path
 
 import matplotlib
@@ -16,9 +17,15 @@ from plot_wfi_pre_post_ice_ratio import (
     DEFAULT_FIT_SUFFIX,
     ROOT,
     SCAS,
-    TILE_COUNT,
     _one_tile_thickness,
     detector_output_dir,
+)
+from wfi_production_layout import (
+    DEFAULT_TILE_SIZE,
+    complete_tile_ids,
+    positive_integer,
+    production_output_root,
+    tile_directory_entries,
 )
 
 
@@ -46,12 +53,13 @@ def endpoint_mean_rates(days, thickness, decon2_day):
 
 
 def load_detector_rates(output_dir, detector):
-    fit_dirs = sorted((Path(output_dir) / "fits").glob("tile_*"))
-    if len(fit_dirs) != TILE_COUNT:
-        raise ValueError(
-            f"Expected {TILE_COUNT} independent tile fits in {output_dir / 'fits'}, "
-            f"found {len(fit_dirs)}"
-        )
+    entries = tile_directory_entries(Path(output_dir) / "fits")
+    tile_ids = complete_tile_ids(
+        (tile_id for tile_id, _path in entries),
+        label=f"independent tile fit IDs in {output_dir / 'fits'}",
+    )
+    fit_dirs = [path for _tile_id, path in entries]
+    tile_grid_size = math.isqrt(len(tile_ids))
 
     rows = []
     decon2_days = []
@@ -74,8 +82,8 @@ def load_detector_rates(output_dir, detector):
             {
                 "detector": detector,
                 "tile_id": tile_id,
-                "tile_row": tile_id // 8,
-                "tile_col": tile_id % 8,
+                "tile_row": tile_id // tile_grid_size,
+                "tile_col": tile_id % tile_grid_size,
                 "pre_decon2_start_day": float(np.min(days[days < decon2_day])),
                 "pre_decon2_end_day": float(np.max(days[days < decon2_day])),
                 "post_decon2_start_day": float(np.min(days[days >= decon2_day])),
@@ -148,6 +156,12 @@ def parse_args():
     parser.add_argument("--fit-suffix", default=DEFAULT_FIT_SUFFIX)
     parser.add_argument("--detector", action="append", choices=SCAS)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--tile-size",
+        type=positive_integer,
+        default=DEFAULT_TILE_SIZE,
+        help=f"Tile edge length used by the production reduction; default: {DEFAULT_TILE_SIZE}.",
+    )
     return parser.parse_args()
 
 
@@ -156,13 +170,13 @@ def main():
     detectors = args.detector or SCAS
     rows_by_detector = {
         detector: load_detector_rates(
-            detector_output_dir(args.root, detector, args.fit_suffix), detector
+            detector_output_dir(args.root, detector, args.fit_suffix, args.tile_size),
+            detector,
         )
         for detector in detectors
     }
     output = args.output or (
-        args.root
-        / DEFAULT_FIT_SUFFIX
+        production_output_root(args.root, args.tile_size)
         / "wfi_pre_post_decon2_mean_rate_comparison_all_tiles.png"
     )
     output.parent.mkdir(parents=True, exist_ok=True)

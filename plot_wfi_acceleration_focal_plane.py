@@ -1,4 +1,4 @@
-"""Plot reset-aware accumulation acceleration in the Roman WFI mosaic."""
+"""Plot Decon2-aware accumulation acceleration in the Roman WFI mosaic."""
 
 import argparse
 import csv
@@ -19,16 +19,16 @@ from plot_wfi_full_focal_plane_rates import (
     SCAS,
     sca_position,
 )
+from wfi_production_layout import DEFAULT_TILE_SIZE, positive_integer, tile_grid_size_for_tile_size
 
 
-TILE_GRID_SIZE = 8
 METRICS = (
     (
-        "Post-reset strong log-rate spline",
+        "Post-Decon2 strong log-rate spline",
         "post_natural_strong_median_acceleration_nm_day2",
     ),
     (
-        "Post-reset native piecewise log-rate",
+        "Post-Decon2 native piecewise log-rate",
         "post_native_median_acceleration_nm_day2",
     ),
 )
@@ -38,6 +38,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--acceleration-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--tile-size", type=positive_integer, default=DEFAULT_TILE_SIZE)
     return parser.parse_args()
 
 
@@ -48,7 +49,7 @@ def summary_path(root, detector):
     )
 
 
-def load_acceleration_map(root, detector, field):
+def load_acceleration_map(root, detector, field, tile_size=DEFAULT_TILE_SIZE):
     path = summary_path(root, detector)
     if not path.is_file():
         return None
@@ -57,11 +58,12 @@ def load_acceleration_map(root, detector, field):
     if not rows or {row.get("detector") for row in rows} != {detector}:
         raise ValueError(f"Unexpected detector rows in {path}")
 
-    values = np.full((TILE_GRID_SIZE, TILE_GRID_SIZE), np.nan)
+    grid_size = tile_grid_size_for_tile_size(tile_size)
+    values = np.full((grid_size, grid_size), np.nan)
     for row in rows:
         tile_row = int(row["tile_row"])
         tile_col = int(row["tile_col"])
-        if not 0 <= tile_row < TILE_GRID_SIZE or not 0 <= tile_col < TILE_GRID_SIZE:
+        if not 0 <= tile_row < grid_size or not 0 <= tile_col < grid_size:
             raise ValueError(f"Tile coordinates out of range in {path}: {row}")
         if np.isfinite(values[tile_row, tile_col]):
             raise ValueError(f"Duplicate tile coordinate in {path}: {row}")
@@ -69,9 +71,9 @@ def load_acceleration_map(root, detector, field):
     return values
 
 
-def load_maps(root, field):
+def load_maps(root, field, tile_size=DEFAULT_TILE_SIZE):
     return {
-        detector: load_acceleration_map(root, detector, field)
+        detector: load_acceleration_map(root, detector, field, tile_size)
         for detector in SCAS
     }
 
@@ -85,7 +87,7 @@ def color_limit(maps):
     return max(float(np.max(np.abs(finite))), 1.0e-12)
 
 
-def draw_panel(axis, maps, title, norm):
+def draw_panel(axis, maps, title, norm, grid_size):
     image = None
     label_effect = [
         patheffects.withStroke(linewidth=2.0, foreground="black", alpha=0.7)
@@ -155,7 +157,7 @@ def draw_panel(axis, maps, title, norm):
             color="white",
             path_effects=label_effect,
         )
-        for tile in range(1, TILE_GRID_SIZE):
+        for tile in range(1, grid_size):
             axis.plot(
                 (x + tile, x + tile),
                 (y, y + SCA_SIZE),
@@ -188,7 +190,7 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
     metric_maps = {
-        title: load_maps(args.acceleration_root, field)
+        title: load_maps(args.acceleration_root, field, args.tile_size)
         for title, field in METRICS
     }
     available = {
@@ -211,8 +213,9 @@ def main():
 
     figure, axes = plt.subplots(1, 2, figsize=(19, 9), constrained_layout=True)
     image = None
+    grid_size = tile_grid_size_for_tile_size(args.tile_size)
     for axis, (title, _) in zip(axes, metric_maps.items()):
-        image = draw_panel(axis, metric_maps[title], title, norm)
+        image = draw_panel(axis, metric_maps[title], title, norm, grid_size)
     if image is None:
         raise ValueError("No finite acceleration map values were found")
     figure.colorbar(
