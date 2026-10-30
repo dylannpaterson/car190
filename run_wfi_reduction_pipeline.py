@@ -22,6 +22,7 @@ import csv
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import os
 import shlex
@@ -133,6 +134,11 @@ DEFAULT_DETECTORS = tuple(f"WFI{index:02d}" for index in range(1, 19))
 UNIFIED_PROGRAMS = ("1039", "1063")
 REFERENCE_PROGRAM = "1039"
 TEMPERATURE_CORRECTION_PROGRAM = "1063"
+# Production uses only the six normal flats in each RCS visit.  Program 1063
+# also contains diagnostic LED3 blocks with later observation suffixes.
+PRODUCTION_NORMAL_OBSERVATION_SUFFIXES = frozenset(
+    f"001{led + 1:03d}001" for led in range(1, 7)
+)
 
 CORRECTION_FIELDS = (
     "detector",
@@ -282,6 +288,24 @@ DEFAULT_SIDE_SWAP_PRE_POINTS = 5
 DEFAULT_SIDE_SWAP_POST_POINTS = 5
 DEFAULT_DECON_FIT_WINDOW_DAYS = 2.0
 BASE_STATISTICS_FIELDS = tuple(field for field in FIELDS if field != "program")
+CORRECTION_CACHE_VERSION = 2
+CORRECTION_ARTIFACT_KEYS = ("side_swap", "table", "summary")
+CORRECTION_INPUT_FIELDS = (
+    "file_set_name",
+    "baseline_file_set_name",
+    "detector",
+    "source",
+    "source_signature",
+    "cal_uri",
+    "baseline_file_set_name",
+    "program",
+    "led",
+    "epoch_key",
+    "repeat",
+    "exposure_start_time",
+    "exposure_end_time",
+    "days",
+)
 _LOG_HANDLE = None
 _LOG_LOCK = threading.Lock()
 _PLOT_LOCK = threading.Lock()
@@ -401,6 +425,12 @@ def parse_product_name(path):
     if match is None:
         return None
     visit_id = match.group("visit_id")
+    if (
+        len(visit_id) >= 9
+        and visit_id[-9:].isdigit()
+        and visit_id[-9:] not in PRODUCTION_NORMAL_OBSERVATION_SUFFIXES
+    ):
+        return None
     if len(visit_id) < 5 or visit_id[-3:] != "001":
         raise ValueError(f"Unexpected visit suffix in {path.name}: {visit_id}")
     led_code = visit_id[-4]
@@ -421,6 +451,31 @@ def parse_product_name(path):
         "epoch_key": epoch_key,
         "source": "rrn",
     }
+
+
+def is_production_record(record):
+    """Return whether a product belongs to the six-flat production sequence."""
+    visit_id = str(record.get("visit_id", "")).strip()
+    if len(visit_id) < 9 or not visit_id[-9:].isdigit():
+        # Synthetic records and older local fixtures do not carry Roman visit IDs.
+        return True
+    return visit_id[-9:] in PRODUCTION_NORMAL_OBSERVATION_SUFFIXES
+
+
+def is_excluded_production_file_set(file_set_name):
+    """Return whether a removed file set is a known diagnostic product."""
+    file_name = str(file_set_name).strip()
+    if file_name.endswith("_cal.asdf"):
+        file_name = file_name[: -len("_cal.asdf")]
+    match = FILE_NAME_PATTERN.match(f"{file_name}_cal.asdf")
+    if match is None:
+        return False
+    visit_id = match.group("visit_id")
+    return (
+        len(visit_id) >= 9
+        and visit_id[-9:].isdigit()
+        and visit_id[-9:] not in PRODUCTION_NORMAL_OBSERVATION_SUFFIXES
+    )
 
 
 def read_index_rows(path, require_program=False, programs=UNIFIED_PROGRAMS):
@@ -479,6 +534,8 @@ def mast_records_from_index(rows, detector=None, allow_empty=False):
     for row in rows:
         row_detector = row["detector"].strip()
         if detector is not None and row_detector != detector:
+            continue
+        if not is_production_record(row):
             continue
         file_set_name = row["fileSetName"].strip()
         file_name = Path(row.get("cal_uri", "")).name
@@ -680,6 +737,82 @@ def parse_iso_time(value):
     if result.tzinfo is not None:
         result = result.astimezone(timezone.utc).replace(tzinfo=None)
     return result
+
+
+def _fingerprint_rows(rows):
+    digest = hashlib.sha256()
+    for row in sorted(rows, key=lambda value: str(value["file_set_name"])):
+        normalized = {
+            key: "" if value is None else str(value)
+            for key, value in row.items()
+        }
+        digest.update(
+            json.dumps(
+                normalized,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        )
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def correction_input_fingerprint(records, observations):
+    """Fingerprint correction inputs while deliberately excluding PD values."""
+    records_by_file_set = {
+        record["file_set_name"]: record for record in records
+    }
+    rows = []
+    for observation in observations:
+        record = records_by_file_set.get(observation["file_set_name"], {})
+        rows.append(
+            {
+                field: observation.get(field, record.get(field, ""))
+                for field in CORRECTION_INPUT_FIELDS
+            }
+        )
+    return _fingerprint_rows(rows)
+
+
+def correction_input_fingerprint_from_inventory(path):
+    """Fingerprint a prior inventory using only non-photodiode fields."""
+    with Path(path).open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows = [
+            {field: row.get(field, "") for field in CORRECTION_INPUT_FIELDS}
+            for row in reader
+        ]
+    if not rows:
+        raise ValueError(f"Correction-reuse inventory is empty: {path}")
+    return _fingerprint_rows(rows)
+
+
+def temperature_series_fingerprint(temperature_series):
+    """Fingerprint WTSM00 values so changed telemetry invalidates reuse."""
+    if temperature_series is None:
+        return None
+    digest = hashlib.sha256()
+    for values in temperature_series:
+        array = np.asarray(values, dtype=np.float64)
+        digest.update(str(array.shape).encode())
+        digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def sha256_file(path):
+    path = Path(path)
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def correction_artifact_fingerprints(paths):
+    return {
+        key: sha256_file(paths[key])
+        for key in CORRECTION_ARTIFACT_KEYS
+    }
 
 
 def _utc_timestamp(value):
@@ -919,7 +1052,7 @@ def _read_mast_token(path):
 
 
 def load_ice_monitor_photodiode_summary(path, channel):
-    """Load and validate dark-subtracted per-exposure ``roman-telem`` output."""
+    """Load and validate grouped dark-subtracted ``roman-telem`` output."""
     if channel not in PHOTODIODE_MNEMONICS:
         raise ValueError(f"Unsupported photodiode channel {channel!r}")
     path = Path(path)
@@ -1003,6 +1136,145 @@ def load_ice_monitor_photodiode_summary(path, channel):
         "summary_path": str(path),
         "channel": channel,
         "mnemonic": mnemonic,
+        "values": values,
+        "identity_values": identity_values,
+    }
+
+
+def load_ice_monitor_photodiode_exposure_summary(summary_path, exposure_path, channel):
+    """Build correction rows from the ungrouped ice-monitor exposure output.
+
+    ``roman-telem`` also writes a grouped per-step table.  A step can contain
+    multiple observations with different illumination levels, so that table is
+    suitable for trending but not for attaching a scale to one detector image.
+    """
+    grouped = load_ice_monitor_photodiode_summary(summary_path, channel)
+    exposure_path = Path(exposure_path)
+    required = {
+        "pass_id",
+        "step",
+        "observation",
+        "led",
+        "start",
+        "end",
+        "mnemonic",
+        "n",
+        "median",
+    }
+    mnemonic = PHOTODIODE_MNEMONICS[channel]
+    rows = []
+    with exposure_path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        missing = required.difference(reader.fieldnames or ())
+        if missing:
+            raise ValueError(
+                f"Ice-monitor exposure summary is missing fields: {sorted(missing)}"
+            )
+        for row in reader:
+            if row["mnemonic"] != mnemonic:
+                continue
+            start = parse_iso_time(row["start"])
+            end = parse_iso_time(row["end"])
+            n_samples = int(row["n"])
+            median = float(row["median"])
+            if n_samples <= 0 or not np.isfinite(median):
+                raise ValueError(f"Invalid ice-monitor exposure row: {row}")
+            rows.append(
+                {
+                    "pass_id": str(row["pass_id"]).strip(),
+                    "step": str(row["step"]).strip(),
+                    "observation": str(row["observation"]).strip(),
+                    "led": str(row["led"]).strip(),
+                    "start": start,
+                    "end": end,
+                    "n_samples": n_samples,
+                    "median": median,
+                }
+            )
+    if not rows:
+        raise ValueError(f"No {mnemonic} exposure rows found in {exposure_path}")
+
+    dark_samples = {}
+    dark_intervals = {}
+    pass_times = {}
+    for row in rows:
+        pass_times.setdefault(row["pass_id"], []).append((row["start"], row["end"]))
+        if row["step"] == "dark" or not row["led"]:
+            dark_samples.setdefault(row["pass_id"], []).append(
+                (row["median"], row["n_samples"])
+            )
+            dark_intervals.setdefault(row["pass_id"], []).append(
+                (row["start"], row["end"])
+            )
+    dark_values = {}
+    dark_times = {}
+    for pass_id, samples in dark_samples.items():
+        total = sum(n_samples for _, n_samples in samples)
+        dark_values[pass_id] = sum(value * n_samples for value, n_samples in samples) / total
+        starts = [start for start, _ in dark_intervals[pass_id]]
+        ends = [end for _, end in dark_intervals[pass_id]]
+        dark_times[pass_id] = (min(starts) + (max(ends) - min(starts)) / 2.0)
+
+    pass_medians = {}
+    for pass_id, intervals in pass_times.items():
+        starts = [start for start, _ in intervals]
+        ends = [end for _, end in intervals]
+        pass_medians[pass_id] = min(starts) + (max(ends) - min(starts)) / 2.0
+
+    values = {}
+    identity_values = {}
+    for row in rows:
+        if row["step"] == "dark" or not row["led"]:
+            continue
+        try:
+            led = int(float(row["led"]))
+        except ValueError as error:
+            raise ValueError(f"Invalid LED in ice-monitor exposure row: {row}") from error
+        dark_pass = row["pass_id"]
+        if dark_pass not in dark_values:
+            if not dark_values:
+                raise ValueError(f"No dark exposure for ice-monitor row: {row}")
+            dark_pass = min(
+                dark_values,
+                key=lambda candidate: abs(
+                    (pass_medians[row["pass_id"]] - dark_times[candidate]).total_seconds()
+                ),
+            )
+        metadata_key = (row["pass_id"], row["observation"], led)
+        metadata_candidates = grouped["identity_values"].get(metadata_key, [])
+        if len(metadata_candidates) != 1:
+            raise ValueError(
+                f"No unambiguous grouped metadata for ice-monitor row: {row}"
+            )
+        metadata = metadata_candidates[0][2]
+        signal = row["median"] - dark_values[dark_pass]
+        if not np.isfinite(signal) or signal <= 0.0:
+            raise ValueError(f"Dark-subtracted photodiode signal must be positive: {row}")
+        key = (row["start"], row["end"], led)
+        if key in values:
+            raise ValueError(f"Duplicate ice-monitor exposure: {key}")
+        value = {
+            "signal": signal,
+            "dark_median": dark_values[dark_pass],
+            "n_samples": row["n_samples"],
+            "pass_id": row["pass_id"],
+            "dark_pass": dark_pass,
+            "warmup": metadata["warmup"],
+            "reference_pass": row["pass_id"],
+            "reference_signal": signal,
+            "change_pct": 0.0,
+        }
+        values[key] = value
+        identity_values.setdefault(metadata_key, []).append(
+            (row["start"], row["end"], value)
+        )
+
+    return {
+        "source": grouped["source"],
+        "summary_path": grouped["summary_path"],
+        "exposure_summary_path": str(exposure_path),
+        "channel": grouped["channel"],
+        "mnemonic": grouped["mnemonic"],
         "values": values,
         "identity_values": identity_values,
     }
@@ -1098,7 +1370,16 @@ def run_ice_monitor_telemetry(index_rows, token_path, channel, program, output_p
         f"{query_start.isoformat()} to {query_end.isoformat()}: {shlex.join(command)}"
     )
     subprocess.run(command, check=True, env=environment)
-    telemetry = load_ice_monitor_photodiode_summary(output_path, channel)
+    exposure_path = output_path.with_name(
+        f"{output_path.stem}_exposures{output_path.suffix}"
+    )
+    if not exposure_path.is_file():
+        raise ValueError(
+            f"roman-telem did not write its per-exposure ice-monitor output: {exposure_path}"
+        )
+    telemetry = load_ice_monitor_photodiode_exposure_summary(
+        output_path, exposure_path, channel
+    )
     status(f"Validated {len(telemetry['values'])} dark-subtracted photodiode exposure rows")
     return telemetry
 
@@ -1111,10 +1392,13 @@ def merge_telemetry_summaries(telemetries):
     channels = set()
     sources = set()
     paths = []
+    exposure_paths = []
     for telemetry in telemetries:
         channels.add(telemetry["channel"])
         sources.add(telemetry["source"])
         paths.append(telemetry["summary_path"])
+        if telemetry.get("exposure_summary_path"):
+            exposure_paths.append(telemetry["exposure_summary_path"])
         for key, value in telemetry["values"].items():
             previous = merged_values.get(key)
             if previous is not None and previous != value:
@@ -1125,6 +1409,7 @@ def merge_telemetry_summaries(telemetries):
     merged = {
         "source": next(iter(sources)),
         "summary_path": ";".join(paths),
+        "exposure_summary_path": ";".join(exposure_paths),
         "channel": next(iter(channels)),
         "mnemonic": telemetries[0]["mnemonic"],
         "values": merged_values,
@@ -1397,6 +1682,7 @@ def write_inventory(path, records, observations):
         "detector",
         "source",
         "cal_uri",
+        "baseline_file_set_name",
         "program",
         "led",
         "epoch_key",
@@ -1430,6 +1716,9 @@ def write_inventory(path, records, observations):
                     "detector": record["detector"],
                     "source": record.get("source", "rrn"),
                     "cal_uri": record.get("cal_uri") or record["file_name"],
+                    "baseline_file_set_name": observation.get(
+                        "baseline_file_set_name", ""
+                    ),
                     "program": observation["program"],
                     "led": observation["led"],
                     "epoch_key": record["epoch_key"],
@@ -2123,8 +2412,15 @@ def update_detector_statistics_incremental(
     if len(current_by_file_set) != len(observations):
         raise ValueError("The source contains duplicate file-set names")
     removed = set(existing_by_file_set).difference(current_by_file_set)
-    if removed:
-        raise ValueError("Incremental update refuses to discard existing observations")
+    unexpected_removed = {
+        file_set_name
+        for file_set_name in removed
+        if not is_excluded_production_file_set(file_set_name)
+    }
+    if unexpected_removed:
+        raise ValueError(
+            "Incremental update refuses to discard existing production observations"
+        )
     current_baselines = {}
     for observation in observations:
         current_baselines.setdefault(int(observation["led"]), observation["baseline_file_set_name"])
@@ -2282,8 +2578,15 @@ def update_detector_statistics_incremental_dual(
     if len(current_by_file_set) != len(observations):
         raise ValueError("The source contains duplicate file-set names")
     removed = set(scaled_by_file_set).difference(current_by_file_set)
-    if removed:
-        raise ValueError("Incremental update refuses to discard existing observations")
+    unexpected_removed = {
+        file_set_name
+        for file_set_name in removed
+        if not is_excluded_production_file_set(file_set_name)
+    }
+    if unexpected_removed:
+        raise ValueError(
+            "Incremental update refuses to discard existing production observations"
+        )
     current_baselines = {}
     for observation in observations:
         current_baselines.setdefault(
@@ -4970,6 +5273,227 @@ def plot_led3_post_temperature_fit(
     return output_path
 
 
+def correction_reuse_settings(
+    tile_size,
+    effective_additional_repeat,
+    effective_pre_reset_repeat,
+    effective_late_repeat,
+    effective_post_temperature_start_repeat,
+    effective_post_acm_fit_start_repeat,
+    post_temperature_end_repeat,
+    effective_first_acm_repeat,
+    effective_day22_step_repeat,
+    effective_day26_step_repeat,
+    post_acm_fit_end_repeat,
+    side_swap_event_repeat,
+    side_swap_pre_points,
+    side_swap_post_points,
+    temperature_series,
+    temperature_quadratic_coefficients_path,
+    decon_time,
+    decon_day,
+    decon_fit_window_days,
+):
+    coefficient_path = (
+        None
+        if temperature_series is None or temperature_quadratic_coefficients_path is None
+        else str(Path(temperature_quadratic_coefficients_path).resolve())
+    )
+    return {
+        "tile_size": int(tile_size),
+        "reference_led": 3,
+        "minimum_day": 1.0,
+        "additional_acm_step_repeat": int(effective_additional_repeat),
+        "pre_reset_acm_step_repeat": int(effective_pre_reset_repeat),
+        "late_acm_step_repeat": int(effective_late_repeat),
+        "post_temperature_fit_start_repeat": int(
+            effective_post_temperature_start_repeat
+        ),
+        "post_acm_fit_start_repeat": int(effective_post_acm_fit_start_repeat),
+        "post_temperature_fit_end_repeat": int(post_temperature_end_repeat),
+        "pre_temperature_fit_start_repeat": int(effective_first_acm_repeat),
+        "pre_temperature_fit_end_repeat": int(effective_pre_reset_repeat),
+        "day22_acm_step_repeat": int(effective_day22_step_repeat),
+        "day26_acm_step_repeat": int(effective_day26_step_repeat),
+        "post_acm_fit_end_repeat": int(post_acm_fit_end_repeat),
+        "temperature_model": (
+            "mpa_wtsm00_quadratic_per_tile"
+            if temperature_series is not None
+            else "legacy_time_sinusoid"
+        ),
+        "temperature_mnemonic": (
+            MPA_TEMPERATURE_MNEMONIC if temperature_series is not None else None
+        ),
+        "temperature_series_fingerprint": temperature_series_fingerprint(
+            temperature_series
+        ),
+        "temperature_quadratic_coefficients": coefficient_path,
+        "temperature_quadratic_coefficients_sha256": (
+            None if coefficient_path is None else sha256_file(coefficient_path)
+        ),
+        "decon_time": (
+            None
+            if decon_time is None
+            else parse_iso_time(decon_time).isoformat() + "Z"
+        ),
+        "decon_day": None if decon_day is None else float(decon_day),
+        "decon_fit_window_days": float(decon_fit_window_days),
+        "side_swap_event_repeat": int(side_swap_event_repeat),
+        "side_swap_pre_points": int(side_swap_pre_points),
+        "side_swap_post_points": int(side_swap_post_points),
+    }
+
+
+def correction_reuse_run_root(source_root):
+    source_root = Path(source_root)
+    return source_root.parent if source_root.name == "corrections" else source_root
+
+
+def correction_reuse_paths(source_root, detector):
+    source_root = Path(source_root)
+    run_root = correction_reuse_run_root(source_root)
+    correction_dir = (
+        run_root / "corrections"
+        if (run_root / "corrections").is_dir()
+        else source_root
+    )
+    stem = detector.lower()
+    paths = {
+        "root": correction_dir,
+        "inventory": run_root / f"{stem}_rrn_inventory.csv",
+        "side_swap": correction_dir / f"{stem}_side_swap_calibration.csv",
+        "table": correction_dir
+        / f"{stem}_count_space_unified_temperature_corrections.csv",
+        "summary": correction_dir
+        / f"{stem}_count_space_unified_temperature_fit_summary.csv",
+        "metadata": correction_dir / f"{stem}_correction_cache.json",
+    }
+    missing = [
+        path
+        for key, path in paths.items()
+        if key != "root" and not path.is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(
+            "Correction reuse source is incomplete; missing: "
+            + ", ".join(str(path) for path in missing)
+        )
+    return paths
+
+
+def load_reusable_side_swap_rows(path, detector, effective_late_repeat):
+    with Path(path).open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    factors = set()
+    for row in rows:
+        if str(row.get("detector", "")).strip().upper() != detector:
+            raise ValueError("Correction reuse side-swap detector does not match")
+        if int(row["event_repeat"]) != int(effective_late_repeat):
+            raise ValueError("Correction reuse side-swap event repeat does not match")
+        key = (str(row["channel"]), int(row["led"]))
+        if key in factors:
+            raise ValueError(f"Duplicate reused side-swap factor: {key}")
+        factor = float(row["correction_factor"])
+        if not np.isfinite(factor) or factor <= 0.0:
+            raise ValueError(f"Invalid reused side-swap factor: {factor}")
+        factors.add(key)
+    expected_factors = {
+        (channel, led) for channel in ("image", "photodiode") for led in range(1, 7)
+    }
+    if factors != expected_factors:
+        raise ValueError("Reused side-swap calibration does not contain all factors")
+    return rows
+
+
+def validate_reusable_correction_bundle(
+    source_root,
+    detector,
+    tile_size,
+    records,
+    observations,
+    scaled_statistics,
+    effective_late_repeat,
+    expected_settings,
+):
+    """Validate a frozen correction bundle before applying refreshed PD scales."""
+    paths = correction_reuse_paths(source_root, detector)
+    with paths["metadata"].open() as handle:
+        metadata = json.load(handle)
+    if metadata.get("schema_version") != CORRECTION_CACHE_VERSION:
+        raise ValueError(
+            f"Unsupported correction cache version in {paths['metadata']}: "
+            f"{metadata.get('schema_version')!r}"
+        )
+    if metadata.get("detector") != detector or int(metadata.get("tile_size", -1)) != int(tile_size):
+        raise ValueError("Correction reuse detector or tile size does not match")
+    expected_fingerprint = correction_input_fingerprint(records, observations)
+    if metadata.get("input_fingerprint") != expected_fingerprint:
+        raise ValueError(
+            "Correction reuse refused: non-photodiode source/timeline inputs changed"
+        )
+    inventory_fingerprint = correction_input_fingerprint_from_inventory(
+        paths["inventory"]
+    )
+    if metadata.get("input_fingerprint") != inventory_fingerprint:
+        raise ValueError(
+            "Correction reuse refused: source inventory does not match cache metadata"
+        )
+    artifact_fingerprints = metadata.get("artifact_sha256")
+    if not isinstance(artifact_fingerprints, dict):
+        raise ValueError(
+            "Correction reuse refused: cache metadata lacks artifact fingerprints"
+        )
+    for key in CORRECTION_ARTIFACT_KEYS:
+        if artifact_fingerprints.get(key) != sha256_file(paths[key]):
+            raise ValueError(
+                f"Correction reuse refused: source {key} artifact changed"
+            )
+    if metadata.get("settings") != expected_settings:
+        raise ValueError(
+            "Correction reuse refused: correction settings or telemetry changed"
+        )
+
+    side_swap_rows = load_reusable_side_swap_rows(
+        paths["side_swap"], detector, effective_late_repeat
+    )
+
+    expected_statistics = {}
+    with Path(scaled_statistics).open(newline="") as handle:
+        for row in csv.DictReader(handle):
+            key = (int(row["tile_id"]), int(row["group"]))
+            if key in expected_statistics:
+                raise ValueError(f"Duplicate scaled-statistics row for {key}")
+            expected_statistics[key] = float(row["days"])
+    correction_keys = {}
+    with paths["table"].open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        required = {"detector", "tile_id", "group", "days", "correction_space"}
+        missing = required.difference(reader.fieldnames or ())
+        if missing:
+            raise ValueError(
+                f"Reused correction table is missing fields: {sorted(missing)}"
+            )
+        for row in reader:
+            if str(row["detector"]).strip().upper() != detector:
+                raise ValueError("Reused correction table detector does not match")
+            if row["correction_space"] != "counts":
+                raise ValueError("Reused correction table is not count-space")
+            key = (int(row["tile_id"]), int(row["group"]))
+            if key in correction_keys:
+                raise ValueError(f"Duplicate reused correction row for {key}")
+            correction_keys[key] = float(row["days"])
+    if correction_keys.keys() != expected_statistics.keys():
+        raise ValueError("Reused correction table does not match current statistics rows")
+    for key, days in expected_statistics.items():
+        if not np.isclose(correction_keys[key], days, rtol=0.0, atol=1.0e-9):
+            raise ValueError(f"Reused correction day does not match current statistics: {key}")
+    return paths, side_swap_rows
+
+
+def write_correction_cache_metadata(path, metadata):
+    write_json(path, metadata)
+
+
 def find_previous_raw_statistics(output_root, run_dir, detector, tile_size):
     """Find the latest dated raw statistics file independently of scaled data."""
     filename = f"{detector.lower()}_tile_log_statistics_{tile_size}.csv"
@@ -4982,24 +5506,33 @@ def find_previous_raw_statistics(output_root, run_dir, detector, tile_size):
 
 
 def find_previous_inventory(output_root, run_dir, detector, tile_size=512):
-    """Find the inventory paired with the latest reusable raw statistics."""
+    """Find an inventory suitable for validating reusable raw statistics."""
     raw = find_previous_raw_statistics(output_root, run_dir, detector, tile_size)
     if raw is None:
         return None
     inventory = raw.parent.parent / f"{detector.lower()}_rrn_inventory.csv"
-    return inventory if inventory.is_file() else None
+    if inventory.is_file():
+        return inventory
+    candidates = sorted(
+        path
+        for path in Path(output_root).glob(
+            f"*/{detector.lower()}_rrn_inventory.csv"
+        )
+        if path.is_file() and path.parent != Path(run_dir)
+    )
+    return candidates[-1] if candidates else None
 
 
-def source_changes_require_rebuild(inventory_path, records, observations):
-    """Detect image-source changes that invalidate raw statistics reuse."""
+def source_changes_rebuild_reason(inventory_path, records, observations):
+    """Return why image-source changes invalidate raw statistics reuse."""
     inventory_path = Path(inventory_path) if inventory_path is not None else None
     if inventory_path is None or not inventory_path.is_file():
-        return True
+        return "no reusable inventory"
     with inventory_path.open(newline="") as handle:
         reader = csv.DictReader(handle)
         required = {"file_set_name", "source_signature"}
         if not required.issubset(reader.fieldnames or ()):
-            return True
+            return "reusable inventory lacks source signatures"
         previous = {
             row["file_set_name"]: row["source_signature"] for row in reader
         }
@@ -5012,9 +5545,27 @@ def source_changes_require_rebuild(inventory_path, records, observations):
         ].get("source_signature", "")
         for observation in observations
     }
-    if set(previous).difference(current):
-        return True
-    return any(previous[name] != current[name] for name in set(previous) & set(current))
+    removed = set(previous).difference(current)
+    unexpected_removed = {
+        file_set_name
+        for file_set_name in removed
+        if not is_excluded_production_file_set(file_set_name)
+    }
+    if unexpected_removed:
+        return f"{len(unexpected_removed)} previous production file sets are absent"
+    changed = sorted(
+        name
+        for name in set(previous) & set(current)
+        if previous[name] != current[name]
+    )
+    if changed:
+        return f"{len(changed)} source signatures changed"
+    return None
+
+
+def source_changes_require_rebuild(inventory_path, records, observations):
+    """Detect image-source changes that invalidate raw statistics reuse."""
+    return source_changes_rebuild_reason(inventory_path, records, observations) is not None
 
 
 def remove_incremental_state(path):
@@ -5034,6 +5585,7 @@ def reduce_statistics(
     no_resume,
     fetch_image=None,
     raw_output_path=None,
+    previous_raw_statistics=None,
 ):
     """Build or incrementally update raw statistics only.
 
@@ -5059,8 +5611,12 @@ def reduce_statistics(
         )
         return "rebuilt"
 
-    previous_raw = find_previous_raw_statistics(
-        output_root, run_dir, records[0]["detector"], tile_size
+    previous_raw = (
+        Path(previous_raw_statistics)
+        if previous_raw_statistics is not None
+        else find_previous_raw_statistics(
+            output_root, run_dir, records[0]["detector"], tile_size
+        )
     )
     if not raw_output_path.exists() and previous_raw is not None:
         raw_output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5244,12 +5800,13 @@ def run_detector(
     temperature_quadratic_coefficients_path=None,
     decon_time=None,
     decon_fit_window_days=DEFAULT_DECON_FIT_WINDOW_DAYS,
+    reuse_corrections_from=None,
 ):
     status(f"Starting reduction for {detector}")
     s3_records = [
         dict(record)
         for record in source_records
-        if record["detector"] == detector
+        if record["detector"] == detector and is_production_record(record)
     ]
     mast_records = mast_records_from_index(index_rows, detector, allow_empty=True)
     records = merge_product_records(s3_records, mast_records)
@@ -5280,6 +5837,20 @@ def run_detector(
         detector,
         tile_size=selected_tile_size,
     )
+    if reuse_corrections_from is not None:
+        reuse_run_root = correction_reuse_run_root(reuse_corrections_from)
+        if previous_inventory is None:
+            candidate_inventory = reuse_run_root / (
+                f"{detector.lower()}_rrn_inventory.csv"
+            )
+            if candidate_inventory.is_file():
+                previous_inventory = candidate_inventory
+        if previous_raw_statistics is None:
+            candidate_raw = reuse_run_root / "raw_statistics" / (
+                f"{detector.lower()}_tile_log_statistics_{selected_tile_size}.csv"
+            )
+            if candidate_raw.is_file():
+                previous_raw_statistics = candidate_raw
     operational_temperature_day = day_for_timestamp(
         observations,
         DEFAULT_OPERATIONAL_TEMPERATURE_TIME,
@@ -5386,12 +5957,14 @@ def run_detector(
         f"day-26 shared-grey step at repeat {effective_day26_step_repeat}; "
         f"ACM fit ends at repeat {post_acm_fit_end_repeat}; late ACM coefficient disabled"
     )
-    source_changed = source_changes_require_rebuild(
+    source_rebuild_reason = source_changes_rebuild_reason(
         previous_inventory, records, observations
     )
+    source_changed = source_rebuild_reason is not None
     status(
         f"{detector}: raw reuse candidate="
         f"{previous_raw_statistics or 'none'}; source rebuild={source_changed}"
+        f" ({source_rebuild_reason or 'no source changes'})"
     )
     write_inventory(inventory_path, records, observations)
     detector_manifest = {
@@ -5477,6 +6050,7 @@ def run_detector(
             source_changed,
             fetch_image=fetch_image,
             raw_output_path=raw_output_path,
+            previous_raw_statistics=previous_raw_statistics,
         )
         detector_manifest["statistics"][str(tile_size)] = {
             "path": str(output_path),
@@ -5551,13 +6125,47 @@ def run_detector(
             f"available pre/post counts are {side_swap_pre_points_available}/"
             f"{side_swap_post_points_available} for {detector}"
         )
-    side_swap_rows = fit_side_swap_series(
-        raw_statistics,
-        inventory_path,
+    correction_settings = correction_reuse_settings(
+        selected_tile_size,
+        effective_additional_repeat,
+        effective_pre_reset_repeat,
         effective_late_repeat,
-        pre_points=side_swap_pre_points,
-        post_points=side_swap_post_points,
+        effective_post_temperature_start_repeat,
+        effective_post_acm_fit_start_repeat,
+        post_temperature_end_repeat,
+        effective_first_acm_repeat,
+        effective_day22_step_repeat,
+        effective_day26_step_repeat,
+        post_acm_fit_end_repeat,
+        effective_late_repeat,
+        side_swap_pre_points,
+        side_swap_post_points,
+        temperature_series,
+        temperature_quadratic_coefficients_path,
+        decon_time,
+        decon_day,
+        decon_fit_window_days,
     )
+    reuse_paths = None
+    if reuse_corrections_from is not None:
+        if Path(reuse_corrections_from).resolve() == Path(run_dir).resolve():
+            raise ValueError("Correction reuse source must be a different dated run")
+        reuse_paths = correction_reuse_paths(reuse_corrections_from, detector)
+        side_swap_rows = load_reusable_side_swap_rows(
+            reuse_paths["side_swap"], detector, effective_late_repeat
+        )
+        status(
+            f"{detector}: reusing frozen side-swap/count corrections from "
+            f"{reuse_paths['root']} after refreshing photodiode scales"
+        )
+    else:
+        side_swap_rows = fit_side_swap_series(
+            raw_statistics,
+            inventory_path,
+            effective_late_repeat,
+            pre_points=side_swap_pre_points,
+            post_points=side_swap_post_points,
+        )
     side_swap_calibration_path = correction_dir / (
         f"{detector.lower()}_side_swap_calibration.csv"
     )
@@ -5572,6 +6180,17 @@ def run_detector(
         side_swap_rows,
         effective_late_repeat,
     )
+    if reuse_paths is not None:
+        reuse_paths, side_swap_rows = validate_reusable_correction_bundle(
+            reuse_corrections_from,
+            detector,
+            selected_tile_size,
+            records,
+            observations,
+            scaled_statistics,
+            effective_late_repeat,
+            correction_settings,
+        )
     detector_manifest["side_swap"] = {
         "calibration": str(side_swap_calibration_path),
         "event_repeat": effective_late_repeat,
@@ -5579,8 +6198,14 @@ def run_detector(
         "post_points": side_swap_post_points,
         "fit_scope": "per_detector_per_led_separate_image_photodiode",
         "raw_statistics_unchanged": True,
+        "reused_from": (
+            str(reuse_paths["root"]) if reuse_paths is not None else None
+        ),
     }
-    status(f"Fitting count-space corrections for {detector}")
+    status(
+        f"{('Reusing' if reuse_paths is not None else 'Fitting')} count-space corrections "
+        f"for {detector}"
+    )
     correction_path = correction_dir / (
         f"{detector.lower()}_count_space_unified_temperature_corrections.csv"
     )
@@ -5601,44 +6226,49 @@ def run_detector(
     ) if any(
         int(row["repeat"]) >= effective_day26_step_repeat for row in observations
     ) else None
-    correction_rows, summary_rows = build_corrections(
-        scaled_statistics,
-        3,
-        1.0,
-        effective_additional_repeat,
-        operational_temperature_day,
-        effective_pre_reset_repeat,
-        effective_late_repeat,
-        post_temperature_fit_start_repeat=effective_post_temperature_start_repeat,
-        post_acm_fit_start_repeat=effective_post_acm_fit_start_repeat,
-        per_led_acm_step_names=("additional_step",),
-        post_temperature_fit_end_repeat=post_temperature_end_repeat,
-        pre_temperature_fit_start_repeat=effective_first_acm_repeat,
-        pre_temperature_fit_end_repeat=effective_pre_reset_repeat,
-        day22_acm_step_repeat=effective_day22_step_repeat,
-        day26_acm_step_repeat=effective_day26_step_repeat,
-        post_acm_fit_end_repeat=post_acm_fit_end_repeat,
-        disable_late_acm_step=True,
-        temperature_series=temperature_series,
-        temperature_mnemonic=MPA_TEMPERATURE_MNEMONIC,
-        temperature_quadratic_coefficients=(
-            temperature_quadratic_coefficients.get(detector, {})
-            .get(selected_tile_size, {})
-            if temperature_quadratic_coefficients is not None
-            else None
-        ),
-        decon_time=decon_time,
-        decon_day=decon_day,
-        decon_fit_window_days=decon_fit_window_days,
-    )
-    status(
-        f"{detector}: post-temperature fit points="
-        f"{sorted({int(row['post_operational_temperature_fit_points']) for row in summary_rows})} "
-        f"for repeats [{effective_post_temperature_start_repeat}, "
-        f"{post_temperature_end_repeat})"
-    )
-    write_csv(correction_path, CORRECTION_FIELDS, correction_rows)
-    write_csv(correction_summary_path, SUMMARY_FIELDS, summary_rows)
+    if reuse_paths is not None:
+        shutil.copy2(reuse_paths["table"], correction_path)
+        shutil.copy2(reuse_paths["summary"], correction_summary_path)
+        summary_rows = []
+    else:
+        correction_rows, summary_rows = build_corrections(
+            scaled_statistics,
+            3,
+            1.0,
+            effective_additional_repeat,
+            operational_temperature_day,
+            effective_pre_reset_repeat,
+            effective_late_repeat,
+            post_temperature_fit_start_repeat=effective_post_temperature_start_repeat,
+            post_acm_fit_start_repeat=effective_post_acm_fit_start_repeat,
+            per_led_acm_step_names=("additional_step",),
+            post_temperature_fit_end_repeat=post_temperature_end_repeat,
+            pre_temperature_fit_start_repeat=effective_first_acm_repeat,
+            pre_temperature_fit_end_repeat=effective_pre_reset_repeat,
+            day22_acm_step_repeat=effective_day22_step_repeat,
+            day26_acm_step_repeat=effective_day26_step_repeat,
+            post_acm_fit_end_repeat=post_acm_fit_end_repeat,
+            disable_late_acm_step=True,
+            temperature_series=temperature_series,
+            temperature_mnemonic=MPA_TEMPERATURE_MNEMONIC,
+            temperature_quadratic_coefficients=(
+                temperature_quadratic_coefficients.get(detector, {})
+                .get(selected_tile_size, {})
+                if temperature_quadratic_coefficients is not None
+                else None
+            ),
+            decon_time=decon_time,
+            decon_day=decon_day,
+            decon_fit_window_days=decon_fit_window_days,
+        )
+        status(
+            f"{detector}: post-temperature fit points="
+            f"{sorted({int(row['post_operational_temperature_fit_points']) for row in summary_rows})} "
+            f"for repeats [{effective_post_temperature_start_repeat}, "
+            f"{post_temperature_end_repeat})"
+        )
+        write_csv(correction_path, CORRECTION_FIELDS, correction_rows)
+        write_csv(correction_summary_path, SUMMARY_FIELDS, summary_rows)
     corrected_path = corrected_dir / (
         f"{detector.lower()}_tile_log_statistics_{selected_tile_size}_count_corrected.csv"
     )
@@ -5735,6 +6365,33 @@ def run_detector(
         "day26_acm_step_fit_scope": "shared_grey",
         "late_acm_step_replaced_by_side_swap": True,
     }
+    correction_cache_path = correction_dir / (
+        f"{detector.lower()}_correction_cache.json"
+    )
+    correction_cache = {
+        "schema_version": CORRECTION_CACHE_VERSION,
+        "detector": detector,
+        "tile_size": selected_tile_size,
+        "input_fingerprint": correction_input_fingerprint(records, observations),
+        "settings": correction_settings,
+        "artifact_sha256": correction_artifact_fingerprints(
+            {
+                "side_swap": side_swap_calibration_path,
+                "table": correction_path,
+                "summary": correction_summary_path,
+            }
+        ),
+        "reused_from": (
+            str(reuse_paths["root"]) if reuse_paths is not None else None
+        ),
+    }
+    write_correction_cache_metadata(correction_cache_path, correction_cache)
+    detector_manifest["corrections"]["cache_metadata"] = str(
+        correction_cache_path
+    )
+    detector_manifest["corrections"]["reused_from"] = (
+        str(reuse_paths["root"]) if reuse_paths is not None else None
+    )
     manifest["detectors"][detector] = detector_manifest
     if write_manifest:
         write_json(run_dir / "pipeline_manifest.json", manifest)
@@ -5766,6 +6423,7 @@ def run_detector_worker(
     temperature_quadratic_coefficients_path=None,
     decon_time=None,
     decon_fit_window_days=DEFAULT_DECON_FIT_WINDOW_DAYS,
+    reuse_corrections_from=None,
 ):
     """Run one detector with an isolated MAST session for threaded execution."""
     missions = login_to_mast(mast_token)
@@ -5789,6 +6447,7 @@ def run_detector_worker(
         ),
         decon_time=decon_time,
         decon_fit_window_days=decon_fit_window_days,
+        reuse_corrections_from=reuse_corrections_from,
     )
 
 
@@ -5865,11 +6524,21 @@ def parse_args(argv=None):
             "baseline; omit until the event time is known."
         ),
     )
+    parser.add_argument(
+        "--reuse-corrections-from",
+        type=Path,
+        default=None,
+        help=(
+            "Reuse a validated dated run's side-swap and count-space correction "
+            "tables while refreshing photodiode scaling."
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
+    reuse_corrections_from = getattr(args, "reuse_corrections_from", None)
     selected_detectors = (
         [args.detector] if args.detector is not None else list(DEFAULT_DETECTORS)
     )
@@ -5929,6 +6598,11 @@ def main(argv=None):
             "physical_ice_reset": "first_program_1063_observation",
             "decon_step": "optional_free_count_space_step",
         },
+        "correction_reuse_source": (
+            str(reuse_corrections_from)
+            if reuse_corrections_from is not None
+            else None
+        ),
         "detectors": {},
     }
     write_json(run_dir / "pipeline_manifest.json", manifest)
@@ -6027,6 +6701,7 @@ def main(argv=None):
         "channel": telemetry["channel"],
         "mnemonic": telemetry["mnemonic"],
         "path": telemetry["summary_path"],
+        "exposure_path": telemetry.get("exposure_summary_path", ""),
         "programs": list(UNIFIED_PROGRAMS),
         "dark_subtracted": True,
         "exposure_rows": len(telemetry["values"]),
@@ -6104,6 +6779,7 @@ def main(argv=None):
                     temperature_quadratic_coefficients_path
                 ),
                 decon_time=decon_time,
+                reuse_corrections_from=reuse_corrections_from,
             )
     else:
         status(f"Running detectors concurrently with {workers} workers")
@@ -6125,6 +6801,8 @@ def main(argv=None):
                     temperature_quadratic_coefficients,
                     temperature_quadratic_coefficients_path,
                     decon_time,
+                    DEFAULT_DECON_FIT_WINDOW_DAYS,
+                    reuse_corrections_from,
                 )
                 for detector in detectors
             }

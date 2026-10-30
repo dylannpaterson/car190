@@ -175,6 +175,11 @@ def load_bundle(path):
         "post_reset_tile_throughput_factor",
         "ice_reset_day",
     )
+    third_grey_fields = (
+        "post_third_decon_tile_log_offset",
+        "post_third_decon_tile_throughput_factor",
+        "third_decon_day",
+    )
     present = [name for name in trajectory_fields if name in bundle]
     if present and len(present) != len(trajectory_fields):
         missing = [name for name in trajectory_fields if name not in bundle]
@@ -214,8 +219,48 @@ def load_bundle(path):
             if not np.allclose(factors, np.exp(offsets), rtol=1.0e-6, atol=1.0e-7):
                 raise ValueError("Bundle grey-throughput factors do not match log offsets")
             bundle["grey_throughput_included"] = True
+            third_present = [name for name in third_grey_fields if name in bundle]
+            if third_present and len(third_present) != len(third_grey_fields):
+                missing = [name for name in third_grey_fields if name not in bundle]
+                raise ValueError(
+                    f"Bundle has incomplete third-decon grey-throughput fields: {missing}"
+                )
+            if len(third_present) == len(third_grey_fields):
+                third_offsets = np.asarray(
+                    bundle["post_third_decon_tile_log_offset"], dtype=float
+                )
+                third_factors = np.asarray(
+                    bundle["post_third_decon_tile_throughput_factor"], dtype=float
+                )
+                third_day = np.asarray(bundle["third_decon_day"], dtype=float).reshape(-1)
+                if (
+                    third_offsets.shape != (tile_count,)
+                    or third_factors.shape != (tile_count,)
+                ):
+                    raise ValueError(
+                        "Bundle third-decon grey-throughput arrays have an inconsistent shape"
+                    )
+                if (
+                    third_day.size != 1
+                    or not np.isfinite(third_day[0])
+                    or third_day[0] <= reset_day[0]
+                ):
+                    raise ValueError("Bundle has an invalid third-decon day")
+                if not np.allclose(
+                    third_factors,
+                    np.exp(third_offsets),
+                    rtol=1.0e-6,
+                    atol=1.0e-7,
+                ):
+                    raise ValueError(
+                        "Bundle third-decon throughput factors do not match log offsets"
+                    )
+                bundle["third_decon_included"] = True
+            else:
+                bundle["third_decon_included"] = False
         else:
             bundle["grey_throughput_included"] = False
+            bundle["third_decon_included"] = False
     else:
         bundle["trajectory_included"] = False
         bundle["grey_throughput_included"] = False
@@ -254,6 +299,10 @@ def bundle_summary(bundle):
         summary["grey_throughput_included"] = True
         summary["ice_reset_day"] = float(
             np.asarray(bundle["ice_reset_day"], dtype=float).reshape(-1)[0]
+        )
+    if bundle.get("third_decon_included", False):
+        summary["third_decon_day"] = float(
+            np.asarray(bundle["third_decon_day"], dtype=float).reshape(-1)[0]
         )
     return summary
 
@@ -331,6 +380,16 @@ def tile_trajectory(bundle, tile_id, detector=None):
         record["ice_reset_day"] = float(
             np.asarray(bundle["ice_reset_day"], dtype=float).reshape(-1)[0]
         )
+        if bundle.get("third_decon_included", False):
+            record["post_third_decon_tile_log_offset"] = float(
+                bundle["post_third_decon_tile_log_offset"][index]
+            )
+            record["post_third_decon_tile_throughput_factor"] = float(
+                bundle["post_third_decon_tile_throughput_factor"][index]
+            )
+            record["third_decon_day"] = float(
+                np.asarray(bundle["third_decon_day"], dtype=float).reshape(-1)[0]
+            )
     return record
 
 

@@ -15,8 +15,8 @@ The production model is intentionally fixed and is run through
 - independent positive HgCdTe n and k log scales with prior sigma `0.25`;
 - energy-weighted core SED integration using the pinned local reference files;
 - exactly three independent lossless AR layers at fixed normal incidence;
-- fixed lossless ice index `n=1.25`, with the physical reset anchored at the
-  first unified Program 1063 epoch;
+- fixed lossless ice index `n=1.25`, with decon2 anchored at relative day
+  `12.907397928240743`, the first unified Program 1063 epoch;
 - independent per-tile lognormal initial and reset thickness priors, median `10` nm and log sigma `1.5`;
 - fully non-parametric, unwhitened per-tile trajectories with a `12` nm/day lognormal rate prior;
 - one fitted post-reset log offset per tile, with prior sigma `0.1`;
@@ -39,6 +39,13 @@ constant warm start; it never imports the source fit's time-dependent rate
 trajectory or entropy regularization, and the fitted rate prior remains centered
 at `12 nm/day`.
 
+The standard full-TMM production model leaves per-LED log offsets disabled
+because the LED baselines are normalized. The validated cached
+relative-response run on 20261030 explicitly fits them with
+`--fit-led-log-offsets` and `--led-log-offset-prior-sigma-log 0.01`; its
+archives remain in the separate `relative_response/` subtree and must not
+replace the standard full-TMM outputs.
+
 The exploratory `fit_wfi_tmm_numpyro.py` workflow retains additional optical
 sensitivity branches. Those branches are not accepted by the production
 entrypoint or production output contract.
@@ -60,9 +67,10 @@ exact wavelength nodes in the pinned SED tables, covering approximately
 480--2700 nm. Older SOC/effective-boundary tools still use their separate model
 tables. The opt-in cached relative-response branch uses a provenance-checked
 six-LED cache and does not integrate the generic wavelength bundle during each
-fit evaluation. The current `20261012` cache is a pinned production artifact;
-ordinary reruns should reuse it rather than rebuild it. A new cache is expected
-only after full reprocessing, a reduction improvement, or a deliberate model
+fit evaluation. The validated cache is the detector-specific `20261020`
+six-LED cache described in `docs/WFI_RELATIVE_RESPONSE_PRODUCTION.md`; ordinary
+reruns should reuse it rather than rebuild it. A new cache is expected only
+after full reprocessing, a reduction improvement, or a deliberate model
 change. Data without temperature-dependent gain correction is a future
 experiment and is not supported by the current cache path.
 
@@ -205,6 +213,16 @@ corrections. Changes to photodiode telemetry therefore do not force raw image
 reprocessing. Use `--run-root PATH` only when the existing reduction tree is
 outside the repository checkout.
 
+When the image/source timeline, WTSM00 telemetry, temperature coefficients, and
+correction settings are unchanged, pass
+`--reuse-corrections-from /path/to/previous/YYYYMMDD` to reuse that run's
+side-swap and count-space correction tables. The pipeline still refreshes the
+photodiode telemetry, rewrites the side-swap-scaled statistics, and applies the
+frozen count corrections to the new statistics. Reuse is refused if the
+non-photodiode source/timeline fingerprint, WTSM00 values, correction settings,
+or correction row keys differ. A run must have been produced by the cache-aware
+pipeline once before it can be reused.
+
 The archived temperature correction was calibrated from the nonzero correction
 points and is applied to every production count-statistics row with valid
 WTSM00 telemetry, without refitting. The fitted curve is normalized so its
@@ -240,7 +258,12 @@ Each dated directory contains:
 - `corrected_statistics/`: the photodiode-scaled tile statistics with the
   fitted count correction applied; the filename records the tile size;
 - `diagnostics/`: scaled-versus-corrected current-count plots for each detector,
-  including LED3 pre- and post-operational temperature-fit diagnostics;
+  including LED3 pre- and post-operational temperature-fit diagnostics. To plot
+  the per-exposure photodiode scale recorded in an inventory, run
+  `python plot_wfi_photodiode_correction.py --inventory PATH --output PATH`;
+  the script also writes a tidy CSV next to the PNG. Use `--quantity percent`
+  to plot departure from unity instead of the scale factor. Pass
+  `--side-swap-calibration PATH` to mark the fitted per-LED side-swap event;
 - `telemetry/`: dark-subtracted per-exposure PD2 summaries fetched separately
   for Programs 1039 and 1063 by explicit `roman-telem --ice-monitor
   --ice-program PROGRAM` calls before reduction, plus the five-minute-binned
@@ -349,6 +372,14 @@ workflow in `docs/WFI_RELATIVE_RESPONSE_PRODUCTION.md`. It writes a separate
 `relative_response/` output subtree and never replaces the standard full-TMM
 `fits/` archives.
 
+The validated cached run uses the 20261030 256-pixel corrected statistics, a
+separate constant-rate warmup rooted at
+`relative_response_constant_rate_warmup_start40/`, an explicit third-decon day
+of `38.79784510416666`, a third-decon warmup-centered thickness prior with log
+sigma `0.1`, independent one-tile fits (`--batch-size 1`), and zero trajectory
+entropy weight. The final fit still performs its own scalar-rate numerical
+warmup; the separate warmup supplies the per-tile third-decon prior centers.
+
 Generate matching detector and all-detector plots from the same statistics
 directory with the default 256-pixel layout. Add `--tile-size 512` to each
 command when plotting the alternate layout:
@@ -357,7 +388,7 @@ command when plotting the alternate layout:
 .venv/bin/python -u plot_wfi_independent_production.py --root /path/to/corrected_statistics
 .venv/bin/python -u plot_wfi_all_detector_trajectories.py \
   --root /path/to/corrected_statistics \
-  --reset-day 15.064405023148149
+  --reset-day 12.907397928240743
 .venv/bin/python -u plot_wfi_fitted_incidence_angle_mosaic.py \
   --root /path/to/corrected_statistics
 .venv/bin/python -u plot_wfi_post_reset_initial_thickness_mosaic.py \
@@ -371,6 +402,39 @@ The incidence-angle command writes
 The post-reset initial-thickness command writes
 `production/wfi_post_reset_initial_thickness_mosaic.png` and uses the complete
 current production fit layout before falling back to the complete legacy layout.
+The current authoritative Decon 3 boundary is relative day
+`38.79784510416666`, established in the 20261023 production fit. Pass
+`--reset-stage 3 --reset-day 38.79784510416666` to plot the third-decon initial
+thickness, and pass `--third-decon-day 38.79784510416666` to the production
+runner. Stage 3 uses a separate
+`wfi_post_third_decon_initial_thickness_mosaic.png` default output name.
+
+Isolated fit trees can be plotted without copying them into the canonical
+`production/` layout. Use `--fit-root` for the post-reset, incidence-angle, and
+focal-plane mosaic plotters, `--detector-output-root` for the trajectory plotter,
+and the detector directory itself with `--fit-root` for
+`plot_wfi_independent_production.py`. For example, an offset branch under
+`production_led_offsets/` can be plotted by selecting `WFI01` and pointing
+these options at that branch. The incidence-angle plot remains empty for the
+normal-incidence production model because those archives intentionally contain
+no fitted incidence-angle parameter.
+
+The trajectory plotter supports `--break-day` more than once for independent
+reset boundaries. Its last-seven-day view autos-scales to the selected data;
+the full-series rate view retains the historical 30 nm/day upper limit. The
+focal-plane plotter can additionally write an AOM jump map with
+`--aom-rate-jump-output`; the two panels compare the latest post-AOM rate with
+the last pre-AOM rate in absolute nm/day and percent. Corrected tile-statistics
+diagnostics use scatter points rather than connected data lines; for example:
+
+```bash
+.venv/bin/python -u plot_wfi_corrected_tile_neighborhood.py \
+  --root /path/to/corrected_statistics \
+  --detector WFI06 \
+  --tile-id 98 \
+  --tile-size 256 \
+  --output /path/to/wfi06_tile098_neighborhood_corrected_data.png
+```
 
 ### Production prior bundle
 
@@ -408,6 +472,9 @@ the fitted prior parameters. Reconstruction is
 The production absolute-substrate-power response does not multiply the
 independent measured QE values; a downstream model using Roman system
 effective area must apply that system response once instead.
+When a third-decon fit is supplied, the bundle additionally carries the third
+boundary and per-tile post-third-decon thickness/grey-offset fields; those
+fields are absent from legacy bundles.
 
 The original `fit_wfi_tmm_numpyro.py` remains the exploratory/reproduction
 implementation and is not the production entrypoint.

@@ -366,15 +366,40 @@ def read_fit_archive(path, statistics, tile_id, fit_root):
             raise ValueError(f"Unexpected AR parameter count in {path}")
         initial_log = float(_scalar(samples, "initial_thickness_log_nm"))
         reset_log = float(_scalar(samples, "reset_initial_thickness_log_nm"))
+        third_field_names = (
+            "third_decon_day",
+            "third_decon_initial_thickness_log_nm",
+            "post_third_decon_tile_log_offset",
+        )
+        third_fields_present = [name in samples for name in third_field_names]
+        if any(third_fields_present) and not all(third_fields_present):
+            raise ValueError(f"Incomplete third-decon fields in {path}")
+        third_day = float(_scalar(samples, "third_decon_day", np.nan))
+        third_log = float(
+            _scalar(samples, "third_decon_initial_thickness_log_nm", np.nan)
+        )
+        third_offset = float(
+            _scalar(samples, "post_third_decon_tile_log_offset", np.nan)
+        )
+        third_included = np.isfinite(third_day)
+        if third_included and (
+            not np.isfinite(third_log)
+            or not np.isfinite(third_offset)
+        ):
+            raise ValueError(f"Incomplete third-decon fields in {path}")
         map_history = np.asarray(samples["map_objective_history"], dtype=float).reshape(-1)
         fit_values = {
             "ar_parameters": ar_parameters,
             "initial_thickness_nm": np.exp(initial_log),
             "reset_initial_thickness_nm": np.exp(reset_log),
+            "third_decon_initial_thickness_nm": (
+                np.exp(third_log) if third_included else np.nan
+            ),
             "incidence_angle_deg": float(_scalar(samples, "incidence_angle_deg")),
             "post_reset_tile_log_offset": float(
                 _scalar(samples, "post_reset_tile_log_offset")
             ),
+            "post_third_decon_tile_log_offset": third_offset,
             "absolute_hgcdte_n_log_scale": float(
                 _scalar(samples, "absolute_hgcdte_n_log_scale")
             ),
@@ -403,6 +428,8 @@ def read_fit_archive(path, statistics, tile_id, fit_root):
             "map_steps": int(_scalar(samples, "map_steps", 10000)),
             "fit_incidence_angle": bool(_scalar(samples, "fit_incidence_angle", 1)),
             "ice_reset_day": float(_scalar(samples, "ice_reset_day", RESET_DAY)),
+            "third_decon_day": third_day,
+            "third_decon_included": third_included,
             "map_optimizer": _string_scalar(samples, "map_optimizer", "least-squares"),
             "thickness_nm": thickness,
             "rate_nm_day": rates,
@@ -556,6 +583,19 @@ def build_bundle(
     provenance_rows = []
     for sca_index, detector in enumerate(SCAS):
         statistics = detector_data[detector]
+        detector_fits = fit_data[detector]
+        detector_third_days = {
+            float(fit["third_decon_day"])
+            for fit in detector_fits.values()
+            if fit["third_decon_included"]
+        }
+        if len(detector_third_days) > 1:
+            raise ValueError(f"Third-decon day differs across {detector} fit archives")
+        detector_third_day = next(iter(detector_third_days), None)
+        if detector_third_day is not None and not all(
+            fit["third_decon_included"] for fit in detector_fits.values()
+        ):
+            raise ValueError(f"Third-decon metadata is incomplete for {detector}")
         column, row, mosaic_x, mosaic_y = detector_mosaic_position(detector)
         detector_rows.append(
             {
@@ -575,6 +615,11 @@ def build_bundle(
                 {
                     "detector": detector,
                     "sca_index": sca_index,
+                    "post_third_decon": (
+                        detector_third_day is not None
+                        and observation["time_days_since_first_exposure"]
+                        >= detector_third_day
+                    ),
                     **observation,
                 }
             )
@@ -618,6 +663,12 @@ def build_bundle(
                 "initial_thickness_nm": fit["initial_thickness_nm"],
                 "reset_initial_thickness_nm": fit["reset_initial_thickness_nm"],
                 "post_reset_tile_log_offset": fit["post_reset_tile_log_offset"],
+                "third_decon_initial_thickness_nm": fit[
+                    "third_decon_initial_thickness_nm"
+                ],
+                "post_third_decon_tile_log_offset": fit[
+                    "post_third_decon_tile_log_offset"
+                ],
                 "absolute_hgcdte_n_log_scale": fit["absolute_hgcdte_n_log_scale"],
                 "absolute_hgcdte_k_log_scale": fit["absolute_hgcdte_k_log_scale"],
                 "absolute_hgcdte_n": None,
@@ -629,6 +680,7 @@ def build_bundle(
                 "map_steps": fit["map_steps"],
                 "fit_incidence_angle": fit["fit_incidence_angle"],
                 "ice_reset_day": fit["ice_reset_day"],
+                "third_decon_day": fit["third_decon_day"],
                 "map_optimizer": fit["map_optimizer"],
             }
             physical_n, physical_k = reconstruct_hgcdte(
@@ -682,6 +734,11 @@ def build_bundle(
                         "ice_thickness_nm": fit["thickness_nm"][observation_index],
                         "instantaneous_rate_nm_day": fit["rate_nm_day"][observation_index],
                         "post_reset": observation["post_reset"],
+                        "post_third_decon": (
+                            fit["third_decon_included"]
+                            and observation["time_days_since_first_exposure"]
+                            >= fit["third_decon_day"]
+                        ),
                     }
                 )
             for node_index, node_day in enumerate(statistics["node_days"]):
@@ -715,7 +772,7 @@ def build_bundle(
     primary = fits.PrimaryHDU()
     header = primary.header
     header["BUNDLE"] = "CAR190_WFI_PRODUCTION_PRIOR"
-    header["BVER"] = "1.1"
+    header["BVER"] = "1.2"
     header["ESTIM"] = "MAP"
     header["UNCERT"] = "NONE"
     header["TIMESYS"] = "UTC"
@@ -760,7 +817,7 @@ def build_bundle(
 
 def readme_lines():
     return [
-        "CAR190 WFI production prior bundle, schema version 1.1.",
+        "CAR190 WFI production prior bundle, schema version 1.2.",
         "Read the primary header and MODEL/SCHEMA extensions before consuming values.",
         "All parameter and trajectory estimates are deterministic least-squares MAP outputs.",
         "No posterior uncertainty is represented by the fitted values in this product.",
@@ -779,6 +836,8 @@ def readme_lines():
         "Physical HgCdTe values are reference_n/k multiplied by exp of the corresponding fitted log scale.",
         "The HgCdTe reference is an internal 80 K, x=0.445 sensitivity model, not a detector-specific validation table.",
         "Absolute substrate power omits multiplication by the independent measured QE values.",
+        "Third-decon fields are NaN/false when the optional third-decon boundary is unset.",
+        "post_third_decon marks observations on/after the optional physical third-decon boundary.",
     ]
 
 
@@ -810,9 +869,18 @@ def model_rows(
     else:
         trajectory_rate_prior_mean = 5.0
         trajectory_rate_prior_log_sigma = 1.5
+    third_days = {
+        float(fit["third_decon_day"])
+        for detector_fits in fit_data.values()
+        for fit in detector_fits.values()
+        if fit["third_decon_included"]
+    }
+    if len(third_days) > 1:
+        raise ValueError("Third-decon day differs across fit archives")
+    third_day = next(iter(third_days), None)
 
     rows = [
-        ("bundle_schema_version", "1.1", "", "Version of the embedded bundle schema."),
+        ("bundle_schema_version", "1.2", "", "Version of the embedded bundle schema."),
         ("product_type", "CAR190_WFI_PRODUCTION_PRIOR", "", "Product purpose."),
         ("fit_estimator", "deterministic least-squares MAP", "", "Estimator used for fitted values."),
         ("fit_uncertainty", "not represented; MAP point estimates only", "", "Uncertainty limitation."),
@@ -821,6 +889,12 @@ def model_rows(
         ("sed_weighting", "energy", "", "SED weighting mode."),
         ("ice_index", "1.25", "", "Fixed lossless ice refractive index."),
         ("ice_reset_day", str(RESET_DAY), "day", "Fixed reset day in relative time."),
+        (
+            "third_decon_day",
+            "unset" if third_day is None else str(third_day),
+            "day",
+            "Optional physical third-decon boundary; unset for legacy two-decon fits.",
+        ),
         ("initial_thickness_prior", "lognormal median 10, log sigma 1.5", "nm", "Initial/reset thickness prior."),
         (
             "trajectory_rate_prior",
@@ -829,6 +903,7 @@ def model_rows(
             "Trajectory rate prior recorded by the fit archives.",
         ),
         ("post_reset_offset_prior_sigma", "0.1", "log", "Post-reset tile offset prior sigma."),
+        ("post_third_decon_offset_prior_sigma", "0.1", "log", "Optional post-third-decon tile offset prior sigma."),
         ("absolute_hgcdte_scale_prior_sigma", "0.25", "log", "HgCdTe n/k scale prior sigma."),
         ("hgcdte_reference_model", "fit_wfi_tmm_production.hgcdte_reference_optical_constants", "", "Function that generated HGCDTE_REFERENCE."),
         ("hgcdte_reference_status", "internal sensitivity model; not detector-specific validation", "", "Interpretation of the bundled HgCdTe reference."),
@@ -916,6 +991,7 @@ def bundle_schemas(reference_wavelength_count=567):
             ("file_set_name", "A96", "", "Source current exposure file-set identifier."),
             ("baseline_file_set_name", "A96", "", "Source baseline exposure file-set identifier."),
             ("post_reset", "L", "", "Whether relative time is on/after the fixed reset day."),
+            ("post_third_decon", "L", "", "Whether relative time is on/after the optional third-decon day."),
         ),
         "TILE_TIMESERIES": (
             ("detector", "A5", "", "Roman WFI SCA identifier."),
@@ -939,6 +1015,7 @@ def bundle_schemas(reference_wavelength_count=567):
             ("ice_thickness_nm", "D", "nm", "Fitted ice thickness at this observation."),
             ("instantaneous_rate_nm_day", "D", "nm/day", "Fitted instantaneous accumulation rate."),
             ("post_reset", "L", "", "Whether relative time is on/after the fixed reset day."),
+            ("post_third_decon", "L", "", "Whether relative time is on/after the optional third-decon day."),
         ),
         "NODE_TRAJECTORIES": (
             ("detector", "A5", "", "Roman WFI SCA identifier."),
@@ -975,6 +1052,8 @@ def bundle_schemas(reference_wavelength_count=567):
             ("initial_thickness_nm", "D", "nm", "MAP initial ice thickness."),
             ("reset_initial_thickness_nm", "D", "nm", "MAP ice thickness immediately after reset."),
             ("post_reset_tile_log_offset", "D", "log", "MAP post-reset tile log offset."),
+            ("third_decon_initial_thickness_nm", "D", "nm", "Optional MAP ice thickness immediately after the third decon; NaN when unset."),
+            ("post_third_decon_tile_log_offset", "D", "log", "Optional MAP post-third-decon tile log offset; NaN when unset."),
             ("absolute_hgcdte_n_log_scale", "D", "log", "MAP HgCdTe n log scale."),
             ("absolute_hgcdte_k_log_scale", "D", "log", "MAP HgCdTe k log scale."),
             ("absolute_hgcdte_n", f"{reference_wavelength_count}D", "", "Physical per-tile HgCdTe n vector indexed by HGCDTE_REFERENCE row."),
@@ -986,6 +1065,7 @@ def bundle_schemas(reference_wavelength_count=567):
             ("map_steps", "J", "", "Configured MAP evaluation limit recorded by the fit."),
             ("fit_incidence_angle", "L", "", "Whether incidence_angle_deg was fitted."),
             ("ice_reset_day", "D", "day", "Fixed reset day used by this fit."),
+            ("third_decon_day", "D", "day", "Optional third-decon day used by this fit; NaN when unset."),
             ("map_optimizer", "A32", "", "MAP optimizer name."),
         ),
         "PROVENANCE": (

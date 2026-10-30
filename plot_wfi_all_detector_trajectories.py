@@ -17,6 +17,7 @@ from wfi_production_plot_annotations import (
     event_legend_handles,
     latest_observation_label,
     load_time_annotations,
+    split_time_series_at_resets,
     split_time_series_at_reset,
 )
 from wfi_production_layout import (
@@ -474,6 +475,7 @@ def plot_all_detector_trajectories(
     path,
     trajectories,
     reset_day=None,
+    break_days=None,
     independent_fit=False,
     time_annotations=None,
     observation_label="unknown",
@@ -487,6 +489,8 @@ def plot_all_detector_trajectories(
     legend_handles = []
     visible_ice = []
     visible_rates = []
+    split_days = [] if plot_reset_day is None else [plot_reset_day]
+    split_days.extend(break_days or ())
     for index, detector in enumerate(trajectories):
         days, ice, rates = trajectories[detector]
         (
@@ -497,7 +501,7 @@ def plot_all_detector_trajectories(
             rate_low,
             rate_median,
             rate_high,
-        ) = split_time_series_at_reset(
+        ) = split_time_series_at_resets(
             days,
             ice[0],
             ice[1],
@@ -505,7 +509,7 @@ def plot_all_detector_trajectories(
             rates[0],
             rates[1],
             rates[2],
-            reset_day=plot_reset_day,
+            reset_days=split_days or None,
         )
         color = colors(index)
         axes[0].fill_between(days, ice_low, ice_high, color=color, alpha=0.08)
@@ -557,6 +561,8 @@ def plot_all_detector_trajectories(
                 upper = float(np.max(finite))
                 padding = max((upper - lower) * 0.06, 0.1)
                 axis.set_ylim(lower - padding, upper + padding)
+    if xlim_days is None:
+        axes[1].set_ylim(top=30.0)
     title = "Ice trajectories and accumulation rates"
     if observation_label != "unknown":
         title = f"{title}\n{observation_label}"
@@ -619,6 +625,14 @@ def parse_args():
         type=float,
         default=None,
         help="Mark the ice reset day on both panels.",
+    )
+    parser.add_argument(
+        "--break-day",
+        dest="break_days",
+        action="append",
+        type=float,
+        default=None,
+        help="Break trajectory lines at this day; may be repeated.",
     )
     parser.add_argument(
         "--allow-partial",
@@ -690,6 +704,7 @@ def main():
         output,
         trajectories,
         reset_day=args.reset_day,
+        break_days=args.break_days,
         independent_fit=independent_fit,
         time_annotations=time_annotations,
         observation_label=observation_label,

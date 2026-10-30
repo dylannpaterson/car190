@@ -58,6 +58,21 @@ VARIABLE_SITES = (
     "post_reset_tile_log_offset",
     "np_log_rate_nodes",
 )
+
+
+def variable_sites(values):
+    """Return the ice-only sites present in a one- or two-reset fit."""
+    names = VARIABLE_SITES + tuple(
+        name
+        for name in (
+            "third_decon_initial_thickness_log_nm",
+            "post_third_decon_tile_log_offset",
+        )
+        if name in values
+    )
+    if "led_log_offsets" in values:
+        names += ("led_log_offsets",)
+    return names
 # These are the production settings used by run_wfi_production.py.  The
 # cached branch fixes the optical state but must retain the current-data ice
 # trajectory prior rather than inheriting the source fit's trajectory.
@@ -162,13 +177,22 @@ def load_warm_values(
     reference_fit,
     reference_statistics=None,
     trajectory_rate_initialization_nm_day=PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY,
+    fit_led_log_offsets=False,
+    third_decon_initial_thickness_start_nm=None,
 ):
     """Load source optical values and current-data ice initial values.
 
     The source fit supplies only the fixed optical state used to build the
     response cache.  Its trajectory is deliberately not reused as a prior.
     """
-    values = production.initial_values_for_data(data, constant_rate=False)
+    if fit_led_log_offsets:
+        values = production.initial_values_for_data(
+            data,
+            constant_rate=False,
+            fit_led_log_offsets=True,
+        )
+    else:
+        values = production.initial_values_for_data(data, constant_rate=False)
     if (
         not np.isfinite(trajectory_rate_initialization_nm_day)
         or trajectory_rate_initialization_nm_day <= 0.0
@@ -180,6 +204,8 @@ def load_warm_values(
             "initial_thickness_log_nm",
             "reset_initial_thickness_log_nm",
             "post_reset_tile_log_offset",
+            "third_decon_initial_thickness_log_nm",
+            "post_third_decon_tile_log_offset",
             "absolute_hgcdte_n_log_scale",
             "absolute_hgcdte_k_log_scale",
         ):
@@ -194,6 +220,25 @@ def load_warm_values(
     # Keep the source-statistics argument for cache provenance validation, but
     # never use its old trajectory to constrain the current data.
     del reference_statistics
+    if third_decon_initial_thickness_start_nm is not None:
+        third_decon_initial_thickness_start_nm = float(
+            third_decon_initial_thickness_start_nm
+        )
+        if (
+            not np.isfinite(third_decon_initial_thickness_start_nm)
+            or third_decon_initial_thickness_start_nm <= 0.0
+        ):
+            raise ValueError(
+                "Third-decon initial thickness start must be positive and finite"
+            )
+        if "third_decon_initial_thickness_log_nm" not in values:
+            raise ValueError(
+                "Third-decon initial thickness start requires a third-decon fit"
+            )
+        values["third_decon_initial_thickness_log_nm"] = np.full_like(
+            np.asarray(values["third_decon_initial_thickness_log_nm"], dtype=float),
+            np.log(third_decon_initial_thickness_start_nm),
+        )
     values["np_log_rate_nodes"] = np.full_like(
         np.asarray(values["np_log_rate_nodes"], dtype=float),
         np.log(trajectory_rate_initialization_nm_day),
@@ -207,6 +252,17 @@ def rate_prior_reference(initial_values):
         np.asarray(initial_values["np_log_rate_nodes"], dtype=float),
         np.log(PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY),
     )
+
+
+def _led_log_offset_values(data, values, jnp):
+    """Return fitted post-reference LED offsets for each observation group."""
+    if "led_log_offsets" not in values:
+        return 0.0
+    offsets = jnp.asarray(values["led_log_offsets"])
+    offsets = offsets.reshape((-1, offsets.shape[-1]))
+    led_index = jnp.asarray(np.asarray(data["led"], dtype=int) - 1, dtype=jnp.int32)
+    nonreference = jnp.asarray(np.asarray(data["repeat"], dtype=int) != 0)
+    return offsets[:, led_index] * nonreference[None, :]
 
 
 def load_optical_values(fit_archive):
@@ -490,11 +546,17 @@ def validate_response_cache_provenance(
 
 def relative_state(data, values, cache, jax, jnp):
     """Evaluate ice trajectory and cached relative response."""
+    thickness_names, _ = production.reset_site_names(data)
+    reset_initial = (
+        jnp.stack([values[name] for name in thickness_names[1:]], axis=0)
+        if len(thickness_names) > 2
+        else values[thickness_names[1]]
+    )
     ice, rates, node_ice, node_rates = production._trajectory_state(
         data,
         values["np_log_rate_nodes"],
         values["initial_thickness_log_nm"],
-        values["reset_initial_thickness_log_nm"],
+        reset_initial,
         jax,
         jnp,
     )
@@ -512,7 +574,11 @@ def relative_state(data, values, cache, jax, jnp):
         [jnp.interp(baseline_thickness, grid, curves[led]) for led in range(6)]
     )
     baseline = baseline_by_led[led_index, group_index]
-    prediction = (current - baseline)[None, :]
+    prediction = (current - baseline)[None, :] + _led_log_offset_values(
+        data,
+        values,
+        jnp,
+    )
     return {
         "ice": ice,
         "rates": rates,
@@ -538,6 +604,7 @@ def _stack_tile_data(data_list):
         "repeat_index",
         "exposure_times",
         "reset_day",
+        "reset_days",
     )
     reference = data_list[0]
     for data in data_list[1:]:
@@ -561,11 +628,17 @@ def _stack_tile_data(data_list):
 
 def relative_state_batch(data, values, cache, jax, jnp):
     """Evaluate independent tile trajectories against a stacked cache."""
+    thickness_names, _ = production.reset_site_names(data)
+    reset_initial = (
+        jnp.stack([values[name] for name in thickness_names[1:]], axis=0)
+        if len(thickness_names) > 2
+        else values[thickness_names[1]]
+    )
     ice, rates, node_ice, node_rates = production._trajectory_state(
         data,
         values["np_log_rate_nodes"],
         values["initial_thickness_log_nm"],
-        values["reset_initial_thickness_log_nm"],
+        reset_initial,
         jax,
         jnp,
     )
@@ -590,67 +663,128 @@ def relative_state_batch(data, values, cache, jax, jnp):
         "rates": rates,
         "node_ice": node_ice,
         "node_rates": node_rates,
-        "prediction": current - baseline,
+        "prediction": current - baseline + _led_log_offset_values(data, values, jnp),
     }
 
 
 def _observed_with_offset(data, values, jnp):
     observed = jnp.asarray(data["sums"]) / jnp.asarray(data["counts"])
+    _, offset_names = production.reset_site_names(data)
     reset_mask = jnp.asarray(
-        np.asarray(data["days"], dtype=float) >= float(data["reset_day"])
+        np.asarray(data["days"], dtype=float)[None, :]
+        >= production.reset_days_for_data(data)[:, None]
     )
-    return observed + (
-        jnp.asarray(values["post_reset_tile_log_offset"]).reshape(-1, 1)
-        * reset_mask[None, :]
+    reset_offsets = jnp.stack(
+        [jnp.asarray(values[name]).reshape(-1) for name in offset_names], axis=0
+    )
+    return observed + jnp.sum(
+        reset_offsets[:, :, None] * reset_mask[:, None, :], axis=0
     )
 
 
-def _prior_residuals(data, values, rate_reference, jnp):
+def _prior_residuals(
+    data,
+    values,
+    rate_reference,
+    jnp,
+    led_log_offset_prior_sigma_log=production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+    thickness_prior_log_centers=None,
+    thickness_prior_log_sigma=production.INITIAL_THICKNESS_LOG_SIGMA,
+):
+    thickness_names, offset_names = production.reset_site_names(data)
+
+    def thickness_sigma(name):
+        sigma = (
+            thickness_prior_log_sigma[name]
+            if isinstance(thickness_prior_log_sigma, dict)
+            else thickness_prior_log_sigma
+        )
+        if not np.isfinite(sigma) or sigma <= 0.0:
+            raise ValueError("Thickness prior log sigma must be positive and finite")
+        return float(sigma)
+
+    def thickness_center(name):
+        if thickness_prior_log_centers is None:
+            return np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM)
+        if name not in thickness_prior_log_centers:
+            raise ValueError(f"Missing thickness prior center for {name}")
+        return jnp.asarray(thickness_prior_log_centers[name])
+
     residuals = [
-        (
-            jnp.asarray(values["initial_thickness_log_nm"])
-            - np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM)
-        ).reshape(-1)
-        / production.INITIAL_THICKNESS_LOG_SIGMA,
-        (
-            jnp.asarray(values["reset_initial_thickness_log_nm"])
-            - np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM)
-        ).reshape(-1)
-        / production.INITIAL_THICKNESS_LOG_SIGMA,
+        *[
+            (
+                jnp.asarray(values[name]) - thickness_center(name)
+            ).reshape(-1)
+            / thickness_sigma(name)
+            for name in thickness_names
+        ],
         (
             jnp.asarray(values["np_log_rate_nodes"])
             - jnp.asarray(rate_reference)
         ).reshape(-1)
         / production.TRAJECTORY_RATE_PRIOR_SIGMA_LOG,
-        jnp.asarray(values["post_reset_tile_log_offset"]).reshape(-1)
-        / production.POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA,
+        *(
+            jnp.asarray(values[name]).reshape(-1)
+            / production.POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA
+            for name in offset_names
+        ),
     ]
+    if "led_log_offsets" in values:
+        residuals.append(
+            jnp.asarray(values["led_log_offsets"]).reshape(-1)
+            / led_log_offset_prior_sigma_log
+        )
     return jnp.concatenate(residuals)
 
 
-def fit_ice_only(data, cache, initial_values, jax, jnp):
+def fit_ice_only(
+    data,
+    cache,
+    initial_values,
+    jax,
+    jnp,
+    led_log_offset_prior_sigma_log=production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+    thickness_prior_log_centers=None,
+    thickness_prior_log_sigma=production.INITIAL_THICKNESS_LOG_SIGMA,
+):
     """Fit only initial/reset ice, offset, and non-parametric rate nodes."""
     from jax.flatten_util import ravel_pytree
     from scipy.optimize import least_squares
 
     rate_reference = rate_prior_reference(initial_values)
+    variable_site_names = variable_sites(initial_values)
     variable_initial = {
         name: np.asarray(initial_values[name], dtype=float).copy()
-        for name in VARIABLE_SITES
+        for name in variable_site_names
     }
     fixed_values = {
         name: np.asarray(value, dtype=float).copy()
         for name, value in initial_values.items()
-        if name not in VARIABLE_SITES
+        if name not in variable_site_names
     }
     flat_initial, unravel = ravel_pytree(
         {name: jnp.asarray(value) for name, value in variable_initial.items()}
     )
-    parameter_scales = production.map_parameter_scale_values(initial_values)
+    parameter_scales = production.map_parameter_scale_values(
+        initial_values,
+        led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+    )
+    if thickness_prior_log_centers is not None:
+        for name in production.reset_site_names(data)[0]:
+            if name.endswith("_log_nm") and name in parameter_scales:
+                sigma = (
+                    thickness_prior_log_sigma[name]
+                    if isinstance(thickness_prior_log_sigma, dict)
+                    else thickness_prior_log_sigma
+                )
+                parameter_scales[name] = np.full_like(
+                    np.asarray(parameter_scales[name], dtype=float),
+                    sigma,
+                )
     flat_scales, _ = ravel_pytree(
         {
             name: jnp.asarray(parameter_scales[name])
-            for name in VARIABLE_SITES
+            for name in variable_site_names
         }
     )
     flat_initial = np.asarray(flat_initial, dtype=float)
@@ -675,7 +809,20 @@ def fit_ice_only(data, cache, initial_values, jax, jnp):
             * jnp.sqrt(jnp.asarray(data["counts"]))
             * (state["prediction"] - observed)
         ).reshape(-1)
-        return jnp.concatenate((data_residual, _prior_residuals(data, values, rate_reference, jnp)))
+        return jnp.concatenate(
+            (
+                data_residual,
+                _prior_residuals(
+                    data,
+                    values,
+                    rate_reference,
+                    jnp,
+                    led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+                    thickness_prior_log_centers=thickness_prior_log_centers,
+                    thickness_prior_log_sigma=thickness_prior_log_sigma,
+                ),
+            )
+        )
 
     residual_jit = jax.jit(residuals)
     jacobian_jit = jax.jit(jax.jacfwd(residuals))
@@ -720,16 +867,194 @@ def fit_ice_only(data, cache, initial_values, jax, jnp):
     }
 
 
-def build_ice_only_evaluator(data, initial_values, cache, jax, jnp):
-    """Compile a tile-shaped residual/Jacobian that accepts dynamic tile data."""
+def fit_ice_only_constant_rate(
+    data,
+    cache,
+    initial_values,
+    jax,
+    jnp,
+    led_log_offset_prior_sigma_log=production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+):
+    """Fit reset thicknesses and one scalar accumulation rate using a cache."""
+    from jax.flatten_util import ravel_pytree
+    from scipy.optimize import least_squares
+
+    initial_rates = np.asarray(initial_values["np_log_rate_nodes"], dtype=float)
+    rate_shape = initial_rates.shape[:-1]
+    variable_site_names = tuple(
+        name for name in variable_sites(initial_values) if name != "np_log_rate_nodes"
+    ) + ("constant_log_rate",)
+    variable_initial = {
+        name: np.asarray(initial_values[name], dtype=float).copy()
+        for name in variable_site_names
+        if name != "constant_log_rate"
+    }
+    variable_initial["constant_log_rate"] = np.full(
+        rate_shape,
+        float(np.median(initial_rates)),
+        dtype=float,
+    )
+    fixed_values = {
+        name: np.asarray(value, dtype=float).copy()
+        for name, value in initial_values.items()
+        if name not in variable_sites(initial_values)
+    }
+    flat_initial, unravel = ravel_pytree(
+        {name: jnp.asarray(value) for name, value in variable_initial.items()}
+    )
+    parameter_scales = production.map_parameter_scale_values(
+        initial_values,
+        led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+    )
+    scale_values = {
+        name: np.asarray(parameter_scales[name], dtype=float)
+        for name in variable_site_names
+        if name != "constant_log_rate"
+    }
+    scale_values["constant_log_rate"] = np.full(
+        rate_shape,
+        production.TRAJECTORY_RATE_PRIOR_SIGMA_LOG,
+        dtype=float,
+    )
+    flat_scales, _ = ravel_pytree(
+        {name: jnp.asarray(value) for name, value in scale_values.items()}
+    )
+    flat_initial = np.asarray(flat_initial, dtype=float)
+    flat_scales = np.asarray(flat_scales, dtype=float)
+
+    def full_values(scaled_values):
+        values = dict(fixed_values)
+        values.update(
+            unravel(
+                jnp.asarray(flat_initial) + jnp.asarray(flat_scales) * scaled_values
+            )
+        )
+        constant_log_rate = values.pop("constant_log_rate")
+        values["np_log_rate_nodes"] = jnp.broadcast_to(
+            jnp.asarray(constant_log_rate)[..., None],
+            rate_shape + (initial_rates.shape[-1],),
+        )
+        return values
+
+    def residuals(scaled_values):
+        values = full_values(scaled_values)
+        state = relative_state(data, values, cache, jax, jnp)
+        observed = _observed_with_offset(data, values, jnp)
+        data_residual = (
+            jnp.sqrt(
+                production.default_likelihood_weight(data["counts"])
+                / int(data["n_tiles"])
+            )
+            / production.LOG_NOISE_SIGMA
+            * jnp.sqrt(jnp.asarray(data["counts"]))
+            * (state["prediction"] - observed)
+        ).reshape(-1)
+        thickness_names, offset_names = production.reset_site_names(data)
+        prior_residuals = [
+            (
+                jnp.asarray(values["initial_thickness_log_nm"])
+                - np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM)
+            ).reshape(-1)
+            / production.INITIAL_THICKNESS_LOG_SIGMA,
+            *[
+                (
+                    jnp.asarray(values[name])
+                    - np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM)
+                ).reshape(-1)
+                / production.INITIAL_THICKNESS_LOG_SIGMA
+                for name in thickness_names[1:]
+            ],
+            (
+                jnp.asarray(values["np_log_rate_nodes"])[..., 0]
+                - np.log(PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY)
+            ).reshape(-1)
+            / production.TRAJECTORY_RATE_PRIOR_SIGMA_LOG,
+            *[
+                jnp.asarray(values[name]).reshape(-1)
+                / production.POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA
+                for name in offset_names
+            ],
+        ]
+        if "led_log_offsets" in values:
+            prior_residuals.append(
+                jnp.asarray(values["led_log_offsets"]).reshape(-1)
+                / led_log_offset_prior_sigma_log
+            )
+        return jnp.concatenate((data_residual, *prior_residuals))
+
+    residual_jit = jax.jit(residuals)
+    jacobian_jit = jax.jit(jax.jacfwd(residuals))
+
+    def scipy_residual(scaled_values):
+        return np.asarray(residual_jit(jnp.asarray(scaled_values)), dtype=float)
+
+    def scipy_jacobian(scaled_values):
+        return np.asarray(jacobian_jit(jnp.asarray(scaled_values)), dtype=float)
+
+    initial_scaled = np.zeros_like(flat_initial)
+    started = time.perf_counter()
+    initial_residual = scipy_residual(initial_scaled)
+    compile_seconds = time.perf_counter() - started
+    result = least_squares(
+        scipy_residual,
+        initial_scaled,
+        jac=scipy_jacobian,
+        method="trf",
+        x_scale=1.0,
+        ftol=production.PRODUCTION_MAP_FTOL,
+        xtol=production.PRODUCTION_MAP_XTOL,
+        gtol=1.0e-9,
+        max_nfev=production.PRODUCTION_MAP_STEPS,
+        verbose=0,
+    )
+    total_seconds = time.perf_counter() - started
+    values = full_values(np.asarray(result.x, dtype=float))
+    final_residual = scipy_residual(np.asarray(result.x, dtype=float))
+    rate_nm_day = float(np.exp(np.asarray(values["np_log_rate_nodes"]).reshape(-1)[0]))
+    return values, {
+        "converged": bool(result.success),
+        "message": str(result.message),
+        "nfev": int(result.nfev),
+        "parameter_count": int(flat_initial.size),
+        "compile_seconds": float(compile_seconds),
+        "total_seconds": float(total_seconds),
+        "residual_cost": float(0.5 * np.sum(final_residual**2)),
+        "initial_residual_cost": float(0.5 * np.sum(initial_residual**2)),
+        "constant_rate_map_rate_nm_day": rate_nm_day,
+        "trajectory_rate_initialization_nm_day": float(
+            np.exp(np.median(initial_rates))
+        ),
+    }
+
+
+def build_ice_only_constant_rate_evaluator(
+    data,
+    initial_values,
+    cache,
+    jax,
+    jnp,
+    led_log_offset_prior_sigma_log=production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+):
+    """Compile a reusable evaluator for scalar-rate cached-response warmups."""
     from jax.flatten_util import ravel_pytree
 
-    template = {
+    initial_rates = np.asarray(initial_values["np_log_rate_nodes"], dtype=float)
+    rate_shape = initial_rates.shape[:-1]
+    variable_site_names = tuple(
+        name for name in variable_sites(initial_values) if name != "np_log_rate_nodes"
+    ) + ("constant_log_rate",)
+    variable_initial = {
         name: np.asarray(initial_values[name], dtype=float).copy()
-        for name in VARIABLE_SITES
+        for name in variable_site_names
+        if name != "constant_log_rate"
     }
+    variable_initial["constant_log_rate"] = np.full(
+        rate_shape,
+        float(np.median(initial_rates)),
+        dtype=float,
+    )
     _, unravel = ravel_pytree(
-        {name: jnp.asarray(value) for name, value in template.items()}
+        {name: jnp.asarray(value) for name, value in variable_initial.items()}
     )
     grid = jnp.asarray(np.asarray(cache["grid_nm"], dtype=float))
     days = jnp.asarray(data["days"])
@@ -737,21 +1062,39 @@ def build_ice_only_evaluator(data, initial_values, cache, jax, jnp):
     led_index = jnp.asarray(np.asarray(data["led"], dtype=int) - 1, dtype=jnp.int32)
     first_by_led = jnp.asarray(data["first_by_led"], dtype=jnp.int32)
     group_index = jnp.arange(len(data["groups"]), dtype=jnp.int32)
+    thickness_names, offset_names = production.reset_site_names(data)
     reset_mask = jnp.asarray(
-        np.asarray(data["days"], dtype=float) >= float(data["reset_day"])
+        np.asarray(data["days"], dtype=float)[None, :]
+        >= production.reset_days_for_data(data)[:, None]
     )
     layout_data = {
         "days": np.asarray(data["days"], dtype=float),
         "node_days": np.asarray(data["node_days"], dtype=float),
         "reset_day": float(data["reset_day"]),
+        "reset_days": production.reset_days_for_data(data),
     }
 
+    def expand_values(values):
+        values = dict(values)
+        constant_log_rate = values.pop("constant_log_rate")
+        values["np_log_rate_nodes"] = jnp.broadcast_to(
+            jnp.asarray(constant_log_rate)[..., None],
+            rate_shape + (initial_rates.shape[-1],),
+        )
+        return values
+
     def prediction(values, curves):
+        values = expand_values(values)
+        reset_initial = (
+            jnp.stack([values[name] for name in thickness_names[1:]], axis=0)
+            if len(thickness_names) > 2
+            else values[thickness_names[1]]
+        )
         ice, _, _, _ = production._trajectory_state(
             layout_data,
             values["np_log_rate_nodes"],
             values["initial_thickness_log_nm"],
-            values["reset_initial_thickness_log_nm"],
+            reset_initial,
             jax,
             jnp,
         )
@@ -766,7 +1109,263 @@ def build_ice_only_evaluator(data, initial_values, cache, jax, jnp):
         baseline_thickness = ice[0, first_by_led][led_index]
         baseline_by_led = interpolate_by_led(baseline_thickness)
         baseline = baseline_by_led[led_index, group_index]
-        return current - baseline
+        return current - baseline + _led_log_offset_values(data, values, jnp)[0]
+
+    def residual_function(
+        scaled_values,
+        flat_initial,
+        flat_scales,
+        counts,
+        sums,
+        curves,
+    ):
+        values = unravel(flat_initial + flat_scales * scaled_values)
+        expanded = expand_values(values)
+        reset_offsets = jnp.stack(
+            [expanded[name].reshape(-1) for name in offset_names], axis=0
+        )
+        observed = sums / counts + jnp.sum(
+            reset_offsets[:, :, None] * reset_mask[:, None, :], axis=0
+        )
+        data_residual = (
+            jnp.sqrt(1.0 / jnp.median(counts))
+            / production.LOG_NOISE_SIGMA
+            * jnp.sqrt(counts)
+            * (prediction(values, curves)[None, :] - observed)
+        ).reshape(-1)
+        prior_residuals = [
+            (
+                expanded["initial_thickness_log_nm"]
+                - np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM)
+            ).reshape(-1)
+            / production.INITIAL_THICKNESS_LOG_SIGMA,
+            *[
+                (
+                    expanded[name]
+                    - np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM)
+                ).reshape(-1)
+                / production.INITIAL_THICKNESS_LOG_SIGMA
+                for name in thickness_names[1:]
+            ],
+            (
+                values["constant_log_rate"]
+                - np.log(PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY)
+            ).reshape(-1)
+            / production.TRAJECTORY_RATE_PRIOR_SIGMA_LOG,
+            *[
+                expanded[name].reshape(-1)
+                / production.POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA
+                for name in offset_names
+            ],
+        ]
+        if "led_log_offsets" in expanded:
+            prior_residuals.append(
+                expanded["led_log_offsets"].reshape(-1)
+                / led_log_offset_prior_sigma_log
+            )
+        return jnp.concatenate((data_residual, *prior_residuals))
+
+    return {
+        "residual": jax.jit(residual_function),
+        "jacobian": jax.jit(jax.jacfwd(residual_function)),
+        "unravel": unravel,
+        "variable_site_names": variable_site_names,
+        "rate_shape": rate_shape,
+        "node_count": initial_rates.shape[-1],
+    }
+
+
+def fit_ice_only_constant_rate_reusable(
+    data,
+    cache,
+    initial_values,
+    evaluator,
+    jax,
+    jnp,
+    led_log_offset_prior_sigma_log=production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+):
+    """Fit one scalar-rate cached-response warmup with a reusable evaluator."""
+    from jax.flatten_util import ravel_pytree
+    from scipy.optimize import least_squares
+
+    initial_rates = np.asarray(initial_values["np_log_rate_nodes"], dtype=float)
+    rate_shape = initial_rates.shape[:-1]
+    variable_site_names = evaluator["variable_site_names"]
+    variable_initial = {
+        name: np.asarray(initial_values[name], dtype=float).copy()
+        for name in variable_site_names
+        if name != "constant_log_rate"
+    }
+    variable_initial["constant_log_rate"] = np.full(
+        rate_shape,
+        float(np.median(initial_rates)),
+        dtype=float,
+    )
+    fixed_values = {
+        name: np.asarray(value, dtype=float).copy()
+        for name, value in initial_values.items()
+        if name not in variable_sites(initial_values)
+    }
+    flat_initial, unravel = ravel_pytree(
+        {name: jnp.asarray(value) for name, value in variable_initial.items()}
+    )
+    parameter_scales = production.map_parameter_scale_values(
+        initial_values,
+        led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+    )
+    scale_values = {
+        name: np.asarray(parameter_scales[name], dtype=float)
+        for name in variable_site_names
+        if name != "constant_log_rate"
+    }
+    scale_values["constant_log_rate"] = np.full(
+        rate_shape,
+        production.TRAJECTORY_RATE_PRIOR_SIGMA_LOG,
+        dtype=float,
+    )
+    flat_scales, _ = ravel_pytree(
+        {name: jnp.asarray(value) for name, value in scale_values.items()}
+    )
+    flat_initial = np.asarray(flat_initial, dtype=float)
+    flat_scales = np.asarray(flat_scales, dtype=float)
+    counts = jnp.asarray(data["counts"])
+    sums = jnp.asarray(data["sums"])
+    curves = jnp.asarray(cache["relative_log_response"])
+
+    def scipy_residual(scaled_values):
+        return np.asarray(
+            evaluator["residual"](
+                jnp.asarray(scaled_values),
+                jnp.asarray(flat_initial),
+                jnp.asarray(flat_scales),
+                counts,
+                sums,
+                curves,
+            ),
+            dtype=float,
+        )
+
+    def scipy_jacobian(scaled_values):
+        return np.asarray(
+            evaluator["jacobian"](
+                jnp.asarray(scaled_values),
+                jnp.asarray(flat_initial),
+                jnp.asarray(flat_scales),
+                counts,
+                sums,
+                curves,
+            ),
+            dtype=float,
+        )
+
+    initial_scaled = np.zeros_like(flat_initial)
+    started = time.perf_counter()
+    initial_residual = scipy_residual(initial_scaled)
+    compile_seconds = time.perf_counter() - started
+    result = least_squares(
+        scipy_residual,
+        initial_scaled,
+        jac=scipy_jacobian,
+        method="trf",
+        x_scale=1.0,
+        ftol=production.PRODUCTION_MAP_FTOL,
+        xtol=production.PRODUCTION_MAP_XTOL,
+        gtol=1.0e-9,
+        max_nfev=production.PRODUCTION_MAP_STEPS,
+        verbose=0,
+    )
+    total_seconds = time.perf_counter() - started
+    variable_values = unravel(
+        jnp.asarray(flat_initial) + jnp.asarray(flat_scales) * np.asarray(result.x)
+    )
+    values = dict(fixed_values)
+    values.update(variable_values)
+    constant_log_rate = values.pop("constant_log_rate")
+    values["np_log_rate_nodes"] = jnp.broadcast_to(
+        jnp.asarray(constant_log_rate)[..., None],
+        rate_shape + (evaluator["node_count"],),
+    )
+    final_residual = scipy_residual(np.asarray(result.x, dtype=float))
+    rate_nm_day = float(np.exp(np.asarray(values["np_log_rate_nodes"]).reshape(-1)[0]))
+    return values, {
+        "converged": bool(result.success),
+        "message": str(result.message),
+        "nfev": int(result.nfev),
+        "parameter_count": int(flat_initial.size),
+        "compile_seconds": float(compile_seconds),
+        "total_seconds": float(total_seconds),
+        "residual_cost": float(0.5 * np.sum(final_residual**2)),
+        "initial_residual_cost": float(0.5 * np.sum(initial_residual**2)),
+        "constant_rate_map_rate_nm_day": rate_nm_day,
+        "trajectory_rate_initialization_nm_day": float(
+            np.exp(np.median(initial_rates))
+        ),
+    }
+
+
+def build_ice_only_evaluator(
+    data,
+    initial_values,
+    cache,
+    jax,
+    jnp,
+    led_log_offset_prior_sigma_log=production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+):
+    """Compile a tile-shaped residual/Jacobian that accepts dynamic tile data."""
+    from jax.flatten_util import ravel_pytree
+
+    variable_site_names = variable_sites(initial_values)
+    thickness_names, offset_names = production.reset_site_names(data)
+    template = {
+        name: np.asarray(initial_values[name], dtype=float).copy()
+        for name in variable_site_names
+    }
+    _, unravel = ravel_pytree(
+        {name: jnp.asarray(value) for name, value in template.items()}
+    )
+    grid = jnp.asarray(np.asarray(cache["grid_nm"], dtype=float))
+    days = jnp.asarray(data["days"])
+    node_days = jnp.asarray(data["node_days"])
+    led_index = jnp.asarray(np.asarray(data["led"], dtype=int) - 1, dtype=jnp.int32)
+    first_by_led = jnp.asarray(data["first_by_led"], dtype=jnp.int32)
+    group_index = jnp.arange(len(data["groups"]), dtype=jnp.int32)
+    reset_mask = jnp.asarray(
+        np.asarray(data["days"], dtype=float)[None, :]
+        >= production.reset_days_for_data(data)[:, None]
+    )
+    layout_data = {
+        "days": np.asarray(data["days"], dtype=float),
+        "node_days": np.asarray(data["node_days"], dtype=float),
+        "reset_day": float(data["reset_day"]),
+        "reset_days": production.reset_days_for_data(data),
+    }
+
+    def prediction(values, curves):
+        reset_initial = (
+            jnp.stack([values[name] for name in thickness_names[1:]], axis=0)
+            if len(thickness_names) > 2
+            else values[thickness_names[1]]
+        )
+        ice, _, _, _ = production._trajectory_state(
+            layout_data,
+            values["np_log_rate_nodes"],
+            values["initial_thickness_log_nm"],
+            reset_initial,
+            jax,
+            jnp,
+        )
+
+        def interpolate_by_led(thickness):
+            return jnp.stack(
+                [jnp.interp(thickness, grid, curves[led]) for led in range(6)]
+            )
+
+        current_by_led = interpolate_by_led(ice[0])
+        current = current_by_led[led_index, group_index]
+        baseline_thickness = ice[0, first_by_led][led_index]
+        baseline_by_led = interpolate_by_led(baseline_thickness)
+        baseline = baseline_by_led[led_index, group_index]
+        return current - baseline + _led_log_offset_values(data, values, jnp)[0]
 
     def residual_function(
         scaled_values,
@@ -779,9 +1378,11 @@ def build_ice_only_evaluator(data, initial_values, cache, jax, jnp):
         curves,
     ):
         values = unravel(flat_initial + flat_scales * scaled_values)
-        observed = sums / counts + (
-            values["post_reset_tile_log_offset"].reshape(-1, 1)
-            * reset_mask[None, :]
+        reset_offsets = jnp.stack(
+            [values[name].reshape(-1) for name in offset_names], axis=0
+        )
+        observed = sums / counts + jnp.sum(
+            reset_offsets[:, :, None] * reset_mask[:, None, :], axis=0
         )
         data_residual = (
             jnp.sqrt(1.0 / jnp.median(counts))
@@ -796,17 +1397,30 @@ def build_ice_only_evaluator(data, initial_values, cache, jax, jnp):
             ).reshape(-1)
             / production.INITIAL_THICKNESS_LOG_SIGMA,
             (
-                values["reset_initial_thickness_log_nm"]
-                - np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM)
-            ).reshape(-1)
-            / production.INITIAL_THICKNESS_LOG_SIGMA,
-            (
                 values["np_log_rate_nodes"] - rate_reference
             ).reshape(-1)
             / production.TRAJECTORY_RATE_PRIOR_SIGMA_LOG,
-            values["post_reset_tile_log_offset"].reshape(-1)
-            / production.POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA,
         ]
+        prior_residuals[1:1] = [
+            (
+                values[name]
+                - np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM)
+            ).reshape(-1)
+            / production.INITIAL_THICKNESS_LOG_SIGMA
+            for name in thickness_names[1:]
+        ]
+        prior_residuals.extend(
+            [
+                values[name].reshape(-1)
+                / production.POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA
+                for name in offset_names
+            ]
+        )
+        if "led_log_offsets" in values:
+            prior_residuals.append(
+                values["led_log_offsets"].reshape(-1)
+                / led_log_offset_prior_sigma_log
+            )
         return jnp.concatenate((data_residual, *prior_residuals))
 
     residual = jax.jit(residual_function)
@@ -814,27 +1428,39 @@ def build_ice_only_evaluator(data, initial_values, cache, jax, jnp):
     return {"residual": residual, "jacobian": jacobian, "unravel": unravel}
 
 
-def fit_ice_only_reusable(data, cache, initial_values, evaluator, jax, jnp):
+def fit_ice_only_reusable(
+    data,
+    cache,
+    initial_values,
+    evaluator,
+    jax,
+    jnp,
+    led_log_offset_prior_sigma_log=production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+):
     """Fit one tile using an evaluator compiled for reuse across same-shaped tiles."""
     from jax.flatten_util import ravel_pytree
     from scipy.optimize import least_squares
 
     rate_reference = rate_prior_reference(initial_values)
+    variable_site_names = variable_sites(initial_values)
     variable_initial = {
         name: np.asarray(initial_values[name], dtype=float).copy()
-        for name in VARIABLE_SITES
+        for name in variable_site_names
     }
     fixed_values = {
         name: np.asarray(value, dtype=float).copy()
         for name, value in initial_values.items()
-        if name not in VARIABLE_SITES
+        if name not in variable_site_names
     }
     flat_initial, unravel = ravel_pytree(
         {name: jnp.asarray(value) for name, value in variable_initial.items()}
     )
-    parameter_scales = production.map_parameter_scale_values(initial_values)
+    parameter_scales = production.map_parameter_scale_values(
+        initial_values,
+        led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+    )
     flat_scales, _ = ravel_pytree(
-        {name: jnp.asarray(parameter_scales[name]) for name in VARIABLE_SITES}
+        {name: jnp.asarray(parameter_scales[name]) for name in variable_site_names}
     )
     flat_initial = np.asarray(flat_initial, dtype=float)
     flat_scales = np.asarray(flat_scales, dtype=float)
@@ -913,9 +1539,18 @@ def fit_ice_only_reusable(data, cache, initial_values, evaluator, jax, jnp):
     }
 
 
-def fit_ice_only_batch(data_list, cache_list, initial_values_list, jax, jnp):
+def fit_ice_only_batch(
+    data_list,
+    cache_list,
+    initial_values_list,
+    jax,
+    jnp,
+    led_log_offset_prior_sigma_log=production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+):
     """Fit independent tiles together while batching JAX residual evaluations."""
     data = _stack_tile_data(data_list)
+    variable_site_names = variable_sites(initial_values_list[0])
+    thickness_names, offset_names = production.reset_site_names(data)
     grids = [np.asarray(cache["grid_nm"], dtype=float) for cache in cache_list]
     if not all(np.array_equal(grids[0], grid) for grid in grids[1:]):
         raise ValueError("Cannot batch response caches with different thickness grids")
@@ -925,18 +1560,28 @@ def fit_ice_only_batch(data_list, cache_list, initial_values_list, jax, jnp):
             [np.asarray(cache["relative_log_response"], dtype=float) for cache in cache_list]
         ),
     }
-    variable_initial = {
-        name: np.concatenate(
-            [
-                np.asarray(values[name], dtype=float).reshape(
-                    (-1,) + np.asarray(values[name]).shape[2:]
-                )
-                for values in initial_values_list
-            ],
-            axis=0,
-        )
-        for name in VARIABLE_SITES
-    }
+    variable_initial = {}
+    for name in variable_site_names:
+        if name == "led_log_offsets":
+            variable_initial[name] = np.concatenate(
+                [
+                    np.asarray(values[name], dtype=float).reshape(
+                        (-1, np.asarray(values[name]).shape[-1])
+                    )
+                    for values in initial_values_list
+                ],
+                axis=0,
+            )
+        else:
+            variable_initial[name] = np.concatenate(
+                [
+                    np.asarray(values[name], dtype=float).reshape(
+                        (-1,) + np.asarray(values[name]).shape[2:]
+                    )
+                    for values in initial_values_list
+                ],
+                axis=0,
+            )
     tile_count = len(initial_values_list)
     rate_reference = rate_prior_reference(variable_initial)
     initial_rate_nm_day = np.exp(
@@ -947,11 +1592,14 @@ def fit_ice_only_batch(data_list, cache_list, initial_values_list, jax, jnp):
     from scipy.optimize import least_squares
 
     flat_initial, unravel = ravel_pytree(
-        {name: jnp.asarray(variable_initial[name]) for name in VARIABLE_SITES}
+        {name: jnp.asarray(variable_initial[name]) for name in variable_site_names}
     )
-    parameter_scales = production.map_parameter_scale_values(variable_initial)
+    parameter_scales = production.map_parameter_scale_values(
+        variable_initial,
+        led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+    )
     flat_scales, _ = ravel_pytree(
-        {name: jnp.asarray(parameter_scales[name]) for name in VARIABLE_SITES}
+        {name: jnp.asarray(parameter_scales[name]) for name in variable_site_names}
     )
     flat_initial = np.asarray(flat_initial, dtype=float)
     flat_scales = np.asarray(flat_scales, dtype=float)
@@ -966,7 +1614,8 @@ def fit_ice_only_batch(data_list, cache_list, initial_values_list, jax, jnp):
     )
     likelihood_weights = jnp.asarray(likelihood_weights)
     reset_mask = jnp.asarray(
-        np.asarray(data["days"], dtype=float) >= float(data["reset_day"])
+        np.asarray(data["days"], dtype=float)[None, :]
+        >= production.reset_days_for_data(data)[:, None]
     )
     counts = jnp.asarray(data["counts"])
 
@@ -974,8 +1623,11 @@ def fit_ice_only_batch(data_list, cache_list, initial_values_list, jax, jnp):
         values = full_values(scaled_values)
         state = relative_state_batch(data, values, batch_cache, jax, jnp)
         observed = jnp.asarray(data["sums"]) / counts
-        observed = observed + (
-            values["post_reset_tile_log_offset"].reshape(-1, 1) * reset_mask
+        reset_offsets = jnp.stack(
+            [values[name].reshape(-1) for name in offset_names], axis=0
+        )
+        observed = observed + jnp.sum(
+            reset_offsets[:, :, None] * reset_mask[:, None, :], axis=0
         )
         data_residual = (
             jnp.sqrt(likelihood_weights[:, None])
@@ -987,17 +1639,35 @@ def fit_ice_only_batch(data_list, cache_list, initial_values_list, jax, jnp):
             values["initial_thickness_log_nm"]
             - np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM)
         ).reshape(-1, 1) / production.INITIAL_THICKNESS_LOG_SIGMA
-        reset_initial_residual = (
-            values["reset_initial_thickness_log_nm"]
-            - np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM)
-        ).reshape(-1, 1) / production.INITIAL_THICKNESS_LOG_SIGMA
+        reset_initial_residual = jnp.concatenate(
+            [
+                (
+                    values[name]
+                    - np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM)
+                ).reshape(-1, 1)
+                / production.INITIAL_THICKNESS_LOG_SIGMA
+                for name in thickness_names[1:]
+            ],
+            axis=1,
+        )
         rate_residual = (
             values["np_log_rate_nodes"] - jnp.asarray(rate_reference)
         ) / production.TRAJECTORY_RATE_PRIOR_SIGMA_LOG
-        offset_residual = (
-            values["post_reset_tile_log_offset"].reshape(-1, 1)
-            / production.POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA
+        offset_residual = jnp.concatenate(
+            [
+                values[name].reshape(-1, 1)
+                / production.POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA
+                for name in offset_names
+            ],
+            axis=1,
         )
+        if "led_log_offsets" in values:
+            led_offset_residual = values["led_log_offsets"] / led_log_offset_prior_sigma_log
+        else:
+            led_offset_residual = jnp.zeros(
+                (tile_count, 0),
+                dtype=data_residual.dtype,
+            )
         return jnp.concatenate(
             (
                 data_residual,
@@ -1005,6 +1675,7 @@ def fit_ice_only_batch(data_list, cache_list, initial_values_list, jax, jnp):
                 reset_initial_residual,
                 rate_residual,
                 offset_residual,
+                led_offset_residual,
             ),
             axis=1,
         )

@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+import fit_wfi_tmm_production as production
 from wfi_relative_response import (
     CACHE_VERSION,
     MODEL_PROVENANCE_FIELDS,
@@ -15,6 +16,8 @@ from wfi_relative_response import (
     validate_response_cache_provenance,
     write_response_cache,
     write_spectral_response_cache,
+    _prior_residuals,
+    _led_log_offset_values,
 )
 
 
@@ -245,3 +248,77 @@ def test_warm_values_use_current_rate_prior_not_source_trajectory(tmp_path, monk
     )
     np.testing.assert_allclose(values["ar_tile_raw"], 2.0)
     np.testing.assert_allclose(values["absolute_hgcdte_n_log_scale"], 0.1)
+
+
+def test_warm_values_override_third_decon_initial_thickness_start(tmp_path, monkeypatch):
+    initial = {
+        "ar_tile_raw": np.zeros(9),
+        "initial_thickness_log_nm": np.asarray([[np.log(10.0)]]),
+        "reset_initial_thickness_log_nm": np.asarray([[np.log(10.0)]]),
+        "third_decon_initial_thickness_log_nm": np.asarray([[np.log(10.0)]]),
+        "post_reset_tile_log_offset": np.zeros((1, 1)),
+        "post_third_decon_tile_log_offset": np.zeros((1, 1)),
+        "absolute_hgcdte_n_log_scale": np.zeros((1, 1)),
+        "absolute_hgcdte_k_log_scale": np.zeros((1, 1)),
+        "incidence_angle_deg": np.asarray(0.0),
+        "np_log_rate_nodes": np.zeros((1, 1, 3)),
+    }
+    monkeypatch.setattr(
+        "wfi_relative_response.production.initial_values_for_data",
+        lambda data, constant_rate=False: {
+            name: np.asarray(value).copy() for name, value in initial.items()
+        },
+    )
+    source = tmp_path / "source_fit.npz"
+    np.savez_compressed(
+        source,
+        ar_tile_raw=np.zeros(9),
+        absolute_hgcdte_n_log_scale=np.asarray([[0.1]]),
+        absolute_hgcdte_k_log_scale=np.asarray([[0.2]]),
+        incidence_angle_deg=np.asarray(0.0),
+        node_instantaneous_rate_nm_day=np.asarray([3.0, 4.0, 5.0]),
+    )
+    values = load_warm_values(
+        {"node_days": np.asarray([0.0, 1.0, 2.0])},
+        source,
+        tmp_path / "old_statistics.csv",
+        third_decon_initial_thickness_start_nm=40.0,
+    )
+    np.testing.assert_allclose(
+        values["third_decon_initial_thickness_log_nm"], np.log(40.0)
+    )
+
+
+def test_third_decon_relative_prior_includes_third_initial_thickness():
+    jax, jnp, _, _ = production.require_numpyro()
+    data = {
+        "days": np.arange(7.0),
+        "node_days": np.arange(7.0),
+        "reset_days": np.asarray([2.0, 5.0]),
+    }
+    values = {
+        "initial_thickness_log_nm": np.asarray([[np.log(10.0)]]),
+        "reset_initial_thickness_log_nm": np.asarray([[np.log(10.0)]]),
+        "third_decon_initial_thickness_log_nm": np.asarray([[np.log(10.0)]]),
+        "np_log_rate_nodes": np.zeros((1, 1, 7)),
+        "post_reset_tile_log_offset": np.zeros((1, 1)),
+        "post_third_decon_tile_log_offset": np.zeros((1, 1)),
+    }
+    residual = np.asarray(
+        _prior_residuals(data, values, np.zeros((1, 1, 7)), jnp)
+    )
+    assert residual.size == 12
+
+
+def test_led_offsets_apply_only_to_nonreference_groups():
+    import jax.numpy as jnp
+
+    data = {
+        "led": np.asarray([1, 2, 1, 2]),
+        "repeat": np.asarray([0, 0, 1, 2]),
+    }
+    values = {"led_log_offsets": np.asarray([[0.1, -0.2]])}
+    np.testing.assert_allclose(
+        np.asarray(_led_log_offset_values(data, values, jnp)),
+        [[0.0, 0.0, 0.1, -0.2]],
+    )

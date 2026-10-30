@@ -14,7 +14,11 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Rectangle
 import numpy as np
 
-from wfi_production_plot_annotations import latest_observation_label
+from wfi_production_plot_annotations import (
+    AOM_TEMPERATURE_BUMP_LABEL,
+    latest_observation_label,
+    load_time_annotations,
+)
 from wfi_production_layout import (
     DEFAULT_TILE_SIZE,
     complete_tile_ids,
@@ -44,11 +48,22 @@ TREND_METRICS = (
 )
 TREND_RATE_COLOR_LIMITS = (7.9, 10.9)
 RMS_METRICS = (("RMS residual", "rms_residual_millilog"),)
+AOM_JUMP_METRICS = (
+    ("Rate jump", "aom_rate_jump_nm_day"),
+    ("Percentage change", "aom_rate_jump_percent"),
+)
+AOM_JUMP_VMAX_PERCENTILE = 99.0
 LAST_48H_METRICS = (
     ("Mean accumulation rate, last 48 h", "last_48h_mean_rate_nm_day"),
 )
 CURRENT_THICKNESS_METRICS = (("Current ice thickness", "current_ice_thickness_nm"),)
 CURRENT_THICKNESS_VMAX_PERCENTILE = 99.0
+INITIAL_THICKNESS_METRICS = (
+    ("Before Decon2", "initial_thickness_nm"),
+    ("After Decon2", "reset_initial_thickness_nm"),
+    ("After third decon", "third_decon_initial_thickness_nm"),
+)
+INITIAL_THICKNESS_VMAX_PERCENTILE = 99.0
 
 # The Roman WFI layout is a staggered six-column by three-row mosaic.  The
 # offsets reproduce the smile-shaped focal plane shown in the Roman reference
@@ -113,6 +128,62 @@ def load_rate_map(path, expected_sca):
         # belongs here.
         maps[field] = values
     return maps
+
+
+def load_aom_rate_jump_map(output_dir, expected_sca, event_day):
+    """Load latest-post-AOM versus last-pre-AOM rate changes by tile."""
+    rows = load_tile_rows(Path(output_dir) / "tile_rate_posterior.csv", expected_sca)
+    if rows is None:
+        return None
+    row_tile_ids = [int(row["tile_id"]) for row in rows]
+    try:
+        tile_ids = complete_tile_ids(row_tile_ids)
+    except ValueError:
+        return None
+    fit_dirs = dict(tile_directory_entries(Path(output_dir) / "fits"))
+    tile_grid_size = int(len(tile_ids) ** 0.5)
+    jump_values = np.full((tile_grid_size, tile_grid_size), np.nan, dtype=float)
+    percent_values = np.full((tile_grid_size, tile_grid_size), np.nan, dtype=float)
+    for row in rows:
+        tile_id = int(row["tile_id"])
+        fit_dir = fit_dirs.get(tile_id)
+        if fit_dir is None:
+            return None
+        posterior_path = fit_dir / "posterior_samples.npz"
+        if not posterior_path.is_file():
+            return None
+        with np.load(posterior_path, allow_pickle=False) as samples:
+            days = np.asarray(samples["observation_days"], dtype=float).reshape(-1)
+            rates = np.asarray(
+                samples["tile_instantaneous_rate_nm_day"], dtype=float
+            ).reshape(-1)
+        if days.size != rates.size:
+            raise ValueError(f"Unexpected tile-rate shape in {posterior_path}")
+        finite = np.isfinite(days) & np.isfinite(rates)
+        if not np.any(finite):
+            return None
+        days = days[finite]
+        rates = rates[finite]
+        order = np.argsort(days)
+        days = days[order]
+        rates = rates[order]
+        before = np.flatnonzero(days < float(event_day))
+        after = np.flatnonzero(days > float(event_day))
+        if before.size == 0 or after.size == 0:
+            return None
+        pre_rate = rates[before[-1]]
+        post_rate = rates[after[-1]]
+        if not np.isfinite(pre_rate) or not np.isfinite(post_rate) or pre_rate == 0.0:
+            return None
+        jump = post_rate - pre_rate
+        tile_row = int(row["tile_row"])
+        tile_col = int(row["tile_col"])
+        jump_values[tile_row, tile_col] = jump
+        percent_values[tile_row, tile_col] = 100.0 * jump / abs(pre_rate)
+    return {
+        "aom_rate_jump_nm_day": jump_values,
+        "aom_rate_jump_percent": percent_values,
+    }
 
 
 def maxent_fit_set_complete(output_dir):
@@ -456,22 +527,90 @@ def load_current_ice_thickness_map(output_dir, expected_sca, tile_size):
     return {"current_ice_thickness_nm": values}
 
 
+def _archive_scalar(samples, names):
+    for name in names:
+        if name not in samples:
+            continue
+        values = np.asarray(samples[name], dtype=float).reshape(-1)
+        if values.size == 1 and np.isfinite(values[0]):
+            return float(values[0])
+    return None
+
+
+def load_initial_thickness_map(output_dir, expected_sca, tile_size):
+    """Load the three fitted initial-thickness stages for one detector."""
+    entries = tile_directory_entries(Path(output_dir) / "fits")
+    try:
+        complete_tile_ids(tile_id for tile_id, _path in entries)
+    except ValueError:
+        return None
+    tile_grid_size = tile_grid_size_for_tile_size(tile_size)
+    values = {
+        field: np.full((tile_grid_size, tile_grid_size), np.nan, dtype=float)
+        for _title, field in INITIAL_THICKNESS_METRICS
+    }
+    log_fields = {
+        "initial_thickness_nm": "initial_thickness_log_nm",
+        "reset_initial_thickness_nm": "reset_initial_thickness_log_nm",
+        "third_decon_initial_thickness_nm": "third_decon_initial_thickness_log_nm",
+    }
+    for tile_id, fit_dir in entries:
+        posterior_path = fit_dir / "posterior_samples.npz"
+        if not posterior_path.is_file():
+            return None
+        with np.load(posterior_path, allow_pickle=False) as samples:
+            for field, log_field in log_fields.items():
+                value = _archive_scalar(samples, (field,))
+                if value is None:
+                    log_value = _archive_scalar(samples, (log_field,))
+                    value = None if log_value is None else float(np.exp(log_value))
+                if value is not None:
+                    values[field][tile_id // tile_grid_size, tile_id % tile_grid_size] = value
+    return values if any(np.isfinite(value).any() for value in values.values()) else None
+
+
 def load_all_current_ice_thickness_maps(
     root,
     fit_suffix,
     tile_size=DEFAULT_TILE_SIZE,
     fit_subdir=None,
+    fit_root=None,
 ):
     maps = {}
     for sca in SCAS:
         output_dirs = detector_output_dirs(
-            root, sca, fit_suffix, tile_size, fit_subdir
+            root, sca, fit_suffix, tile_size, fit_subdir, fit_root
         )
         maps[sca] = next(
             (
                 thickness_map
                 for output_dir in output_dirs
                 if (thickness_map := load_current_ice_thickness_map(
+                    output_dir, sca, tile_size
+                )) is not None
+            ),
+            None,
+        )
+    return maps
+
+
+def load_all_initial_thickness_maps(
+    root,
+    fit_suffix,
+    tile_size=DEFAULT_TILE_SIZE,
+    fit_subdir=None,
+    fit_root=None,
+):
+    maps = {}
+    for sca in SCAS:
+        output_dirs = detector_output_dirs(
+            root, sca, fit_suffix, tile_size, fit_subdir, fit_root
+        )
+        maps[sca] = next(
+            (
+                thickness_map
+                for output_dir in output_dirs
+                if (thickness_map := load_initial_thickness_map(
                     output_dir, sca, tile_size
                 )) is not None
             ),
@@ -495,14 +634,35 @@ def percentile_color_limits(maps, field, upper_percentile):
     return lower, upper
 
 
+def initial_thickness_color_limits(maps, upper_percentile=INITIAL_THICKNESS_VMAX_PERCENTILE):
+    finite_values = [
+        values[field][np.isfinite(values[field])]
+        for values in maps.values()
+        if values is not None
+        for _title, field in INITIAL_THICKNESS_METRICS
+        if np.isfinite(values[field]).any()
+    ]
+    if not finite_values:
+        return 0.0, 1.0
+    finite_values = np.concatenate(finite_values)
+    lower = float(np.min(finite_values))
+    upper = float(np.percentile(finite_values, upper_percentile))
+    if not lower < upper:
+        upper = lower + 1.0
+    return lower, upper
+
+
 def detector_output_dirs(
     root,
     sca,
     fit_suffix,
     tile_size=DEFAULT_TILE_SIZE,
     fit_subdir=None,
+    fit_root=None,
 ):
     root = Path(root)
+    if fit_root is not None:
+        return (Path(fit_root) / sca.lower(),)
     if fit_suffix == DEFAULT_FIT_SUFFIX:
         output_dirs = (production_detector_output_root(root, sca, tile_size),)
     else:
@@ -522,11 +682,12 @@ def load_all_maps(
     maxent_only=False,
     tile_size=DEFAULT_TILE_SIZE,
     fit_subdir=None,
+    fit_root=None,
 ):
     maps = {}
     for sca in SCAS:
         output_dirs = detector_output_dirs(
-            root, sca, fit_suffix, tile_size, fit_subdir
+            root, sca, fit_suffix, tile_size, fit_subdir, fit_root
         )
         maps[sca] = next(
             (
@@ -541,18 +702,61 @@ def load_all_maps(
     return maps
 
 
+def _aom_event_day(statistics_path, expected_sca, tile_size):
+    paths = [
+        path
+        for path in _statistics_paths(Path(statistics_path), tile_size)
+        if path.name.lower().startswith(expected_sca.lower() + "_")
+    ]
+    if not paths:
+        return None
+    annotations = load_time_annotations(paths[0])
+    for event in annotations.events:
+        if event.label == AOM_TEMPERATURE_BUMP_LABEL:
+            return event.day
+    return None
+
+
+def load_all_aom_rate_jump_maps(
+    root,
+    fit_suffix,
+    tile_size=DEFAULT_TILE_SIZE,
+    fit_subdir=None,
+    fit_root=None,
+):
+    maps = {}
+    for sca in SCAS:
+        event_day = _aom_event_day(root, sca, tile_size)
+        output_dirs = detector_output_dirs(
+            root, sca, fit_suffix, tile_size, fit_subdir, fit_root
+        )
+        maps[sca] = next(
+            (
+                jump_map
+                for output_dir in output_dirs
+                if event_day is not None
+                if (jump_map := load_aom_rate_jump_map(
+                    output_dir, sca, event_day
+                )) is not None
+            ),
+            None,
+        )
+    return maps
+
+
 def load_all_reset_maps(
     root,
     fit_suffix,
     maxent_only=False,
     tile_size=DEFAULT_TILE_SIZE,
     fit_subdir=None,
+    fit_root=None,
 ):
     maps = {}
     reset_days = []
     for sca in SCAS:
         output_dirs = detector_output_dirs(
-            root, sca, fit_suffix, tile_size, fit_subdir
+            root, sca, fit_suffix, tile_size, fit_subdir, fit_root
         )
         loaded = next(
             (
@@ -579,12 +783,13 @@ def load_all_trend_maps(
     maxent_only=False,
     tile_size=DEFAULT_TILE_SIZE,
     fit_subdir=None,
+    fit_root=None,
 ):
     maps = {}
     reset_days = []
     for sca in SCAS:
         output_dirs = detector_output_dirs(
-            root, sca, fit_suffix, tile_size, fit_subdir
+            root, sca, fit_suffix, tile_size, fit_subdir, fit_root
         )
         loaded = next(
             (
@@ -611,11 +816,12 @@ def load_all_last_48h_maps(
     maxent_only=False,
     tile_size=DEFAULT_TILE_SIZE,
     fit_subdir=None,
+    fit_root=None,
 ):
     maps = {}
     for sca in SCAS:
         output_dirs = detector_output_dirs(
-            root, sca, fit_suffix, tile_size, fit_subdir
+            root, sca, fit_suffix, tile_size, fit_subdir, fit_root
         )
         maps[sca] = next(
             (
@@ -635,11 +841,12 @@ def load_all_rms_maps(
     maxent_only=False,
     tile_size=DEFAULT_TILE_SIZE,
     fit_subdir=None,
+    fit_root=None,
 ):
     maps = {}
     for sca in SCAS:
         output_dirs = detector_output_dirs(
-            root, sca, fit_suffix, tile_size, fit_subdir
+            root, sca, fit_suffix, tile_size, fit_subdir, fit_root
         )
         maps[sca] = next(
             (
@@ -715,12 +922,13 @@ def load_all_rate_histograms(
     maxent_only=False,
     tile_size=DEFAULT_TILE_SIZE,
     fit_subdir=None,
+    fit_root=None,
 ):
     histograms = {}
     reset_days = []
     for sca in SCAS:
         output_dirs = detector_output_dirs(
-            root, sca, fit_suffix, tile_size, fit_subdir
+            root, sca, fit_suffix, tile_size, fit_subdir, fit_root
         )
         loaded = next(
             (
@@ -968,10 +1176,22 @@ def draw_rate_mosaic(
     suptitle_fontsize=14,
     axis_title_fontsize=12,
     color_limits=None,
+    color_limits_by_field=None,
     colorbar_label=None,
+    colorbar_labels=None,
     metric_unit_label="nm/day",
+    metric_unit_labels=None,
 ):
-    available = [sca for sca in SCAS if maps[sca] is not None]
+    available_by_field = {
+        field: [
+            sca
+            for sca in SCAS
+            if maps[sca] is not None
+            and field in maps[sca]
+            and np.isfinite(maps[sca][field]).any()
+        ]
+        for _title, field in metrics
+    }
     figure, axes = plt.subplots(
         1,
         len(metrics),
@@ -981,16 +1201,29 @@ def draw_rate_mosaic(
     )
     axes = axes[0]
     if not local_contrast:
-        if color_limits is None:
-            all_values = np.concatenate(
-                [
-                    maps[sca][field][np.isfinite(maps[sca][field])]
-                    for sca in available
-                    for _, field in metrics
-                ]
-            )
-            global_min = float(np.min(all_values))
-            global_max = float(np.max(all_values))
+        if color_limits is not None and color_limits_by_field is not None:
+            raise ValueError("Specify color_limits or color_limits_by_field, not both")
+        if color_limits_by_field is not None:
+            limits_by_field = {}
+            for _title, field in metrics:
+                if field not in color_limits_by_field:
+                    raise ValueError(f"Missing color limits for {field}")
+                lower, upper = map(float, color_limits_by_field[field])
+                if not lower < upper:
+                    raise ValueError(f"color limits must increase for {field}")
+                limits_by_field[field] = (lower, upper)
+        elif color_limits is None:
+            all_values = [
+                maps[sca][field][np.isfinite(maps[sca][field])]
+                for _title, field in metrics
+                for sca in available_by_field[field]
+            ]
+            if all_values:
+                all_values = np.concatenate(all_values)
+                global_min = float(np.min(all_values))
+                global_max = float(np.max(all_values))
+            else:
+                global_min, global_max = 0.0, 1.0
             if global_min == global_max:
                 global_max = global_min + 1.0
         else:
@@ -999,6 +1232,7 @@ def draw_rate_mosaic(
                 raise ValueError("color_limits must be an increasing pair")
 
     for axis, (title, field) in zip(axes, metrics):
+        available = available_by_field[field]
         plotted = {}
         if local_contrast:
             for sca in available:
@@ -1008,6 +1242,9 @@ def draw_rate_mosaic(
                 vmax = float(np.max(finite))
                 plotted[sca] = np.zeros_like(values) + 0.5 if vmin == vmax else (values - vmin) / (vmax - vmin)
             color_min, color_max = 0.0, 1.0
+        elif color_limits_by_field is not None:
+            color_min, color_max = limits_by_field[field]
+            plotted = {sca: maps[sca][field] for sca in available}
         else:
             color_min = global_min
             color_max = global_max
@@ -1015,7 +1252,7 @@ def draw_rate_mosaic(
         image = None
         for sca in SCAS:
             x, y = sca_position(sca)
-            if maps[sca] is None:
+            if sca not in available:
                 axis.add_patch(
                     Rectangle(
                         (x, y),
@@ -1084,11 +1321,12 @@ def draw_rate_mosaic(
                     linewidth=0.35,
                 )
         if image is not None:
-            label = (
-                "Within-SCA relative rate (min to max)"
-                if local_contrast
-                else colorbar_label or "nm/day"
-            )
+            if local_contrast:
+                label = "Within-SCA relative rate (min to max)"
+            elif colorbar_labels is not None:
+                label = colorbar_labels.get(field, colorbar_label or "nm/day")
+            else:
+                label = colorbar_label or "nm/day"
             figure.colorbar(image, ax=axis, fraction=0.035, pad=0.02, label=label)
         axis.set_aspect("equal")
         axis.set_xlim(-1.0, SCA_PITCH * 6 - 1.0)
@@ -1097,12 +1335,16 @@ def draw_rate_mosaic(
         axis.set_ylim(min_y, max_y)
         axis.set_xticks([])
         axis.set_yticks([])
-        axis.set_title(
-            f"{title} (within-SCA contrast)"
-            if local_contrast
-            else f"{title} ({metric_unit_label})",
-            fontsize=axis_title_fontsize,
-        )
+        if local_contrast:
+            axis_title = f"{title} (within-SCA contrast)"
+        else:
+            unit = (
+                metric_unit_labels.get(field, metric_unit_label)
+                if metric_unit_labels is not None
+                else metric_unit_label
+            )
+            axis_title = f"{title} ({unit})" if unit else title
+        axis.set_title(axis_title, fontsize=axis_title_fontsize)
         axis.set_xlabel("Roman WFI focal-plane mosaic")
         center_x = SCA_PITCH * 3 - 0.5
         center_y = SCA_PITCH * 2 + COLUMN_Y_OFFSET[2] + 1.2
@@ -1148,12 +1390,27 @@ def parse_args():
         help="Read fits from a subdirectory below each detector output root.",
     )
     parser.add_argument(
+        "--fit-root",
+        type=Path,
+        default=None,
+        help="Directory containing detector subdirectories for an isolated fit tree.",
+    )
+    parser.add_argument(
         "--tile-statistics",
         type=Path,
         default=None,
         help="Statistics CSV or directory used to derive the latest pass label.",
     )
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--aom-rate-jump-output",
+        type=Path,
+        default=None,
+        help=(
+            "Also write a focal-plane map of latest post-AOM versus last "
+            "pre-AOM rate changes in percent."
+        ),
+    )
     parser.add_argument(
         "--maxent-only",
         action="store_true",
@@ -1170,51 +1427,70 @@ def parse_args():
 
 def main():
     args = parse_args()
-    output = args.output or (
-        production_output_root(args.root, args.tile_size)
-        / (args.fit_subdir if args.fit_subdir is not None else Path())
-        / "wfi_full_focal_plane_rate_maps.png"
+    if args.fit_root is not None and args.fit_subdir is not None:
+        raise ValueError("--fit-root and --fit-subdir cannot be combined")
+    fit_root = args.fit_root.resolve() if args.fit_root is not None else None
+    fit_subdir = args.fit_subdir
+    output_root = (
+        fit_root
+        if fit_root is not None
+        else production_output_root(args.root, args.tile_size)
+        / (fit_subdir if fit_subdir is not None else Path())
     )
+    output = args.output or output_root / "wfi_full_focal_plane_rate_maps.png"
     maps = load_all_maps(
         args.root,
         args.fit_suffix,
         args.maxent_only,
         args.tile_size,
-        args.fit_subdir,
+        fit_subdir,
+        fit_root,
     )
     current_thickness_maps = load_all_current_ice_thickness_maps(
         args.root,
         args.fit_suffix,
         args.tile_size,
-        args.fit_subdir,
+        fit_subdir,
+        fit_root,
+    )
+    initial_thickness_maps = load_all_initial_thickness_maps(
+        args.root,
+        args.fit_suffix,
+        args.tile_size,
+        fit_subdir,
+        fit_root,
     )
     reset_maps, reset_day = load_all_reset_maps(
         args.root,
         args.fit_suffix,
         args.maxent_only,
         args.tile_size,
-        args.fit_subdir,
+        fit_subdir,
+        fit_root,
     )
     trend_maps, trend_day = load_all_trend_maps(
         args.root,
         args.fit_suffix,
         args.maxent_only,
         args.tile_size,
-        args.fit_subdir,
+        fit_subdir,
+        fit_root,
     )
     last_48h_maps = load_all_last_48h_maps(
         args.root,
         args.fit_suffix,
         args.maxent_only,
         args.tile_size,
-        args.fit_subdir,
+        fit_subdir,
+        fit_root,
     )
     rms_maps = load_all_rms_maps(
         args.root,
         args.fit_suffix,
         args.maxent_only,
         args.tile_size,
-        args.fit_subdir,
+        fit_subdir,
+        fit_root,
     )
     statistics_path = args.tile_statistics
     if statistics_path is None:
@@ -1224,7 +1500,9 @@ def main():
     pass_label = latest_pass_label(statistics_path, args.tile_size)
     date_label = latest_statistics_date(statistics_path, args.tile_size)
     observation_label = latest_observation_label(statistics_path, args.tile_size)
-    if args.fit_subdir is not None:
+    if fit_root is not None:
+        model_label = "isolated independent per-tile production fits"
+    elif fit_subdir is not None:
         model_label = "cached fixed-optics independent ice-only fits"
     elif args.fit_suffix == DEFAULT_FIT_SUFFIX:
         model_label = (
@@ -1248,6 +1526,67 @@ def main():
         pass_label,
         observation_label=observation_label,
     )
+    if args.aom_rate_jump_output is not None:
+        aom_jump_maps = load_all_aom_rate_jump_maps(
+            args.root,
+            args.fit_suffix,
+            args.tile_size,
+            fit_subdir,
+            fit_root,
+        )
+        if any(value is not None for value in aom_jump_maps.values()):
+            draw_rate_mosaic(
+                args.aom_rate_jump_output,
+                aom_jump_maps,
+                model_label,
+                pass_label,
+                metrics=AOM_JUMP_METRICS,
+                title_prefix="AOM rate change after 01:43 UTC bump",
+                observation_label=observation_label,
+                color_limits_by_field={
+                    field: percentile_color_limits(
+                        aom_jump_maps, field, AOM_JUMP_VMAX_PERCENTILE
+                    )
+                    for _title, field in AOM_JUMP_METRICS
+                },
+                colorbar_labels={
+                    "aom_rate_jump_nm_day": (
+                        "Rate jump (nm/day; "
+                        f"vmax={AOM_JUMP_VMAX_PERCENTILE:g}th percentile)"
+                    ),
+                    "aom_rate_jump_percent": (
+                        "Rate change (%; "
+                        f"vmax={AOM_JUMP_VMAX_PERCENTILE:g}th percentile)"
+                    ),
+                },
+                metric_unit_labels={
+                    "aom_rate_jump_nm_day": "nm/day",
+                    "aom_rate_jump_percent": "%",
+                },
+                suptitle_fontsize=9,
+                axis_title_fontsize=9,
+            )
+            print(f"Wrote {args.aom_rate_jump_output}")
+        else:
+            print("No complete AOM rate-jump maps found")
+    initial_thickness_output = output.with_name(
+        "wfi_full_focal_plane_initial_thicknesses.png"
+    )
+    draw_rate_mosaic(
+        initial_thickness_output,
+        initial_thickness_maps,
+        model_label,
+        pass_label,
+        metrics=INITIAL_THICKNESS_METRICS,
+        title_prefix="Initial ice thickness by decon stage",
+        observation_label=observation_label,
+        color_limits=initial_thickness_color_limits(initial_thickness_maps),
+        colorbar_label="Initial ice thickness (nm)",
+        metric_unit_label="nm",
+        suptitle_fontsize=10,
+        axis_title_fontsize=10,
+    )
+    print(f"Wrote {initial_thickness_output}")
     contrast_output = output.with_name(output.stem + "_tile_contrast.png")
     draw_rate_mosaic(
         contrast_output,
@@ -1293,7 +1632,8 @@ def main():
         args.fit_suffix,
         args.maxent_only,
         args.tile_size,
-        args.fit_subdir,
+        fit_subdir,
+        fit_root,
     )
     if histogram_reset_day is not None:
         histogram_output = output.with_name(

@@ -13,13 +13,19 @@ from wfi_relative_response import (
     PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY,
     context_fingerprint,
     build_ice_only_evaluator,
+    build_ice_only_constant_rate_evaluator,
     fit_ice_only,
     fit_ice_only_batch,
+    fit_ice_only_constant_rate_reusable,
     fit_ice_only_reusable,
     load_response_cache,
     load_warm_values,
     relative_state,
 )
+
+
+DEFAULT_WARMUP_THICKNESS_PRIOR_LOG_SIGMA = 0.10
+DEFAULT_WARMUP_THICKNESS_PRIOR_STAGES = "third-decon"
 
 
 def parse_args():
@@ -29,7 +35,59 @@ def parse_args():
     parser.add_argument("--initial-fit", type=Path, required=True)
     parser.add_argument("--initial-statistics", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--third-decon-day", type=float, default=None)
+    parser.add_argument(
+        "--third-decon-initial-thickness-start-nm",
+        type=float,
+        default=None,
+        help="Override the post-third-decon thickness warm start in nm.",
+    )
+    parser.add_argument("--fit-led-log-offsets", action="store_true")
+    parser.add_argument(
+        "--led-log-offset-prior-sigma-log",
+        type=float,
+        default=production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+    )
+    parser.add_argument(
+        "--warmup-prior-root",
+        type=Path,
+        default=None,
+        help="Constant-rate warmup directory containing fits/tile_### archives.",
+    )
+    parser.add_argument("--thickness-prior-log-sigma", type=float, default=None)
+    parser.add_argument(
+        "--thickness-prior-stages",
+        choices=("all", "third-decon"),
+        default=None,
+    )
     return parser.parse_args()
+
+
+def resolve_warmup_prior_settings(
+    third_decon_day,
+    warmup_prior_root,
+    thickness_prior_log_sigma,
+    thickness_prior_stages,
+):
+    """Resolve the warmup-prior defaults without choosing a reset boundary."""
+    if warmup_prior_root is None:
+        if thickness_prior_log_sigma is not None or thickness_prior_stages is not None:
+            raise ValueError("Thickness prior settings require warmup_prior_root")
+        return None, None, None
+    if third_decon_day is None:
+        raise ValueError(
+            "Warmup-centered thickness priors require an explicit third_decon_day"
+        )
+    if thickness_prior_log_sigma is None:
+        thickness_prior_log_sigma = DEFAULT_WARMUP_THICKNESS_PRIOR_LOG_SIGMA
+    thickness_prior_log_sigma = float(thickness_prior_log_sigma)
+    if not np.isfinite(thickness_prior_log_sigma) or thickness_prior_log_sigma <= 0.0:
+        raise ValueError("Thickness prior log sigma must be positive and finite")
+    if thickness_prior_stages is None:
+        thickness_prior_stages = DEFAULT_WARMUP_THICKNESS_PRIOR_STAGES
+    if thickness_prior_stages not in ("all", "third-decon"):
+        raise ValueError("Thickness prior stages must be 'all' or 'third-decon'")
+    return Path(warmup_prior_root), thickness_prior_log_sigma, thickness_prior_stages
 
 
 def statistics_fingerprint(statistics_path):
@@ -48,12 +106,71 @@ def statistics_fingerprint(statistics_path):
     return digest.hexdigest()
 
 
-def write_outputs(output_dir, data, values, state, diagnostics, cache_path, jax, jnp):
+def warmup_thickness_prior(
+    warmup_root,
+    tile_id,
+    data,
+    prior_sigma_log,
+    prior_stages,
+):
+    """Load a per-tile thickness prior center from a constant-rate warmup."""
+    if prior_stages not in ("all", "third-decon"):
+        raise ValueError("prior_stages must be 'all' or 'third-decon'")
+    if not np.isfinite(prior_sigma_log) or prior_sigma_log <= 0.0:
+        raise ValueError("prior_sigma_log must be positive and finite")
+    archive_path = (
+        Path(warmup_root)
+        / "fits"
+        / f"tile_{int(tile_id):03d}"
+        / "constant_rate_map.npz"
+    )
+    if not archive_path.is_file():
+        raise FileNotFoundError(archive_path)
+    thickness_names, _ = production.reset_site_names(data)
+    centers = {}
+    sigmas = {}
+    with np.load(archive_path, allow_pickle=False) as archive:
+        for name in thickness_names:
+            if prior_stages == "third-decon" and name != "third_decon_initial_thickness_log_nm":
+                centers[name] = np.asarray(
+                    np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM)
+                )
+                sigmas[name] = production.INITIAL_THICKNESS_LOG_SIGMA
+                continue
+            if name not in archive:
+                raise ValueError(f"Warmup archive lacks {name}: {archive_path}")
+            centers[name] = np.asarray(archive[name], dtype=float).copy()
+            sigmas[name] = prior_sigma_log
+    return centers, sigmas
+
+
+def write_outputs(
+    output_dir,
+    data,
+    values,
+    state,
+    diagnostics,
+    cache_path,
+    jax,
+    jnp,
+    fit_led_log_offsets=False,
+    led_log_offset_prior_sigma_log=production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+    third_decon_initial_thickness_start_nm=None,
+    constant_rate_warmup_diagnostics=None,
+    fit_mode="relative_response_production",
+    thickness_prior_log_sigma=None,
+    thickness_prior_stages=None,
+    warmup_prior_root=None,
+):
     output_dir.mkdir(parents=True, exist_ok=True)
     observed = np.asarray(data["sums"], dtype=float) / np.asarray(data["counts"], dtype=float)
-    observed += np.asarray(values["post_reset_tile_log_offset"]).reshape(-1, 1) * (
-        np.asarray(data["days"])[None, :] >= float(data["reset_day"])
+    _, offset_names = production.reset_site_names(data)
+    reset_days = production.reset_days_for_data(data)
+    reset_masks = np.asarray(data["days"], dtype=float)[None, :] >= reset_days[:, None]
+    reset_offsets = np.stack(
+        [np.asarray(values[name]).reshape(-1) for name in offset_names], axis=0
     )
+    observed += np.sum(reset_offsets[:, :, None] * reset_masks[:, None, :], axis=0)
     prediction = np.asarray(state["prediction"], dtype=float)
     residual = observed - prediction
     with (output_dir / "tile_group_predictions.csv").open("w", newline="") as handle:
@@ -100,8 +217,7 @@ def write_outputs(output_dir, data, values, state, diagnostics, cache_path, jax,
     detector = str(np.asarray(data["sca_names"]).reshape(-1)[0])
     tile_metadata = data["metadata"][tile_id]
     node_multipliers = np.ones_like(node_rates)
-    np.savez_compressed(
-        output_dir / "posterior_samples.npz",
+    archive_values = dict(
         map_only=np.asarray(1),
         tile_ids=np.asarray(data["tile_ids"], dtype=int),
         sca_names=np.asarray(data["sca_names"]).astype(str),
@@ -122,12 +238,12 @@ def write_outputs(output_dir, data, values, state, diagnostics, cache_path, jax,
         np_node_thickness=node_ice[None, None, :],
         node_instantaneous_rate_nm_day=node_rates[None, None, :],
         response_cache=np.asarray(str(cache_path.resolve())),
-        fit_mode=np.asarray("relative_response_production"),
+        fit_mode=np.asarray(str(fit_mode)),
         statistics_fingerprint=np.asarray(statistics_fingerprint(data["statistics_path"])),
         statistics_path=np.asarray(str(Path(data["statistics_path"]).resolve())),
         observation_program=np.asarray(data["program"], dtype=int),
         groups=np.asarray(data["groups"], dtype=int),
-        ice_reset_day=np.asarray(float(data["reset_day"])),
+        ice_reset_day=np.asarray(float(reset_days[0])),
         fit_incidence_angle=np.asarray(0),
         fully_np_trajectory=np.asarray(1),
         map_objective_history=np.asarray(
@@ -149,7 +265,65 @@ def write_outputs(output_dir, data, values, state, diagnostics, cache_path, jax,
         map_steps=np.asarray(production.PRODUCTION_MAP_STEPS),
         map_parameter_scaling=np.asarray("prior"),
         ar_parameters=ar_parameters.reshape(1, 1, 1, -1),
+        fit_led_log_offsets=np.asarray(bool(fit_led_log_offsets)),
+        led_log_offset_prior_sigma_log=np.asarray(
+            float(led_log_offset_prior_sigma_log)
+        ),
+        constant_rate_map_warmup=np.asarray(
+            int(constant_rate_warmup_diagnostics is not None)
+        ),
     )
+    if thickness_prior_log_sigma is not None:
+        archive_values["thickness_prior_log_sigma"] = np.asarray(
+            float(thickness_prior_log_sigma)
+        )
+    if thickness_prior_stages is not None:
+        archive_values["thickness_prior_stages"] = np.asarray(str(thickness_prior_stages))
+    if warmup_prior_root is not None:
+        archive_values["warmup_prior_root"] = np.asarray(
+            str(Path(warmup_prior_root).resolve())
+        )
+    if constant_rate_warmup_diagnostics is not None:
+        archive_values.update(
+            {
+                "constant_rate_map_rate_nm_day": np.asarray(
+                    constant_rate_warmup_diagnostics[
+                        "constant_rate_map_rate_nm_day"
+                    ]
+                ),
+                "constant_rate_map_objective": np.asarray(
+                    constant_rate_warmup_diagnostics["residual_cost"]
+                ),
+                "constant_rate_map_initial_objective": np.asarray(
+                    constant_rate_warmup_diagnostics["initial_residual_cost"]
+                ),
+                "constant_rate_map_nfev": np.asarray(
+                    constant_rate_warmup_diagnostics["nfev"]
+                ),
+            }
+        )
+    if fit_led_log_offsets:
+        archive_values["led_log_offsets"] = np.asarray(
+            values["led_log_offsets"], dtype=float
+        )
+    if reset_days.size > 1:
+        archive_values.update(
+            {
+                "ice_reset_days": np.asarray(reset_days, dtype=float),
+                "third_decon_day": np.asarray(float(reset_days[1])),
+                "third_decon_initial_thickness_log_nm": np.asarray(
+                    values["third_decon_initial_thickness_log_nm"]
+                ),
+                "post_third_decon_tile_log_offset": np.asarray(
+                    values["post_third_decon_tile_log_offset"]
+                ),
+            }
+        )
+        if third_decon_initial_thickness_start_nm is not None:
+            archive_values["third_decon_initial_thickness_start_nm"] = np.asarray(
+                float(third_decon_initial_thickness_start_nm)
+            )
+    np.savez_compressed(output_dir / "posterior_samples.npz", **archive_values)
 
     ar_fields = ["detector", "tile_id", "tile_row", "tile_col"]
     for layer in range(production.AR_LAYERS):
@@ -176,16 +350,23 @@ def write_outputs(output_dir, data, values, state, diagnostics, cache_path, jax,
     valid[np.asarray(data["first_by_led"], dtype=int)] = False
     residual_values = residual[0, valid]
     node_days = np.asarray(data["node_days"], dtype=float)
-    reset_day = float(data["reset_day"])
-    pre_indices = np.flatnonzero(node_days < reset_day)
-    post_indices = np.flatnonzero(node_days >= reset_day)
-    pre_accumulation = node_ice[pre_indices[-1]] - node_ice[pre_indices[0]]
-    post_accumulation = node_ice[post_indices[-1]] - node_ice[post_indices[0]]
-    pre_duration = reset_day - float(np.min(days))
-    post_duration = float(np.max(days)) - reset_day
-    mean_rate = float(
-        (pre_accumulation + post_accumulation) / (pre_duration + post_duration)
-    )
+    active_reset_days = reset_days[
+        (reset_days > np.min(days)) & (reset_days < np.max(days))
+    ]
+    boundaries = np.concatenate(([np.min(days)], active_reset_days, [np.max(days)]))
+    accumulations = []
+    for index in range(boundaries.size - 1):
+        left, right = boundaries[index : index + 2]
+        mask = (
+            (node_days >= left) & (node_days <= right)
+            if index == boundaries.size - 2
+            else (node_days >= left) & (node_days < right)
+        )
+        indices = np.flatnonzero(mask)
+        if indices.size < 2:
+            raise ValueError("Relative-response trajectory lacks nodes in a reset segment")
+        accumulations.append(node_ice[indices[-1]] - node_ice[indices[0]])
+    mean_rate = float(np.sum(accumulations) / np.sum(np.diff(boundaries)))
     initial_rate = float(rates[0])
     final_rate = float(rates[-1])
     rate_row = {
@@ -234,6 +415,7 @@ def write_outputs(output_dir, data, values, state, diagnostics, cache_path, jax,
             "# Relative-response production fit",
             "",
             f"- Statistics: `{Path(data['statistics_path']).resolve() if 'statistics_path' in data else 'input statistics'}`.",
+            f"- Fit mode: `{fit_mode}`.",
             f"- Response cache: `{cache_path.resolve()}`.",
             f"- Evaluations: `{diagnostics['nfev']}`.",
             f"- Converged: `{diagnostics['converged']}`.",
@@ -242,10 +424,53 @@ def write_outputs(output_dir, data, values, state, diagnostics, cache_path, jax,
             f"- Residual RMS excluding LED reference groups: `{np.sqrt(np.mean(residual_values**2)):.12g}` log.",
             f"- Maximum absolute residual excluding LED reference groups: `{np.max(np.abs(residual_values)):.12g}` log.",
             f"- Warm-start rate: `{diagnostics['trajectory_rate_initialization_nm_day']:.12g}` nm/day.",
+            *(
+                (
+                    "- Constant-rate warm-up: `True`.",
+                    f"- Constant-rate warm-up rate: `{constant_rate_warmup_diagnostics['constant_rate_map_rate_nm_day']:.12g}` nm/day.",
+                    f"- Constant-rate warm-up objective: `{constant_rate_warmup_diagnostics['residual_cost']:.12g}`.",
+                )
+                if constant_rate_warmup_diagnostics is not None
+                else ("- Constant-rate warm-up: `False`.",)
+            ),
             f"- Final rate: `{rates[-1]:.12g}` nm/day.",
             f"- Mean rate: `{mean_rate:.12g}` nm/day.",
+            f"- Physical reset days: `{reset_days.tolist()}`.",
+            *(
+                (
+                    f"- Third-decon initial thickness start: "
+                    f"`{float(third_decon_initial_thickness_start_nm):.12g}` nm.",
+                )
+                if third_decon_initial_thickness_start_nm is not None
+                else ()
+            ),
             f"- Trajectory prior: `{PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY}` nm/day, log sigma `{production.TRAJECTORY_RATE_PRIOR_SIGMA_LOG}`.",
             f"- Trajectory entropy weight: `{PRODUCTION_ENTROPY_WEIGHT}`.",
+            f"- LED log offsets fitted: `{bool(fit_led_log_offsets)}`.",
+            *(
+                (
+                    f"- Warmup-centered thickness prior log sigma: `{float(thickness_prior_log_sigma):.12g}`.",
+                    f"- Warmup-centered thickness prior stages: `{thickness_prior_stages}`.",
+                )
+                if thickness_prior_log_sigma is not None
+                else ()
+            ),
+            *(
+                (
+                    f"- Warmup-centered thickness prior root: "
+                    f"`{Path(warmup_prior_root).resolve()}`.",
+                )
+                if warmup_prior_root is not None
+                else ()
+            ),
+            *(
+                (
+                    f"- LED log-offset prior log sigma: `{float(led_log_offset_prior_sigma_log):.12g}`.",
+                    f"- LED log offsets: `{np.asarray(values['led_log_offsets'], dtype=float).reshape(-1).tolist()}`.",
+                )
+                if fit_led_log_offsets
+                else ()
+            ),
             "",
         ]
     )
@@ -259,13 +484,33 @@ def fit_one(
     initial_statistics,
     output_dir,
     trajectory_rate_initialization_nm_day=PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY,
+    third_decon_day=None,
+    fit_led_log_offsets=False,
+    led_log_offset_prior_sigma_log=production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+    third_decon_initial_thickness_start_nm=None,
+    warmup_prior_root=None,
+    thickness_prior_log_sigma=None,
+    thickness_prior_stages=None,
 ):
     """Fit one tile from a cached response and a previous tile fit."""
+    (
+        warmup_prior_root,
+        thickness_prior_log_sigma,
+        thickness_prior_stages,
+    ) = resolve_warmup_prior_settings(
+        third_decon_day,
+        warmup_prior_root,
+        thickness_prior_log_sigma,
+        thickness_prior_stages,
+    )
     jax, jnp, _, _ = production.require_numpyro()
     jax.config.update("jax_enable_x64", True)
     statistics_path = Path(statistics_path)
     response_cache_path = Path(response_cache_path)
-    data = production.load_tile_statistics(statistics_path)
+    data = production.load_tile_statistics(
+        statistics_path,
+        third_decon_day=third_decon_day,
+    )
     data["statistics_path"] = str(statistics_path)
     context = production.load_response_context(data["sca_names"])
     data["qe_columns"] = context["qe_columns"]
@@ -277,8 +522,61 @@ def fit_one(
         initial_fit,
         initial_statistics,
         trajectory_rate_initialization_nm_day=trajectory_rate_initialization_nm_day,
+        fit_led_log_offsets=fit_led_log_offsets,
+        third_decon_initial_thickness_start_nm=third_decon_initial_thickness_start_nm,
     )
-    values, diagnostics = fit_ice_only(data, cache, values, jax, jnp)
+    warmup_evaluator = build_ice_only_constant_rate_evaluator(
+        data,
+        values,
+        cache,
+        jax,
+        jnp,
+        led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+    )
+    values, warmup_diagnostics = fit_ice_only_constant_rate_reusable(
+        data,
+        cache,
+        values,
+        warmup_evaluator,
+        jax,
+        jnp,
+        led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+    )
+    warmup_thickness_centers = None
+    warmup_thickness_sigmas = None
+    if warmup_prior_root is not None:
+        if thickness_prior_log_sigma is None or thickness_prior_stages is None:
+            raise ValueError(
+                "warmup_prior_root requires thickness_prior_log_sigma and "
+                "thickness_prior_stages"
+            )
+        warmup_thickness_centers, warmup_thickness_sigmas = warmup_thickness_prior(
+            warmup_prior_root,
+            int(np.asarray(data["tile_ids"]).reshape(-1)[0]),
+            data,
+            float(thickness_prior_log_sigma),
+            thickness_prior_stages,
+        )
+    elif thickness_prior_log_sigma is not None or thickness_prior_stages is not None:
+        raise ValueError(
+            "thickness prior settings require warmup_prior_root"
+        )
+    values, diagnostics = fit_ice_only(
+        data,
+        cache,
+        values,
+        jax,
+        jnp,
+        led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+        **(
+            {
+                "thickness_prior_log_centers": warmup_thickness_centers,
+                "thickness_prior_log_sigma": warmup_thickness_sigmas,
+            }
+            if warmup_prior_root is not None
+            else {}
+        ),
+    )
     state = relative_state(data, values, cache, jax, jnp)
     write_outputs(
         output_dir,
@@ -289,6 +587,18 @@ def fit_one(
         response_cache_path,
         jax,
         jnp,
+        fit_led_log_offsets=fit_led_log_offsets,
+        led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+        third_decon_initial_thickness_start_nm=third_decon_initial_thickness_start_nm,
+        constant_rate_warmup_diagnostics=warmup_diagnostics,
+        fit_mode=(
+            "relative_response_warmup_centered_thickness_prior"
+            if warmup_prior_root is not None
+            else "relative_response_production"
+        ),
+        thickness_prior_log_sigma=thickness_prior_log_sigma,
+        thickness_prior_stages=thickness_prior_stages,
+        warmup_prior_root=warmup_prior_root,
     )
     print(f"Wrote relative-response fit under {output_dir}", flush=True)
     print(
@@ -308,6 +618,13 @@ def main():
         args.initial_fit,
         args.initial_statistics,
         args.output_dir,
+        third_decon_day=args.third_decon_day,
+        fit_led_log_offsets=args.fit_led_log_offsets,
+        led_log_offset_prior_sigma_log=args.led_log_offset_prior_sigma_log,
+        third_decon_initial_thickness_start_nm=args.third_decon_initial_thickness_start_nm,
+        warmup_prior_root=args.warmup_prior_root,
+        thickness_prior_log_sigma=args.thickness_prior_log_sigma,
+        thickness_prior_stages=args.thickness_prior_stages,
     )
 
 

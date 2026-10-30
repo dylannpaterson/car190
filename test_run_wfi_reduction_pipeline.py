@@ -74,11 +74,77 @@ class ReductionPipelineTests(unittest.TestCase):
             pipeline.parse_args(["--tile-size", "256"]).tile_size,
             256,
         )
+        self.assertEqual(
+            pipeline.parse_args(
+                ["--reuse-corrections-from", "/tmp/previous-run"]
+            ).reuse_corrections_from,
+            Path("/tmp/previous-run"),
+        )
         self.assertIsNone(pipeline.parse_args([]).detector)
         with self.assertRaises(SystemExit):
             pipeline.parse_args(["--detector", "WFI99"])
         with self.assertRaises(SystemExit):
             pipeline.parse_args(["--workers", "0"])
+
+    def test_correction_input_fingerprint_excludes_photodiode_values(self):
+        records = [
+            {
+                "file_set_name": "product",
+                "baseline_file_set_name": "baseline",
+                "detector": "WFI01",
+                "source": "s3",
+                "source_signature": "1:etag:time",
+                "cal_uri": "s3://example/product",
+                "epoch_key": "epoch",
+                "file_name": "product.asdf",
+                "path": None,
+            }
+        ]
+        observations = [
+            {
+                "file_set_name": "product",
+                "baseline_file_set_name": "baseline",
+                "detector": "WFI01",
+                "program": "1039",
+                "led": 1,
+                "epoch_key": "epoch",
+                "repeat": 0,
+                "exposure_start_time": "2026-01-01T00:00:00Z",
+                "exposure_end_time": "2026-01-01T00:01:00Z",
+                "days": 0.0,
+                "baseline_file_set_name": "product",
+                "photodiode_scale": 1.0,
+                "photodiode_mean": 2.0,
+            }
+        ]
+        first = pipeline.correction_input_fingerprint(records, observations)
+        observations[0]["photodiode_scale"] = 1.25
+        observations[0]["photodiode_mean"] = 1.6
+        self.assertEqual(first, pipeline.correction_input_fingerprint(records, observations))
+        with tempfile.TemporaryDirectory() as directory:
+            inventory = Path(directory) / "wfi01_rrn_inventory.csv"
+            pipeline.write_inventory(inventory, records, observations)
+            self.assertEqual(
+                first,
+                pipeline.correction_input_fingerprint_from_inventory(inventory),
+            )
+        records[0]["source_signature"] = "2:etag:time"
+        self.assertNotEqual(first, pipeline.correction_input_fingerprint(records, observations))
+
+    def test_correction_artifact_fingerprints_detect_table_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = {
+                key: root / f"{key}.csv"
+                for key in pipeline.CORRECTION_ARTIFACT_KEYS
+            }
+            for path in paths.values():
+                path.write_text("artifact-v1\n")
+            first = pipeline.correction_artifact_fingerprints(paths)
+            paths["table"].write_text("artifact-v2\n")
+            second = pipeline.correction_artifact_fingerprints(paths)
+        self.assertEqual(first["side_swap"], second["side_swap"])
+        self.assertNotEqual(first["table"], second["table"])
 
     def test_temperature_quadratic_table_keeps_tile_resolutions_separate(self):
         fields = (
@@ -723,6 +789,49 @@ class ReductionPipelineTests(unittest.TestCase):
             {s3_name, second_exposure["file_set_name"]},
         )
 
+    def test_production_records_keep_only_six_normal_flats(self):
+        def row(observation, led, exposure="0001"):
+            visit_id = f"106306001{observation.replace('.', '')}"
+            file_set_name = (
+                f"r0{visit_id}_{exposure}_wfi03_dark"
+            )
+            return {
+                "fileSetName": file_set_name,
+                "detector": "WFI03",
+                "visit_id": visit_id,
+                "led": str(led),
+                "program": "1063",
+            }
+
+        rows = [
+            row("001.002.001", 1),
+            row("001.003.001", 2),
+            row("001.004.001", 3),
+            row("001.005.001", 4),
+            row("001.006.001", 5),
+            row("001.007.001", 6),
+            *(row("001.009.001", 3, f"000{i}") for i in range(1, 5)),
+            *(row("001.010.001", 3, f"000{i}") for i in range(1, 6)),
+            *(row("001.011.001", 3, f"000{i}") for i in range(1, 5)),
+        ]
+
+        records = pipeline.mast_records_from_index(rows, detector="WFI03")
+
+        self.assertEqual(len(records), 6)
+        self.assertEqual(
+            {record["led"] for record in records},
+            set(range(1, 7)),
+        )
+        self.assertEqual(
+            {record["visit_id"][-9:] for record in records},
+            set(pipeline.PRODUCTION_NORMAL_OBSERVATION_SUFFIXES),
+        )
+        self.assertIsNone(
+            pipeline.parse_product_name(
+                Path("r0106306001001011001_0001_wfi03_dark_cal.asdf")
+            )
+        )
+
     def test_observations_split_reused_visit_prefix_when_led_repeats(self):
         records = []
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -820,6 +929,58 @@ class ReductionPipelineTests(unittest.TestCase):
                 old_raw,
             )
 
+    def test_explicit_reuse_source_seeds_raw_statistics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            previous = root / "previous" / "raw_statistics" / "wfi01.csv"
+            previous.parent.mkdir(parents=True)
+            previous.write_text("raw source\n")
+            run_dir = root / "current"
+            raw_output = run_dir / "raw_statistics" / "wfi01.csv"
+            output = run_dir / "statistics" / "wfi01.csv"
+            with patch.object(
+                pipeline, "update_detector_statistics_incremental"
+            ) as update:
+                result = pipeline.reduce_statistics(
+                    [],
+                    [{"detector": "WFI01"}],
+                    output,
+                    512,
+                    root,
+                    run_dir,
+                    False,
+                    raw_output_path=raw_output,
+                    previous_raw_statistics=previous,
+                )
+            seeded_content = raw_output.read_text()
+            update_argument = update.call_args.args[1]
+
+        self.assertEqual(result, "incremental")
+        self.assertEqual(seeded_content, "raw source\n")
+        self.assertEqual(update_argument, raw_output)
+
+    def test_find_previous_inventory_falls_back_to_older_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            older = root / "20261019"
+            latest = root / "20261020"
+            current = root / "20261023"
+            (older / "raw_statistics").mkdir(parents=True)
+            (latest / "raw_statistics").mkdir(parents=True)
+            (older / "raw_statistics" / "wfi01_tile_log_statistics_256.csv").write_text(
+                "raw"
+            )
+            (latest / "raw_statistics" / "wfi01_tile_log_statistics_256.csv").write_text(
+                "raw"
+            )
+            inventory = older / "wfi01_rrn_inventory.csv"
+            inventory.write_text("file_set_name,source_signature\nold,1:2\n")
+
+            self.assertEqual(
+                pipeline.find_previous_inventory(root, current, "WFI01", 256),
+                inventory,
+            )
+
     def test_s3_image_stream_uses_stdout_without_writing_a_product(self):
         with patch("run_wfi_reduction_pipeline.subprocess.run") as run, \
              patch("run_wfi_reduction_pipeline.load_asdf_buffer", return_value=("data", "dq")) as load:
@@ -846,8 +1007,14 @@ class ReductionPipelineTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "telemetry" / "program_1063.csv"
+            output.parent.mkdir(parents=True)
+            output.with_name("program_1063_exposures.csv").write_text("")
             with patch.object(pipeline, "_read_mast_token", return_value="token"), \
-                 patch.object(pipeline, "load_ice_monitor_photodiode_summary", return_value={"values": {}}), \
+                 patch.object(
+                     pipeline,
+                     "load_ice_monitor_photodiode_exposure_summary",
+                     return_value={"values": {}},
+                 ), \
                  patch.object(pipeline.subprocess, "run") as run:
                 pipeline.run_ice_monitor_telemetry(
                     index_rows,
@@ -1151,6 +1318,139 @@ class ReductionPipelineTests(unittest.TestCase):
         self.assertEqual(observations[0]["photodiode_scale"], 1.0)
         self.assertEqual(observations[1]["photodiode_scale"], 1.0)
 
+    def test_photodiode_attachment_uses_individual_exposure_not_mixed_step(self):
+        summary_fields = (
+            "mnemonic",
+            "step",
+            "led_band",
+            "start",
+            "end",
+            "signal",
+            "dark_median",
+            "dark_subtracted",
+            "n_samples",
+            "warmup",
+            "ref_pass",
+            "ref_signal",
+            "change_pct",
+            "pass_id",
+            "observation",
+        )
+        exposure_fields = (
+            "pass_id",
+            "step",
+            "observation",
+            "led",
+            "start",
+            "end",
+            "mnemonic",
+            "n",
+            "median",
+        )
+        grouped_signal = 0.11297049878090787
+        grouped_reference = 0.2384483814239502
+        grouped_row = {
+            "mnemonic": "WFI_MCE_SRCS_PD2_V",
+            "step": "band3",
+            "led_band": "3",
+            "start": "2026-10-20T20:37:31.136Z",
+            "end": "2026-10-20T21:05:13.154Z",
+            "signal": str(grouped_signal),
+            "dark_median": "0.11443859280568944",
+            "dark_subtracted": "True",
+            "n_samples": "569",
+            "warmup": "False",
+            "ref_pass": "0103902002",
+            "ref_signal": str(grouped_reference),
+            "change_pct": str(100.0 * (grouped_signal / grouped_reference - 1.0)),
+            "pass_id": "0106306001",
+            "observation": "001.004.001,001.010.001,001.011.001",
+        }
+        exposure_rows = [
+            {
+                "pass_id": "0106306001",
+                "step": "dark",
+                "observation": "001.001.001",
+                "led": "",
+                "start": "2026-10-20T20:31:09.925Z",
+                "end": "2026-10-20T20:34:10.186Z",
+                "mnemonic": "WFI_MCE_SRCS_PD2_V",
+                "n": "180",
+                "median": "0.11443859280568944",
+            },
+            {
+                "pass_id": "0106306001",
+                "step": "band3",
+                "observation": "001.004.001",
+                "led": "3.0",
+                "start": "2026-10-20T20:37:31.136Z",
+                "end": "2026-10-20T20:38:15.410Z",
+                "mnemonic": "WFI_MCE_SRCS_PD2_V",
+                "n": "44",
+                "median": "0.3643180429935454",
+            },
+            {
+                "pass_id": "0106306001",
+                "step": "band3",
+                "observation": "001.010.001",
+                "led": "3.0",
+                "start": "2026-10-20T20:54:23.294Z",
+                "end": "2026-10-20T20:55:32.868Z",
+                "mnemonic": "WFI_MCE_SRCS_PD2_V",
+                "n": "70",
+                "median": "0.1404353976249694",
+            },
+            {
+                "pass_id": "0106306001",
+                "step": "band3",
+                "observation": "001.011.001",
+                "led": "3.0",
+                "start": "2026-10-20T21:01:38.589Z",
+                "end": "2026-10-20T21:02:22.863Z",
+                "mnemonic": "WFI_MCE_SRCS_PD2_V",
+                "n": "44",
+                "median": "0.3643701970577239",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            summary_path = Path(directory) / "ice_monitor.csv"
+            exposure_path = Path(directory) / "ice_monitor_exposures.csv"
+            with summary_path.open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=summary_fields)
+                writer.writeheader()
+                writer.writerow(grouped_row)
+            with exposure_path.open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=exposure_fields)
+                writer.writeheader()
+                writer.writerows(exposure_rows)
+
+            telemetry = pipeline.load_ice_monitor_photodiode_exposure_summary(
+                summary_path, exposure_path, "pd2"
+            )
+            pipeline.apply_first_non_warmup_references(telemetry)
+
+        observations = [
+            {
+                "led": 3,
+                "file_set_name": "first-band3",
+                "exposure_start_time": "2026-10-20T20:37:31.136Z",
+                "exposure_end_time": "2026-10-20T20:38:15.410Z",
+            },
+            {
+                "led": 3,
+                "file_set_name": "second-band3",
+                "exposure_start_time": "2026-10-20T21:01:38.589Z",
+                "exposure_end_time": "2026-10-20T21:02:22.863Z",
+            },
+        ]
+        attach_photodiode_corrections(observations, telemetry)
+
+        self.assertEqual(observations[0]["photodiode_n_samples"], 44)
+        self.assertEqual(observations[1]["photodiode_n_samples"], 44)
+        self.assertAlmostEqual(observations[0]["photodiode_mean"], 0.24987945018785597)
+        self.assertAlmostEqual(observations[0]["photodiode_scale"], 1.0)
+        self.assertLess(observations[1]["photodiode_scale"], 1.001)
+
     def test_observations_preserve_s3_uri_for_streaming(self):
         records = []
         for led in range(1, 7):
@@ -1230,6 +1530,22 @@ class ReductionPipelineTests(unittest.TestCase):
                 source_changes_require_rebuild(inventory, records, observations)
             )
 
+    def test_source_signature_allows_removed_diagnostic_products(self):
+        diagnostic = "r0106306001001009001_0001_wfi01_dark"
+        current = "r0106306001001002001_0001_wfi01_dark"
+        with tempfile.TemporaryDirectory() as directory:
+            inventory = Path(directory) / "inventory.csv"
+            inventory.write_text(
+                "file_set_name,source_signature\n"
+                f"{diagnostic},10:20\n"
+            )
+            records = [{"file_set_name": current, "source_signature": "1:2"}]
+            observations = [{"file_set_name": current}]
+
+            self.assertFalse(
+                source_changes_require_rebuild(inventory, records, observations)
+            )
+
     def test_detector_wires_standalone_statistics_and_correction_outputs(self):
         records = []
         index_metadata = {}
@@ -1282,10 +1598,15 @@ class ReductionPipelineTests(unittest.TestCase):
                   patch.object(pipeline, "available_side_swap_points", return_value=(5, 3)), \
                   patch.object(pipeline, "fit_side_swap_series", return_value=side_swap_rows), \
                   patch.object(pipeline, "write_side_swap_scaled_statistics"), \
-                  patch.object(pipeline, "post_temperature_repeats_by_tile", return_value={0: ()}), \
-                  patch.object(pipeline, "build_corrections", return_value=([], [])) as build_corrections, \
-                 patch.object(pipeline, "write_csv"), \
-                 patch.object(pipeline, "write_corrected_statistics") as write_corrected, \
+                   patch.object(pipeline, "post_temperature_repeats_by_tile", return_value={0: ()}), \
+                   patch.object(pipeline, "build_corrections", return_value=([], [])) as build_corrections, \
+                  patch.object(pipeline, "write_csv"), \
+                  patch.object(
+                      pipeline,
+                      "correction_artifact_fingerprints",
+                      return_value={key: "test" for key in pipeline.CORRECTION_ARTIFACT_KEYS},
+                  ), \
+                  patch.object(pipeline, "write_corrected_statistics") as write_corrected, \
                   patch.object(pipeline, "plot_count_diagnostic") as plot_diagnostic, \
                   patch.object(pipeline, "plot_reset_aligned_counts") as reset_plot, \
                   patch.object(pipeline, "plot_led3_post_temperature_fit") as temp_fit_plot, \

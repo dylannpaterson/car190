@@ -45,6 +45,15 @@ def _prediction_fixture():
     return data, context, ar_parameters, ice_thickness, hgcdte_parameters
 
 
+def _two_reset_trajectory_data():
+    return {
+        "days": np.asarray([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        "node_days": np.asarray([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        "reset_days": np.asarray([2.0, 5.0]),
+        "reset_day": 2.0,
+    }
+
+
 class FixedProductionSettingsTests(unittest.TestCase):
     def test_settings_are_fixed_to_the_production_contract(self):
         config = production.ProductionConfig(Path("stats.csv"), Path("output"))
@@ -84,6 +93,40 @@ class FixedProductionSettingsTests(unittest.TestCase):
 
         np.testing.assert_allclose(scales["np_log_rate_nodes"], 0.1)
         np.testing.assert_allclose(scales["incidence_angle_deg"], 15.0)
+
+    def test_optional_third_decon_adds_independent_sites(self):
+        data = {
+            "n_scas": 1,
+            "n_tiles": 1,
+            "node_days": np.asarray([0.0, 1.0, 2.0, 3.0, 4.0, 5.0]),
+            "reset_days": np.asarray([1.5, 3.5]),
+        }
+        values = production.initial_values_for_data(data, fit_incidence_angle=False)
+
+        self.assertIn("third_decon_initial_thickness_log_nm", values)
+        self.assertIn("post_third_decon_tile_log_offset", values)
+        self.assertEqual(values["third_decon_initial_thickness_log_nm"].shape, (1, 1))
+
+    def test_optional_third_decon_resets_trajectory_baseline(self):
+        data = _two_reset_trajectory_data()
+        jax, jnp, _, _ = production.require_numpyro()
+        ice, _, node_ice, _ = production._trajectory_state(
+            data,
+            np.zeros((1, 7)),
+            np.asarray([[np.log(1.0)]]),
+            np.asarray(
+                [[[np.log(2.0)]], [[np.log(3.0)]]]
+            ),
+            jax,
+            jnp,
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(ice),
+            [[1.0, 2.0, 2.0, 3.0, 4.0, 3.0, 4.0]],
+            rtol=1.0e-6,
+        )
+        np.testing.assert_allclose(np.asarray(node_ice), np.asarray(ice), rtol=1.0e-6)
 
     def test_hgcdte_n_prior_sigma_controls_only_n_map_coordinate_scale(self):
         data = {
@@ -652,6 +695,44 @@ class FixedProductionSettingsTests(unittest.TestCase):
             0.0,
         )
         np.testing.assert_allclose(prediction, 0.0, atol=1.0e-12)
+
+    def test_porosity_ice_index_matches_direct_effective_index_values(self):
+        data, context, ar_parameters, ice_thickness, hgcdte_parameters = _prediction_fixture()
+        parameters = (0.0, 0.4, 100.0, 1.32)
+        porosity = parameters[1] * (
+            1.0 - np.exp(-ice_thickness / parameters[2])
+        )
+        solid_lorentz_lorenz = (parameters[3] ** 2 - 1.0) / (
+            parameters[3] ** 2 + 2.0
+        )
+        effective_lorentz_lorenz = (1.0 - porosity) * solid_lorentz_lorenz
+        effective_n = np.sqrt(
+            (1.0 + 2.0 * effective_lorentz_lorenz)
+            / (1.0 - effective_lorentz_lorenz)
+        )
+        porosity_predictor = production.build_prediction_function(
+            data,
+            context,
+            ice_n_porosity_parameters=parameters,
+        )
+        direct_predictor = production.build_prediction_function(data, context)
+        np.testing.assert_allclose(
+            porosity_predictor(
+                ice_thickness,
+                ar_parameters,
+                hgcdte_parameters,
+                0.0,
+            ),
+            direct_predictor(
+                ice_thickness,
+                ar_parameters,
+                hgcdte_parameters,
+                0.0,
+                ice_n_log_values=np.log(effective_n / production.ICE_INDEX_DEFAULT),
+            ),
+            rtol=1.0e-11,
+            atol=1.0e-12,
+        )
 
     def test_incidence_angle_can_be_fixed_at_zero(self):
         data, context, *_ = _prediction_fixture()

@@ -36,6 +36,9 @@ repository, JAX, NumPyro, or the production TMM code.
 - The per-tile `post_reset_tile_log_offset`, its derived
   `post_reset_tile_throughput_factor`, and shared `ice_reset_day` for the grey
   throughput change.
+- If the source fits include an optional third-decon boundary, the bundle also
+  contains `post_third_decon_tile_log_offset`, its throughput factor, and
+  `third_decon_day`; these arrays are omitted from legacy bundles.
 - The geometry and response definitions in the embedded `metadata_json` field.
 
 The response is the log of coated power divided by clean power before applying
@@ -48,6 +51,8 @@ adding the tile's `post_reset_tile_log_offset` to the log response, or by
 multiplying power by `post_reset_tile_throughput_factor`. The wavelength
 response curves themselves remain the ice/optical response; the grey term is
 stored separately so it can be applied at the observation time.
+For an observation on/after `third_decon_day`, apply the corresponding
+post-third-decon term in addition to the decon2 term.
 
 To rebuild the archive from the per-tile caches:
 

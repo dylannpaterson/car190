@@ -1,6 +1,7 @@
 """Plot post-reset initial ice thickness in the Roman WFI focal-plane mosaic."""
 
 import argparse
+import math
 from pathlib import Path
 
 import matplotlib
@@ -25,7 +26,6 @@ from wfi_production_layout import (
     positive_integer,
     production_output_root,
     tile_directory_entries,
-    tile_grid_size_for_tile_size,
 )
 
 
@@ -33,15 +33,27 @@ ROOT = Path(__file__).resolve().parent
 LEGACY_MODEL_NAME = (
     "absolute_substrate_power_hgcdte_prior025_independent_tiles_least_squares"
 )
-RESET_DAY = 15.064405023148149
+RESET_DAY = 12.907397928240743
+RESET_STAGE_FIELDS = {
+    2: ("reset_initial_thickness_nm", "reset_initial_thickness_log_nm"),
+    3: ("third_decon_initial_thickness_nm", "third_decon_initial_thickness_log_nm"),
+}
 
 
-def detector_fit_dirs(root, detector, tile_size=DEFAULT_TILE_SIZE):
+def detector_fit_dirs(
+    root,
+    detector,
+    tile_size=DEFAULT_TILE_SIZE,
+    fit_root=None,
+):
     """Return a complete current layout, then a complete legacy layout."""
-    candidates = (
-        production_output_root(root, tile_size) / detector.lower() / "fits",
-        Path(root) / f"{detector.lower()}_{LEGACY_MODEL_NAME}" / "fits",
-    )
+    if fit_root is None:
+        candidates = (
+            production_output_root(root, tile_size) / detector.lower() / "fits",
+            Path(root) / f"{detector.lower()}_{LEGACY_MODEL_NAME}" / "fits",
+        )
+    else:
+        candidates = (Path(fit_root) / detector.lower() / "fits",)
     for fit_root in candidates:
         found = {}
         for tile_id, path in tile_directory_entries(fit_root):
@@ -66,24 +78,35 @@ def _scalar(samples, name):
     return float(values[0])
 
 
+def _reset_stage_fields(reset_stage):
+    try:
+        return RESET_STAGE_FIELDS[int(reset_stage)]
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("reset_stage must be 2 or 3") from None
+
+
 def load_post_reset_initial_thickness_map(
     root,
     detector,
     tile_size=DEFAULT_TILE_SIZE,
+    reset_stage=2,
+    fit_root=None,
 ):
     """Load the physical post-reset initial thickness for one detector."""
-    found = detector_fit_dirs(root, detector, tile_size)
+    thickness_name, log_thickness_name = _reset_stage_fields(reset_stage)
+    found = detector_fit_dirs(root, detector, tile_size, fit_root=fit_root)
     if not found:
         return None
-    tile_grid_size = tile_grid_size_for_tile_size(tile_size)
-    if max(tile_id for tile_id, _path in found) >= tile_grid_size**2:
+    tile_count = len(found)
+    tile_grid_size = math.isqrt(tile_count)
+    if tile_grid_size * tile_grid_size != tile_count:
         tile_grid_size = partial_tile_grid_size(tile_id for tile_id, _path in found)
     values = np.full((tile_grid_size, tile_grid_size), np.nan)
     for tile_id, fit_dir in found:
         with np.load(fit_dir / "posterior_samples.npz", allow_pickle=False) as samples:
-            thickness = _scalar(samples, "reset_initial_thickness_nm")
+            thickness = _scalar(samples, thickness_name)
             if thickness is None:
-                log_thickness = _scalar(samples, "reset_initial_thickness_log_nm")
+                log_thickness = _scalar(samples, log_thickness_name)
                 if log_thickness is not None:
                     thickness = float(np.exp(log_thickness))
         if thickness is not None:
@@ -91,14 +114,31 @@ def load_post_reset_initial_thickness_map(
     return values if np.isfinite(values).any() else None
 
 
-def load_all_post_reset_initial_thickness_maps(root, tile_size=DEFAULT_TILE_SIZE):
+def load_all_post_reset_initial_thickness_maps(
+    root,
+    tile_size=DEFAULT_TILE_SIZE,
+    reset_stage=2,
+    fit_root=None,
+):
     return {
-        detector: load_post_reset_initial_thickness_map(root, detector, tile_size)
+        detector: load_post_reset_initial_thickness_map(
+            root,
+            detector,
+            tile_size,
+            reset_stage=reset_stage,
+            fit_root=fit_root,
+        )
         for detector in SCAS
     }
 
 
-def draw_post_reset_initial_thickness_mosaic(path, maps, reset_day=RESET_DAY):
+def draw_post_reset_initial_thickness_mosaic(
+    path,
+    maps,
+    reset_day=RESET_DAY,
+    reset_stage=2,
+):
+    _reset_stage_fields(reset_stage)
     available = [
         detector
         for detector in SCAS
@@ -200,7 +240,8 @@ def draw_post_reset_initial_thickness_mosaic(path, maps, reset_day=RESET_DAY):
     axis.set_xticks([])
     axis.set_yticks([])
     axis.set_xlabel("Roman WFI focal-plane mosaic")
-    axis.set_title("Post-Decon2 initial ice thickness (nm)")
+    stage_label = "Decon2" if int(reset_stage) == 2 else "third-decon"
+    axis.set_title(f"Post-{stage_label} initial ice thickness (nm)")
     center_x = SCA_PITCH * 3 - 0.5
     center_y = SCA_PITCH * 2 + COLUMN_Y_OFFSET[2] + 1.2
     axis.plot(
@@ -219,10 +260,15 @@ def draw_post_reset_initial_thickness_mosaic(path, maps, reset_day=RESET_DAY):
         fontsize=7,
         va="bottom",
     )
+    reset_label = (
+        f"reset day = {reset_day:.9f}"
+        if reset_day is not None and np.isfinite(reset_day)
+        else "reset day = not supplied"
+    )
     axis.text(
         0.99,
         0.02,
-        f"reset day = {reset_day:.9f}",
+        reset_label,
         transform=axis.transAxes,
         ha="right",
         va="bottom",
@@ -230,7 +276,7 @@ def draw_post_reset_initial_thickness_mosaic(path, maps, reset_day=RESET_DAY):
         color="0.35",
     )
     figure.suptitle(
-        "Roman WFI post-reset initial ice-thickness mosaic\n"
+        f"Roman WFI post-{stage_label} initial ice-thickness mosaic\n"
         f"independent per-tile MAP fits; {len(available)}/18 detector maps available; "
         f"scale {color_min:.3g}--{color_max:.3g} nm",
         fontsize=14,
@@ -249,8 +295,26 @@ def parse_args():
         default=ROOT,
         help="Parent folder containing production or legacy detector fit outputs.",
     )
+    parser.add_argument(
+        "--fit-root",
+        type=Path,
+        default=None,
+        help="Directory containing detector subdirectories for an isolated fit tree.",
+    )
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--reset-day", type=float, default=RESET_DAY)
+    parser.add_argument(
+        "--reset-stage",
+        type=int,
+        choices=tuple(sorted(RESET_STAGE_FIELDS)),
+        default=2,
+        help="Reset whose initial thickness is plotted: 2 for decon2 or 3 for the optional third decon.",
+    )
+    parser.add_argument(
+        "--reset-day",
+        type=float,
+        default=None,
+        help="Optional relative reset day to annotate; do not infer the unknown third-decon day.",
+    )
     parser.add_argument(
         "--tile-size",
         type=positive_integer,
@@ -262,12 +326,28 @@ def parse_args():
 
 def main():
     args = parse_args()
+    output_name = (
+        "wfi_post_reset_initial_thickness_mosaic.png"
+        if args.reset_stage == 2
+        else "wfi_post_third_decon_initial_thickness_mosaic.png"
+    )
     output = args.output or (
         production_output_root(args.root, args.tile_size)
-        / "wfi_post_reset_initial_thickness_mosaic.png"
+        / output_name
     )
-    maps = load_all_post_reset_initial_thickness_maps(args.root, args.tile_size)
-    draw_post_reset_initial_thickness_mosaic(output, maps, args.reset_day)
+    reset_day = RESET_DAY if args.reset_day is None and args.reset_stage == 2 else args.reset_day
+    maps = load_all_post_reset_initial_thickness_maps(
+        args.root,
+        args.tile_size,
+        reset_stage=args.reset_stage,
+        fit_root=args.fit_root,
+    )
+    draw_post_reset_initial_thickness_mosaic(
+        output,
+        maps,
+        reset_day,
+        reset_stage=args.reset_stage,
+    )
     available = [
         detector
         for detector in SCAS

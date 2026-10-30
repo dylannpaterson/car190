@@ -102,6 +102,12 @@ class ProductionRunnerTests(unittest.TestCase):
         self.assertEqual(arguments.tile_size, 256)
         self.assertEqual(arguments.workers, 2)
         self.assertEqual(arguments.tile_timeout_seconds, 1800.0)
+        self.assertIsNone(arguments.third_decon_day)
+        self.assertFalse(arguments.fit_led_log_offsets)
+        self.assertEqual(
+            arguments.led_log_offset_prior_sigma_log,
+            runner.PRODUCTION_LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+        )
         self.assertEqual(
             arguments.absolute_hgcdte_n_scale_prior_sigma_log,
             0.25,
@@ -110,6 +116,25 @@ class ProductionRunnerTests(unittest.TestCase):
             runner.parse_args(["--statistics-dir", ".", "--tile-size", "256"]).tile_size,
             256,
         )
+
+    def test_third_decon_day_argument_parses(self):
+        arguments = runner.parse_args(
+            ["--statistics-dir", ".", "--third-decon-day", "37.5"]
+        )
+        self.assertEqual(arguments.third_decon_day, 37.5)
+
+    def test_led_log_offset_arguments_parse(self):
+        arguments = runner.parse_args(
+            [
+                "--statistics-dir",
+                ".",
+                "--fit-led-log-offsets",
+                "--led-log-offset-prior-sigma-log",
+                "0.02",
+            ]
+        )
+        self.assertTrue(arguments.fit_led_log_offsets)
+        self.assertEqual(arguments.led_log_offset_prior_sigma_log, 0.02)
 
     def test_hgcdte_n_prior_sigma_argument_parses(self):
         arguments = runner.parse_args(
@@ -191,6 +216,28 @@ class ProductionRunnerTests(unittest.TestCase):
         with patch.object(relative_runner, "run_detector") as run_detector:
             runner.run_cached_response(arguments, ["WFI01"])
         self.assertTrue(run_detector.call_args.kwargs["allow_external_cache_source"])
+
+    def test_response_cache_forwards_led_offset_fit(self):
+        arguments = runner.parse_args(
+            [
+                "--statistics-dir",
+                ".",
+                "--detector",
+                "WFI02",
+                "--response-cache-root",
+                "cache",
+                "--fit-led-log-offsets",
+                "--led-log-offset-prior-sigma-log",
+                "0.02",
+            ]
+        )
+        with patch.object(relative_runner, "run_detector") as run_detector:
+            runner.run_cached_response(arguments, ["WFI02"])
+        self.assertTrue(run_detector.call_args.kwargs["fit_led_log_offsets"])
+        self.assertEqual(
+            run_detector.call_args.kwargs["led_log_offset_prior_sigma_log"],
+            0.02,
+        )
 
     def test_run_detector_uses_data_driven_alternate_layout(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -369,6 +416,25 @@ class ProductionRunnerTests(unittest.TestCase):
             )
             self.assertTrue(runner.archive_matches_production_model(fit_dir))
             self.assertFalse(runner.archive_matches_production_model(fit_dir, 0.03))
+            np.savez(
+                fit_dir / "posterior_samples.npz",
+                production_model_version=np.asarray(
+                    runner.production_model_version(True)
+                ),
+                trajectory_regularization=np.asarray("none"),
+                trajectory_entropy_weight=np.asarray(0.0),
+                thickness_penalty_enabled=np.asarray(0),
+                constant_rate_map_warmup=np.asarray(1),
+                fit_led_log_offsets=np.asarray(1),
+                led_log_offset_prior_sigma_log=np.asarray(0.01),
+            )
+            self.assertTrue(
+                runner.archive_matches_production_model(
+                    fit_dir,
+                    fit_led_log_offsets=True,
+                )
+            )
+            self.assertFalse(runner.archive_matches_production_model(fit_dir))
             legacy_dir = fit_dir / "legacy"
             legacy_dir.mkdir()
             np.savez(
@@ -378,6 +444,24 @@ class ProductionRunnerTests(unittest.TestCase):
                 constant_rate_map_warmup=np.asarray(1),
             )
             self.assertFalse(runner.archive_matches_production_model(legacy_dir))
+
+    def test_archive_matching_requires_the_optional_third_decon_boundary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            statistics = root / "tile.csv"
+            self.write_statistics(statistics)
+            np.savez(
+                root / "posterior_samples.npz",
+                statistics_fingerprint=runner.statistics_row_fingerprints(statistics),
+                third_decon_day=np.asarray(37.5),
+                third_decon_initial_thickness_log_nm=np.asarray([[np.log(10.0)]]),
+                post_third_decon_tile_log_offset=np.asarray([[0.0]]),
+            )
+
+            self.assertTrue(
+                runner.archive_matches_statistics(root, statistics, third_decon_day=37.5)
+            )
+            self.assertFalse(runner.archive_matches_statistics(root, statistics))
 
 
 if __name__ == "__main__":

@@ -69,6 +69,7 @@ def run_emcee(
     seed=None,
     warmup_steps=0,
     fixed_rate_nm_day=None,
+    third_decon_day=None,
     fixed_incidence_angle_deg=None,
     fit_incidence_angle=True,
     trajectory_rate_prior_mean_nm_day=production.TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY,
@@ -166,6 +167,12 @@ def run_emcee(
         )
     else:
         site_order = LINEAR_RATE_SITE_ORDER
+    if third_decon_day is not None:
+        site_order = (
+            *site_order,
+            "third_decon_initial_thickness_log_nm",
+            "post_third_decon_tile_log_offset",
+        )
     if fit_ice_k_constant:
         site_order = (*site_order, "ice_k_constant")
     if fit_ar_k_constant:
@@ -194,6 +201,7 @@ def run_emcee(
 
     data = production.load_tile_statistics(
         statistics_path,
+        third_decon_day=third_decon_day,
     )
     context = production.load_response_context(data["sca_names"])
     data["qe_columns"] = context["qe_columns"]
@@ -337,11 +345,13 @@ def run_emcee(
         "ar_tile_raw": 0.25,
         "initial_thickness_log_nm": 0.35,
         "reset_initial_thickness_log_nm": 0.35,
+        "third_decon_initial_thickness_log_nm": 0.35,
         "incidence_angle_deg": 2.5,
         "log_rate_scale": 0.30,
         "log_rate_start": 0.30,
         "log_rate_end": 0.30,
         "post_reset_tile_log_offset": 0.08,
+        "post_third_decon_tile_log_offset": 0.08,
         "absolute_hgcdte_n_log_scale": absolute_hgcdte_n_scale_prior_sigma_log,
         "absolute_hgcdte_k_log_scale": 0.25,
         "ice_n_log_constant": ice_n_constant_prior_sigma_log,
@@ -539,6 +549,9 @@ def run_emcee(
             if fixed_incidence_angle_deg is None
             else fixed_incidence_angle_deg
         ),
+        third_decon_day=np.asarray(
+            np.nan if third_decon_day is None else third_decon_day
+        ),
     )
     np.savez_compressed(
         output_dir / "emcee_best_sites.npz",
@@ -629,6 +642,13 @@ def run_emcee(
             "- Initial/reset thickness log nm: "
             f"`{np.asarray(best_values['initial_thickness_log_nm']).tolist()}` / "
             f"`{np.asarray(best_values['reset_initial_thickness_log_nm']).tolist()}`.",
+            (
+                "- Third-decon thickness log nm / tile log offset: "
+                f"`{np.asarray(best_values['third_decon_initial_thickness_log_nm']).tolist()}` / "
+                f"`{np.asarray(best_values['post_third_decon_tile_log_offset']).tolist()}`."
+                if "third_decon_initial_thickness_log_nm" in best_values
+                else ""
+            ),
             (
                 f"- Incidence angle deg: `{float(np.asarray(best_values['incidence_angle_deg']))}`."
                 if "incidence_angle_deg" in best_values

@@ -33,12 +33,15 @@ ROOT = Path(__file__).resolve().parent
 LEGACY_MODEL_NAME = (
     "absolute_substrate_power_hgcdte_prior025_independent_tiles_least_squares"
 )
-def detector_fit_dirs(root, detector, tile_size=DEFAULT_TILE_SIZE):
+def detector_fit_dirs(root, detector, tile_size=DEFAULT_TILE_SIZE, fit_root=None):
     """Find the current layout first, then the pre-layout production archive."""
-    candidates = (
-        production_output_root(root, tile_size) / detector.lower() / "fits",
-        Path(root) / f"{detector.lower()}_{LEGACY_MODEL_NAME}" / "fits",
-    )
+    if fit_root is None:
+        candidates = (
+            production_output_root(root, tile_size) / detector.lower() / "fits",
+            Path(root) / f"{detector.lower()}_{LEGACY_MODEL_NAME}" / "fits",
+        )
+    else:
+        candidates = (Path(fit_root) / detector.lower() / "fits",)
     for fit_root in candidates:
         found = []
         for tile_id, path in tile_directory_entries(fit_root):
@@ -54,9 +57,14 @@ def detector_fit_dirs(root, detector, tile_size=DEFAULT_TILE_SIZE):
     return []
 
 
-def load_incidence_angle_map(root, detector, tile_size=DEFAULT_TILE_SIZE):
+def load_incidence_angle_map(
+    root,
+    detector,
+    tile_size=DEFAULT_TILE_SIZE,
+    fit_root=None,
+):
     """Return a square tile map of fitted posterior incidence-angle values."""
-    found = detector_fit_dirs(root, detector, tile_size)
+    found = detector_fit_dirs(root, detector, tile_size, fit_root=fit_root)
     if not found:
         return None
     tile_grid_size = tile_grid_size_for_tile_size(tile_size)
@@ -82,9 +90,15 @@ def load_incidence_angle_map(root, detector, tile_size=DEFAULT_TILE_SIZE):
     return values if np.isfinite(values).any() else None
 
 
-def load_all_incidence_angle_maps(root, tile_size=DEFAULT_TILE_SIZE):
+def load_all_incidence_angle_maps(root, tile_size=DEFAULT_TILE_SIZE, fit_root=None):
     return {
-        detector: load_incidence_angle_map(root, detector, tile_size) for detector in SCAS
+        detector: load_incidence_angle_map(
+            root,
+            detector,
+            tile_size,
+            fit_root=fit_root,
+        )
+        for detector in SCAS
     }
 
 
@@ -245,6 +259,12 @@ def parse_args():
         default=ROOT,
         help="Parent folder containing production or legacy detector fit outputs.",
     )
+    parser.add_argument(
+        "--fit-root",
+        type=Path,
+        default=None,
+        help="Directory containing detector subdirectories for an isolated fit tree.",
+    )
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument(
         "--tile-size",
@@ -261,7 +281,11 @@ def main():
         production_output_root(args.root, args.tile_size)
         / "wfi_fitted_incidence_angle_mosaic.png"
     )
-    maps = load_all_incidence_angle_maps(args.root, args.tile_size)
+    maps = load_all_incidence_angle_maps(
+        args.root,
+        args.tile_size,
+        fit_root=args.fit_root,
+    )
     draw_incidence_angle_mosaic(output, maps)
     available = [
         detector

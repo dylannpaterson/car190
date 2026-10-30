@@ -11,7 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from plot_wfi_tmm_numpyro import (
+from wfi_independent_plot_helpers import (
     save_np_node_plot,
     save_tile_data_model_time_plot,
     save_tile_fit_plot,

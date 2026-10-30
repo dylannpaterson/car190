@@ -20,6 +20,8 @@ SCE_TEMPERATURE_CHANGE_UTC = datetime(2026, 10, 17, 3, 30, tzinfo=UTC)
 SCE_TEMPERATURE_CHANGE_LABEL = "SCE 153.5 to 155 K"
 ENCLOSURE_TEMPERATURE_CHANGE_UTC = datetime(2026, 10, 17, 23, 0, tzinfo=UTC)
 ENCLOSURE_TEMPERATURE_CHANGE_LABEL = "Enclosure temperature +4 K"
+AOM_TEMPERATURE_BUMP_UTC = datetime(2026, 10, 30, 1, 43, tzinfo=UTC)
+AOM_TEMPERATURE_BUMP_LABEL = "AOM temperature bump (01:43 UTC / 21:43 EDT Oct 29)"
 
 
 @dataclass(frozen=True)
@@ -238,6 +240,14 @@ def load_time_annotations(statistics_path):
             kind="temperature",
         )
     )
+    events.append(
+        Event(
+            label=AOM_TEMPERATURE_BUMP_LABEL,
+            day=(AOM_TEMPERATURE_BUMP_UTC - start_utc).total_seconds() / 86400.0,
+            repeat=-1,
+            kind="temperature",
+        )
+    )
     minimum_day = manifest.get("correction_settings", {}).get("minimum_day")
     if minimum_day is not None:
         events.append(
@@ -390,18 +400,33 @@ def annotate_time_axis(axis, annotations):
     return utc_axis
 
 
-def split_time_series_at_reset(days, *series, reset_day=None):
-    """Insert a NaN break between pre-reset and post-reset samples."""
+def split_time_series_at_resets(days, *series, reset_days=None):
+    """Insert NaN breaks at each requested reset boundary."""
     days = np.asarray(days, dtype=float)
     values = tuple(np.asarray(value, dtype=float) for value in series)
-    if reset_day is None:
+    if reset_days is None:
         return (days, *values)
-    split_index = int(np.count_nonzero(days < float(reset_day)))
-    if split_index == 0 or split_index == days.size:
-        return (days, *values)
-    return (
-        np.insert(days, split_index, np.nan),
-        *tuple(
+    if np.isscalar(reset_days):
+        reset_days = (reset_days,)
+    split_indices = {
+        int(np.count_nonzero(days < float(reset_day)))
+        for reset_day in reset_days
+    }
+    split_indices = sorted(
+        index for index in split_indices if 0 < index < days.size
+    )
+    for split_index in reversed(split_indices):
+        days = np.insert(days, split_index, np.nan)
+        values = tuple(
             np.insert(value, split_index, np.nan, axis=-1) for value in values
-        ),
+        )
+    return (days, *values)
+
+
+def split_time_series_at_reset(days, *series, reset_day=None):
+    """Insert a NaN break between pre-reset and post-reset samples."""
+    return split_time_series_at_resets(
+        days,
+        *series,
+        reset_days=None if reset_day is None else (reset_day,),
     )

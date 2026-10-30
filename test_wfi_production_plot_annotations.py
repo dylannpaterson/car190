@@ -1,6 +1,7 @@
 import csv
 
 from wfi_production_plot_annotations import (
+    AOM_TEMPERATURE_BUMP_LABEL,
     ENCLOSURE_TEMPERATURE_CHANGE_LABEL,
     SCE_TEMPERATURE_CHANGE_LABEL,
     latest_observation_label,
@@ -63,6 +64,25 @@ def test_enclosure_temperature_change_is_loaded_as_event(tmp_path):
     assert event.kind == "temperature"
     assert event.repeat == -1
     assert event.day == 23.0 / 24.0
+
+
+def test_aom_temperature_bump_is_loaded_as_event(tmp_path):
+    corrected = tmp_path / "corrected_statistics"
+    corrected.mkdir()
+    canonical = corrected / "wfi01_tile_log_statistics_256_count_corrected.csv"
+    _write_statistics(canonical, "2026-10-29T00:00:00+00:00")
+
+    statistics = tmp_path / "thinned" / "wfi01_tile_log_statistics_256.csv"
+    statistics.parent.mkdir()
+    _write_statistics(statistics, "2026-10-29T00:00:00+00:00")
+
+    annotations = load_time_annotations(statistics)
+    event = next(
+        event for event in annotations.events if event.label == AOM_TEMPERATURE_BUMP_LABEL
+    )
+    assert event.kind == "temperature"
+    assert event.repeat == -1
+    assert event.day == (24 * 60 + 103) / (24 * 60)
 
 
 def test_latest_observation_label_includes_utc_and_edt(tmp_path):

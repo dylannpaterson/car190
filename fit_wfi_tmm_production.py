@@ -23,7 +23,9 @@ SED_URL = str(
     ROOT / "external_reference_data/WFI_RCS_LEDP_spectral_energy_distribution.ecsv"
 )
 QE_URL = str(ROOT / "external_reference_data/WFI_Quantum_efficiency.ecsv")
-PRODUCTION_RESET_DAY = 15.064405023148149
+# Physical decon2 boundary: first Program 1063 observation.  The later
+# operational-temperature transition is not an ice-thickness reset.
+PRODUCTION_RESET_DAY = 12.907397928240743
 PRODUCTION_MAP_STEPS = 10000
 PRODUCTION_MAP_FTOL = 1.0e-9
 PRODUCTION_MAP_XTOL = 1.0e-9
@@ -163,6 +165,56 @@ def _initial_thickness_settings(prior, sigma_nm):
     return prior, sigma_nm, names
 
 
+def reset_days_for_data(data):
+    """Return the ordered physical reset boundaries represented by ``data``."""
+    if "reset_days" in data:
+        reset_days = np.asarray(data["reset_days"], dtype=float).reshape(-1)
+    else:
+        reset_days = np.asarray(
+            [data.get("reset_day", PRODUCTION_RESET_DAY)], dtype=float
+        )
+    if reset_days.size == 0 or np.any(~np.isfinite(reset_days)):
+        raise ValueError("Reset days must contain at least one finite value")
+    if np.any(np.diff(reset_days) <= 0.0):
+        raise ValueError("Reset days must be strictly increasing")
+    return reset_days
+
+
+def reset_initial_thickness_site_names(prior, reset_count=1):
+    """Return the initial-thickness site followed by one site per reset."""
+    reset_count = int(reset_count)
+    if reset_count not in (1, 2):
+        raise ValueError("Production supports the existing reset and one optional third decon")
+    prior, _, names = _initial_thickness_settings(
+        prior, INITIAL_THICKNESS_HALF_NORMAL_SIGMA_NM
+    )
+    suffix = "_log_nm" if prior == INITIAL_THICKNESS_PRIOR_LOGNORMAL else "_nm"
+    reset_names = [names[1]]
+    if reset_count > 1:
+        reset_names.append(f"third_decon_initial_thickness{suffix}")
+    return (names[0], *reset_names)
+
+
+def reset_offset_site_names(reset_count=1):
+    """Return the per-tile grey-offset site for each physical reset."""
+    reset_count = int(reset_count)
+    if reset_count < 1:
+        raise ValueError("At least one reset site is required")
+    return (
+        "post_reset_tile_log_offset",
+        *("post_third_decon_tile_log_offset" for _ in range(reset_count - 1)),
+    )
+
+
+def reset_site_names(data, initial_thickness_prior=INITIAL_THICKNESS_PRIOR_LOGNORMAL):
+    """Return trajectory and grey site names for the reset boundaries in data."""
+    reset_count = reset_days_for_data(data).size
+    return (
+        reset_initial_thickness_site_names(initial_thickness_prior, reset_count),
+        reset_offset_site_names(reset_count),
+    )
+
+
 def initial_thickness_site_names(prior=INITIAL_THICKNESS_PRIOR_LOGNORMAL):
     """Return the MAP site names used by an initial-thickness prior."""
     return _initial_thickness_settings(prior, INITIAL_THICKNESS_HALF_NORMAL_SIGMA_NM)[2]
@@ -172,6 +224,7 @@ def initial_thickness_site_names(prior=INITIAL_THICKNESS_PRIOR_LOGNORMAL):
 class ProductionConfig:
     tile_statistics: Path
     output_dir: Path
+    third_decon_day: float | None = None
     map_init_from: Path | None = None
     map_initial_values: dict | None = None
     smoothness_weight: float | None = None
@@ -195,6 +248,7 @@ class ProductionConfig:
     ice_n_constant_prior_sigma_log: float = ICE_N_CONSTANT_PRIOR_SIGMA_LOG
     ice_n_constant_reference: float = ICE_INDEX_DEFAULT
     fixed_ice_n_log_constant: float | None = None
+    ice_n_porosity_parameters: tuple[float, float, float, float] | None = None
     fit_ice_k_constant: bool = False
     ice_k_prior_sigma: float = ICE_K_PRIOR_SIGMA
     fit_ar_k_constant: bool = False
@@ -213,6 +267,27 @@ class ProductionConfig:
     sed_weighting: str = "energy"
     qe_response_mode: str = "none"
     model_metadata: dict | None = None
+
+
+def validate_ice_n_porosity_parameters(parameters):
+    """Validate ``(p0, pinf, length_nm, n_solid)`` for the LL ice model."""
+    if parameters is None:
+        return None
+    values = np.asarray(parameters, dtype=float).reshape(-1)
+    if values.size != 4 or np.any(~np.isfinite(values)):
+        raise ValueError(
+            "Ice-n porosity parameters must be finite (p0, pinf, length_nm, n_solid)"
+        )
+    p0, pinf, length_nm, n_solid = values
+    if not 0.0 <= p0 < 1.0:
+        raise ValueError("Ice-n porosity p0 must be in [0, 1)")
+    if not p0 <= pinf < 1.0:
+        raise ValueError("Ice-n porosity pinf must satisfy p0 <= pinf < 1")
+    if length_nm <= 0.0:
+        raise ValueError("Ice-n porosity length must be positive")
+    if n_solid <= 0.0:
+        raise ValueError("Solid ice refractive index must be positive")
+    return tuple(float(value) for value in values)
 
 
 def require_numpyro():
@@ -286,6 +361,106 @@ def spectral_modulation_basis(
     basis = ice_n_modulation_basis(wavelengths_nm)
     anchor = ice_n_modulation_basis(np.asarray([anchor_wavelength_nm]))[0]
     return basis - anchor[None, :]
+
+
+def natural_cubic_spline_values(knots, values, targets, jnp):
+    """Evaluate a natural cubic spline with a leading batch axis.
+
+    ``values`` has shape ``(batch, knot_count)`` and ``targets`` has shape
+    ``(batch, ...)``. Targets are clamped to the knot interval so an
+    experiment can define a bounded optical-index model without extrapolating
+    a cubic beyond its final knot.
+    """
+    knots = np.asarray(knots, dtype=float).reshape(-1)
+    if (
+        knots.size < 2
+        or np.any(~np.isfinite(knots))
+        or np.any(np.diff(knots) <= 0.0)
+    ):
+        raise ValueError("Spline knots must be finite and strictly increasing")
+    values = jnp.asarray(values)
+    if values.ndim < 1 or values.shape[-1] != knots.size:
+        raise ValueError("Spline values must end with the knot axis")
+    flat_values = values.reshape((-1, knots.size))
+    targets = jnp.asarray(targets)
+    if targets.ndim == 0:
+        targets = jnp.broadcast_to(targets, (flat_values.shape[0],))
+    elif targets.shape[0] != flat_values.shape[0]:
+        raise ValueError("Spline targets must have the same leading batch axis")
+
+    knots_jnp = jnp.asarray(knots)
+    h = jnp.diff(knots_jnp)
+    matrix = jnp.zeros((knots.size, knots.size), dtype=values.dtype)
+    matrix = matrix.at[0, 0].set(1.0)
+    matrix = matrix.at[-1, -1].set(1.0)
+    for index in range(1, knots.size - 1):
+        matrix = matrix.at[index, index - 1].set(h[index - 1])
+        matrix = matrix.at[index, index].set(2.0 * (h[index - 1] + h[index]))
+        matrix = matrix.at[index, index + 1].set(h[index])
+    slopes = jnp.diff(flat_values, axis=1) / h[None, :]
+    rhs = jnp.zeros_like(flat_values)
+    rhs = rhs.at[:, 1:-1].set(6.0 * jnp.diff(slopes, axis=1))
+    moments = jnp.linalg.solve(matrix, rhs.T).T
+    coefficient_a = flat_values[:, :-1]
+    coefficient_b = slopes - h[None, :] * (
+        2.0 * moments[:, :-1] + moments[:, 1:]
+    ) / 6.0
+    coefficient_c = moments[:, :-1] / 2.0
+    coefficient_d = jnp.diff(moments, axis=1) / (6.0 * h[None, :])
+
+    target = jnp.clip(targets, knots_jnp[0], knots_jnp[-1])
+    index = jnp.searchsorted(knots_jnp, target, side="right") - 1
+    index = jnp.clip(index, 0, knots.size - 2)
+    row = jnp.arange(flat_values.shape[0]).reshape(
+        (flat_values.shape[0],) + (1,) * (target.ndim - 1)
+    )
+    delta = target - knots_jnp[index]
+    return (
+        coefficient_a[row, index]
+        + coefficient_b[row, index] * delta
+        + coefficient_c[row, index] * delta**2
+        + coefficient_d[row, index] * delta**3
+    )
+
+
+def monotonic_cubic_spline_values(knots, values, targets, jnp):
+    """Evaluate a decreasing cubic Hermite spline without overshoot.
+
+    The knot values must be non-increasing.  Zero tangents at each knot make
+    every interval monotonic when its two endpoint values are monotonic.
+    """
+    knots = np.asarray(knots, dtype=float).reshape(-1)
+    if (
+        knots.size < 2
+        or np.any(~np.isfinite(knots))
+        or np.any(np.diff(knots) <= 0.0)
+    ):
+        raise ValueError("Spline knots must be finite and strictly increasing")
+    values = jnp.asarray(values)
+    if values.ndim < 1 or values.shape[-1] != knots.size:
+        raise ValueError("Spline values must end with the knot axis")
+    flat_values = values.reshape((-1, knots.size))
+    targets = jnp.asarray(targets)
+    if targets.ndim == 0:
+        targets = jnp.broadcast_to(targets, (flat_values.shape[0],))
+    elif targets.shape[0] != flat_values.shape[0]:
+        raise ValueError("Spline targets must have the same leading batch axis")
+
+    knots_jnp = jnp.asarray(knots)
+    h = jnp.diff(knots_jnp)
+    target = jnp.clip(targets, knots_jnp[0], knots_jnp[-1])
+    index = jnp.searchsorted(knots_jnp, target, side="right") - 1
+    index = jnp.clip(index, 0, knots.size - 2)
+    row = jnp.arange(flat_values.shape[0]).reshape(
+        (flat_values.shape[0],) + (1,) * (target.ndim - 1)
+    )
+    delta = target - knots_jnp[index]
+    fraction = delta / h[index]
+    first = flat_values[row, index]
+    second = flat_values[row, index + 1]
+    first_basis = 2.0 * fraction**3 - 3.0 * fraction**2 + 1.0
+    second_basis = -2.0 * fraction**3 + 3.0 * fraction**2
+    return first_basis * first + second_basis * second
 
 
 def _prepare_response_integration(
@@ -532,7 +707,7 @@ def detector_name_from_statistics_path(path):
     return Path(path).name.split("_tile_log_statistics_", 1)[0].upper()
 
 
-def load_tile_statistics(path):
+def load_tile_statistics(path, third_decon_day=None):
     """Load corrected tile sufficient statistics without applying corrections."""
     path = Path(path)
     if path.is_dir():
@@ -603,7 +778,15 @@ def load_tile_statistics(path):
         if np.any(program_1063)
         else float(PRODUCTION_RESET_DAY)
     )
-    return {
+    reset_days = np.asarray([reset_day], dtype=float)
+    if third_decon_day is not None:
+        third_decon_day = float(third_decon_day)
+        if not np.isfinite(third_decon_day):
+            raise ValueError("third_decon_day must be finite")
+        if third_decon_day <= reset_day:
+            raise ValueError("third_decon_day must be after the physical reset day")
+        reset_days = np.asarray([reset_day, third_decon_day], dtype=float)
+    result = {
         "tile_ids": tile_ids,
         "metadata": metadata,
         "counts": counts,
@@ -620,11 +803,15 @@ def load_tile_statistics(path):
         "repeat_index": repeat_index,
         "node_days": node_days,
         "reset_day": reset_day,
+        "reset_days": reset_days,
         "sca_names": np.asarray([detector_name_from_statistics_path(path)]),
         "sca_index": np.asarray([0], dtype=int),
         "n_scas": 1,
         "n_tiles": 1,
     }
+    if third_decon_day is not None:
+        result["third_decon_day"] = third_decon_day
+    return result
 
 
 def default_likelihood_weight(counts):
@@ -844,6 +1031,9 @@ def build_prediction_function(
     fixed_normal_incidence=False,
     fit_ice_n_modulation=False,
     fit_ice_n_constant=False,
+    ice_n_thickness_knots_nm=None,
+    ice_n_thickness_spline_mode="natural",
+    ice_n_porosity_parameters=None,
     fit_ice_k_constant=False,
     fit_ar_hgcdte_modulation=False,
     fit_led_log_offsets=False,
@@ -888,8 +1078,36 @@ def build_prediction_function(
     base_k = jnp.asarray(context["hgcdte_k"])
     ice_modulation_basis_value = None
     spectral_modulation_basis_value = None
-    if fit_ice_n_modulation and fit_ice_n_constant:
-        raise ValueError("Ice n modulation and constant ice n are mutually exclusive")
+    ice_n_thickness_knots = None
+    ice_n_porosity_parameters = validate_ice_n_porosity_parameters(
+        ice_n_porosity_parameters
+    )
+    if ice_n_thickness_spline_mode not in ("natural", "monotonic"):
+        raise ValueError(
+            "Thickness-dependent ice n spline mode must be 'natural' or 'monotonic'"
+        )
+    if ice_n_thickness_knots_nm is not None:
+        ice_n_thickness_knots = np.asarray(
+            ice_n_thickness_knots_nm, dtype=float
+        ).reshape(-1)
+        if (
+            ice_n_thickness_knots.size < 2
+            or np.any(~np.isfinite(ice_n_thickness_knots))
+            or np.any(np.diff(ice_n_thickness_knots) <= 0.0)
+        ):
+            raise ValueError(
+                "Thickness-dependent ice n knots must be finite and strictly increasing"
+            )
+    if sum(
+        bool(value)
+        for value in (
+            fit_ice_n_modulation,
+            fit_ice_n_constant,
+            ice_n_thickness_knots is not None,
+            ice_n_porosity_parameters is not None,
+        )
+    ) > 1:
+        raise ValueError("Ice n wavelength and thickness models are mutually exclusive")
     if fit_ice_n_modulation:
         if "ice_n_modulation_basis" not in context:
             raise ValueError("Ice n modulation requires a wavelength basis")
@@ -998,6 +1216,8 @@ def build_prediction_function(
         incidence_angle_deg,
         ice_n_log_modulation=None,
         ice_n_log_constant=None,
+        ice_n_log_values=None,
+        ice_n_log_thickness_knots=None,
         ice_k_constant=None,
         ar_n_log_modulation=None,
         hgcdte_n_log_modulation=None,
@@ -1019,7 +1239,19 @@ def build_prediction_function(
             angle_sine = jnp.broadcast_to(
                 _incidence_sine(incidence_angle_deg, jnp), (ar_parameters.shape[0],)
             )
-        if fit_ice_n_constant:
+        if ice_n_porosity_parameters is not None:
+            p0, pinf, length_nm, n_solid = ice_n_porosity_parameters
+            porosity = pinf - (pinf - p0) * jnp.exp(
+                -jnp.maximum(ice_thickness, 0.0) / length_nm
+            )
+            solid_lorentz_lorenz = (n_solid**2 - 1.0) / (n_solid**2 + 2.0)
+            effective_lorentz_lorenz = (1.0 - porosity) * solid_lorentz_lorenz
+            effective_n = jnp.sqrt(
+                (1.0 + 2.0 * effective_lorentz_lorenz)
+                / (1.0 - effective_lorentz_lorenz)
+            )
+            ice_index = effective_n[..., None].astype(jnp.complex128)
+        elif fit_ice_n_constant:
             if ice_n_log_constant is None:
                 raise ValueError("Constant ice n values are required")
             ice_index = (
@@ -1036,6 +1268,30 @@ def build_prediction_function(
                 ICE_INDEX_DEFAULT
                 * jnp.exp(modulation @ ice_modulation_basis_value.T)
             )[:, None, :].astype(jnp.complex128)
+        elif ice_n_log_values is not None:
+            ice_index = (
+                ICE_INDEX_DEFAULT
+                * jnp.exp(jnp.asarray(ice_n_log_values).reshape((ar_parameters.shape[0], -1)))
+            )[..., None].astype(jnp.complex128)
+        elif ice_n_thickness_knots is not None:
+            if ice_n_log_thickness_knots is None:
+                raise ValueError("Thickness-dependent ice n values are required")
+            knot_log_values = jnp.asarray(ice_n_log_thickness_knots).reshape(
+                (ar_parameters.shape[0], ice_n_thickness_knots.size)
+            )
+            knot_values = ICE_INDEX_DEFAULT * jnp.exp(knot_log_values)
+            spline_values = (
+                monotonic_cubic_spline_values
+                if ice_n_thickness_spline_mode == "monotonic"
+                else natural_cubic_spline_values
+            )
+            thickness_values = spline_values(
+                ice_n_thickness_knots,
+                knot_values,
+                ice_thickness,
+                jnp,
+            )
+            ice_index = thickness_values[..., None].astype(jnp.complex128)
         else:
             ice_index = jnp.asarray(ICE_INDEX_DEFAULT + 0.0j)
         if fit_ice_k_constant:
@@ -1124,7 +1380,13 @@ def build_prediction_function(
                 ice_thickness, pupil_ray_count, axis=0
             )
             response_ar_index = jnp.repeat(ar_index, pupil_ray_count, axis=0)
-            if fit_ice_n_modulation or fit_ice_n_constant or fit_ice_k_constant:
+            if (
+                fit_ice_n_modulation
+                or fit_ice_n_constant
+                or ice_n_log_values is not None
+                or ice_n_thickness_knots is not None
+                or fit_ice_k_constant
+            ):
                 response_ice_index = jnp.repeat(
                     ice_index, pupil_ray_count, axis=0
                 )
@@ -1195,8 +1457,10 @@ def build_prediction_function(
     counts = jnp.asarray(data["counts"])
     sums = jnp.asarray(data["sums"])
     sum_squared = jnp.asarray(data["sum_squared"])
-    reset_day = float(data.get("reset_day", PRODUCTION_RESET_DAY))
-    reset_mask = jnp.asarray(np.asarray(data["days"], dtype=float) >= reset_day)
+    reset_days = reset_days_for_data(data)
+    reset_mask = jnp.asarray(
+        np.asarray(data["days"], dtype=float)[None, :] >= reset_days[:, None]
+    )
 
     def residual_sum_squares(
         ice_thickness,
@@ -1206,6 +1470,8 @@ def build_prediction_function(
         post_reset_tile_log_offsets=None,
         ice_n_log_modulation=None,
         ice_n_log_constant=None,
+        ice_n_log_values=None,
+        ice_n_log_thickness_knots=None,
         ice_k_constant=None,
         ar_n_log_modulation=None,
         hgcdte_n_log_modulation=None,
@@ -1220,6 +1486,8 @@ def build_prediction_function(
             incidence_angle_deg,
             ice_n_log_modulation=ice_n_log_modulation,
             ice_n_log_constant=ice_n_log_constant,
+            ice_n_log_values=ice_n_log_values,
+            ice_n_log_thickness_knots=ice_n_log_thickness_knots,
             ice_k_constant=ice_k_constant,
             ar_n_log_modulation=ar_n_log_modulation,
             hgcdte_n_log_modulation=hgcdte_n_log_modulation,
@@ -1229,7 +1497,15 @@ def build_prediction_function(
         observed = sums / jnp.maximum(counts, 1.0)
         if post_reset_tile_log_offsets is not None:
             offsets = jnp.asarray(post_reset_tile_log_offsets).reshape(-1)
-            observed = observed + offsets[:, None] * reset_mask[None, :]
+            if offsets.size == reset_mask.shape[0] * counts.shape[0]:
+                offsets = offsets.reshape((reset_mask.shape[0], counts.shape[0]))
+            elif reset_mask.shape[0] == 1 and offsets.size == counts.shape[0]:
+                offsets = offsets.reshape((1, counts.shape[0]))
+            else:
+                raise ValueError("Reset offset values do not match the reset layout")
+            observed = observed + jnp.sum(
+                offsets[:, :, None] * reset_mask[:, None, :], axis=0
+            )
         safe_counts = jnp.maximum(counts, 1.0)
         within_group = sum_squared - sums * sums / safe_counts
         total = jnp.sum(within_group + counts * (fitted - observed) ** 2)
@@ -1253,20 +1529,20 @@ def _trajectory_state(
 ):
     days = jnp.asarray(data["days"])
     node_days = jnp.asarray(data["node_days"])
-    reset_day = float(data.get("reset_day", PRODUCTION_RESET_DAY))
+    reset_days = reset_days_for_data(data)
     integration_times = np.unique(
         np.concatenate(
             (
                 [float(np.min(data["days"]))],
                 np.asarray(data["node_days"], dtype=float),
                 [float(np.max(data["days"]))],
-                [reset_day],
+                reset_days,
             )
         )
     )
     integration_times = integration_times[(integration_times >= np.min(data["days"])) & (integration_times <= np.max(data["days"]))]
     profiles = jnp.asarray(log_rate_nodes).reshape((-1, len(data["node_days"])))
-    reset_times = jnp.asarray([reset_day])
+    reset_times = jnp.asarray(reset_days)
     integrated, rates, node_integrated, node_rates, reset_integrated = jax.vmap(
         lambda profile: integrate_rate_trajectory(
             jax,
@@ -1278,25 +1554,37 @@ def _trajectory_state(
             extra_times=reset_times,
         )
     )(profiles)
-    reset_integrated = reset_integrated[:, 0]
     prior, _, _ = _initial_thickness_settings(
         initial_thickness_prior,
         INITIAL_THICKNESS_HALF_NORMAL_SIGMA_NM,
     )
     if prior == INITIAL_THICKNESS_PRIOR_LOGNORMAL:
         initial = jnp.exp(jnp.asarray(initial_thickness)).reshape(-1)
-        reset_initial = jnp.exp(jnp.asarray(reset_initial_thickness)).reshape(-1)
+        reset_initial = jnp.exp(jnp.asarray(reset_initial_thickness))
     else:
         initial = jnp.asarray(initial_thickness).reshape(-1)
-        reset_initial = jnp.asarray(reset_initial_thickness).reshape(-1)
-    post = days[None, :] >= reset_day
-    integrated = jnp.where(post, integrated - reset_integrated[:, None], integrated)
-    node_post = node_days[None, :] >= reset_day
-    node_integrated = jnp.where(
-        node_post, node_integrated - reset_integrated[:, None], node_integrated
-    )
-    ice = jnp.where(post, reset_initial[:, None], initial[:, None]) + integrated
-    node_ice = jnp.where(node_post, reset_initial[:, None], initial[:, None]) + node_integrated
+        reset_initial = jnp.asarray(reset_initial_thickness)
+    if reset_initial.ndim == 1:
+        reset_initial = reset_initial[None, :]
+    reset_initial = reset_initial.reshape((len(reset_days), -1))
+    ice = initial[:, None] + integrated
+    node_ice = initial[:, None] + node_integrated
+    for reset_index, reset_day in enumerate(reset_days):
+        post = days >= reset_day
+        integrated_since_reset = integrated - reset_integrated[:, reset_index, None]
+        node_integrated_since_reset = (
+            node_integrated - reset_integrated[:, reset_index, None]
+        )
+        ice = jnp.where(
+            post[None, :],
+            reset_initial[reset_index, :, None] + integrated_since_reset,
+            ice,
+        )
+        node_ice = jnp.where(
+            node_days[None, :] >= reset_day,
+            reset_initial[reset_index, :, None] + node_integrated_since_reset,
+            node_ice,
+        )
     return ice, rates, node_ice, node_rates
 
 
@@ -1304,45 +1592,63 @@ def _direct_thickness_state(data, log_thickness_nodes, jax, jnp):
     """Evaluate a piecewise-linear direct-thickness trajectory."""
     days = jnp.asarray(data["days"])
     node_days = np.asarray(data["node_days"], dtype=float)
-    reset_day = float(data.get("reset_day", PRODUCTION_RESET_DAY))
-    pre_indices = np.flatnonzero(node_days < reset_day)
-    post_indices = np.flatnonzero(node_days >= reset_day)
-    if pre_indices.size < 2 or post_indices.size < 2:
-        raise ValueError("Direct thickness requires at least two nodes on each reset side")
+    reset_days = reset_days_for_data(data)
+    observation_min = float(np.min(data["days"]))
+    observation_max = float(np.max(data["days"]))
+    active_reset_days = reset_days[
+        (reset_days > observation_min) & (reset_days < observation_max)
+    ]
+    boundaries = np.concatenate(([observation_min], active_reset_days, [observation_max]))
+    node_indices = []
+    for index in range(boundaries.size - 1):
+        left = boundaries[index]
+        right = boundaries[index + 1]
+        if index == boundaries.size - 2:
+            mask = (node_days >= left) & (node_days <= right)
+        else:
+            mask = (node_days >= left) & (node_days < right)
+        indices = np.flatnonzero(mask)
+        if indices.size < 2:
+            raise ValueError(
+                "Direct thickness requires at least two nodes in each reset segment"
+            )
+        node_indices.append(indices)
 
     profiles = jnp.exp(jnp.asarray(log_thickness_nodes)).reshape(
         (-1, len(node_days))
     )
-    pre_times = jnp.asarray(node_days[pre_indices])
-    post_times = jnp.asarray(node_days[post_indices])
-    pre_values = profiles[:, pre_indices]
-    post_values = profiles[:, post_indices]
-
-    pre_ice = jax.vmap(
-        lambda profile: jnp.interp(days, pre_times, profile)
-    )(pre_values)
-    post_ice = jax.vmap(
-        lambda profile: jnp.interp(days, post_times, profile)
-    )(post_values)
-    post = jnp.asarray(np.asarray(data["days"], dtype=float) >= reset_day)
-    ice = jnp.where(post[None, :], post_ice, pre_ice)
+    ice = jnp.zeros((profiles.shape[0], days.size))
+    node_rates = jnp.zeros_like(profiles)
+    rates = jnp.zeros((profiles.shape[0], days.size))
 
     def node_slopes(values, times):
         slopes = jnp.diff(values) / jnp.diff(times)
         return jnp.concatenate((slopes, slopes[:, -1:]), axis=1)
 
-    pre_rates = node_slopes(pre_values, pre_times)
-    post_rates = node_slopes(post_values, post_times)
-    node_rates = jnp.zeros_like(profiles)
-    node_rates = node_rates.at[:, pre_indices].set(pre_rates)
-    node_rates = node_rates.at[:, post_indices].set(post_rates)
-    pre_observation_rates = jax.vmap(
-        lambda profile: jnp.interp(days, pre_times, profile)
-    )(pre_rates)
-    post_observation_rates = jax.vmap(
-        lambda profile: jnp.interp(days, post_times, profile)
-    )(post_rates)
-    rates = jnp.where(post[None, :], post_observation_rates, pre_observation_rates)
+    for index, indices in enumerate(node_indices):
+        times = jnp.asarray(node_days[indices])
+        values = profiles[:, indices]
+        segment_ice = jax.vmap(lambda profile: jnp.interp(days, times, profile))(values)
+        segment_rates = node_slopes(values, times)
+        segment_observation_rates = jax.vmap(
+            lambda profile: jnp.interp(days, times, profile)
+        )(segment_rates)
+        left = boundaries[index]
+        right = boundaries[index + 1]
+        if index == len(node_indices) - 1:
+            observation_mask = (np.asarray(data["days"]) >= left) & (
+                np.asarray(data["days"]) <= right
+            )
+        else:
+            observation_mask = (np.asarray(data["days"]) >= left) & (
+                np.asarray(data["days"]) < right
+            )
+        observation_mask = jnp.asarray(observation_mask)
+        ice = jnp.where(observation_mask[None, :], segment_ice, ice)
+        rates = jnp.where(
+            observation_mask[None, :], segment_observation_rates, rates
+        )
+        node_rates = node_rates.at[:, indices].set(segment_rates)
     node_ice = profiles
     return ice, rates, node_ice, node_rates
 
@@ -1395,26 +1701,25 @@ def _least_squares_prior_residuals(
 
     add_optical_normal("ar_tile_raw", ar_prior_center_raw, ar_prior_sigma_raw)
     if trajectory_parameterization == "rate":
-        initial_thickness_prior, initial_thickness_prior_sigma_nm, thickness_names = (
+        initial_thickness_prior, initial_thickness_prior_sigma_nm, _ = (
             _initial_thickness_settings(
                 initial_thickness_prior,
                 initial_thickness_prior_sigma_nm,
             )
         )
+        thickness_names, offset_names = reset_site_names(
+            data, initial_thickness_prior
+        )
         if initial_thickness_prior == INITIAL_THICKNESS_PRIOR_LOGNORMAL:
-            add_normal(
-                thickness_names[0],
-                np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM),
-                INITIAL_THICKNESS_LOG_SIGMA,
-            )
-            add_normal(
-                thickness_names[1],
-                np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM),
-                INITIAL_THICKNESS_LOG_SIGMA,
-            )
+            for name in thickness_names:
+                add_normal(
+                    name,
+                    np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM),
+                    INITIAL_THICKNESS_LOG_SIGMA,
+                )
         else:
-            add_normal(thickness_names[0], 0.0, initial_thickness_prior_sigma_nm)
-            add_normal(thickness_names[1], 0.0, initial_thickness_prior_sigma_nm)
+            for name in thickness_names:
+                add_normal(name, 0.0, initial_thickness_prior_sigma_nm)
         if rate_prior_log_mean is None:
             rate_prior_log_mean = np.log(TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY)
         add_normal(
@@ -1422,7 +1727,12 @@ def _least_squares_prior_residuals(
             rate_prior_log_mean,
             trajectory_rate_prior_sigma_log,
         )
-    add_normal("post_reset_tile_log_offset", 0.0, POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA)
+    _, offset_names = reset_site_names(
+        data,
+        initial_thickness_prior,
+    )
+    for name in offset_names:
+        add_normal(name, 0.0, POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA)
     if "led_log_offsets" in values:
         add_optical_normal("led_log_offsets", 0.0, led_log_offset_prior_sigma_log)
     if fixed_absolute_hgcdte_n_log_scale is None:
@@ -1516,6 +1826,7 @@ def build_model(
     fit_ice_n_constant=False,
     ice_n_constant_prior_sigma_log=ICE_N_CONSTANT_PRIOR_SIGMA_LOG,
     ice_n_constant_reference=ICE_INDEX_DEFAULT,
+    ice_n_porosity_parameters=None,
     fit_ice_k_constant=False,
     ice_k_prior_sigma=ICE_K_PRIOR_SIGMA,
     fit_ar_k_constant=False,
@@ -1548,11 +1859,14 @@ def build_model(
         smoothness_weight = NP_SMOOTHNESS_WEIGHT
     if smoothness_weight < 0.0 or entropy_weight < 0.0:
         raise ValueError("Regularization weights must be non-negative")
-    initial_thickness_prior, initial_thickness_prior_sigma_nm, thickness_names = (
+    initial_thickness_prior, initial_thickness_prior_sigma_nm, _ = (
         _initial_thickness_settings(
             initial_thickness_prior,
             initial_thickness_prior_sigma_nm,
         )
+    )
+    thickness_names, offset_names = reset_site_names(
+        data, initial_thickness_prior
     )
     if (
         not np.isfinite(trajectory_rate_prior_sigma_log)
@@ -1584,12 +1898,22 @@ def build_model(
         raise ValueError("Constant ice n prior sigma must be positive and finite")
     if not np.isfinite(ice_n_constant_reference) or ice_n_constant_reference <= 0.0:
         raise ValueError("Constant ice n prior reference must be positive and finite")
+    ice_n_porosity_parameters = validate_ice_n_porosity_parameters(
+        ice_n_porosity_parameters
+    )
     if not np.isfinite(ice_k_prior_sigma) or ice_k_prior_sigma <= 0.0:
         raise ValueError("Constant ice k prior sigma must be positive and finite")
     if not np.isfinite(ar_k_prior_sigma) or ar_k_prior_sigma <= 0.0:
         raise ValueError("Constant AR k prior sigma must be positive and finite")
-    if fit_ice_n_modulation and fit_ice_n_constant:
-        raise ValueError("Ice n modulation and constant ice n are mutually exclusive")
+    if sum(
+        bool(value)
+        for value in (
+            fit_ice_n_modulation,
+            fit_ice_n_constant,
+            ice_n_porosity_parameters is not None,
+        )
+    ) > 1:
+        raise ValueError("Ice n models are mutually exclusive")
     if (
         not np.isfinite(ar_hgcdte_modulation_prior_sigma_log)
         or ar_hgcdte_modulation_prior_sigma_log <= 0.0
@@ -1638,7 +1962,8 @@ def build_model(
         ).copy()
         if np.any(~np.isfinite(entropy_reference_log_rates)):
             raise ValueError("Entropy reference rates must be finite")
-    reset_day = float(data.get("reset_day", PRODUCTION_RESET_DAY))
+    reset_days = reset_days_for_data(data)
+    reset_count = reset_days.size
     n_rows = n_scas * n_tiles
     if n_rows != np.asarray(data["counts"]).shape[0]:
         raise ValueError("Tile statistics do not match the SCA/tile layout")
@@ -1679,6 +2004,7 @@ def build_model(
         ),
         fit_ice_n_modulation=fit_ice_n_modulation,
         fit_ice_n_constant=fit_ice_n_constant,
+        ice_n_porosity_parameters=ice_n_porosity_parameters,
         fit_ice_k_constant=fit_ice_k_constant,
         fit_ar_hgcdte_modulation=fit_ar_hgcdte_modulation,
         fit_led_log_offsets=fit_led_log_offsets,
@@ -1703,31 +2029,49 @@ def build_model(
 
     observation_min_day = float(np.min(data["days"]))
     observation_max_day = float(np.max(data["days"]))
+    active_reset_days = reset_days[
+        (reset_days > observation_min_day) & (reset_days < observation_max_day)
+    ]
+    segment_boundaries = np.concatenate(
+        ([observation_min_day], active_reset_days, [observation_max_day])
+    )
     segment_integration_times = jnp.asarray(
         np.unique(
             np.concatenate(
                 (
                     [observation_min_day],
                     np.asarray(data["node_days"], dtype=float),
-                    [observation_max_day, reset_day],
+                    [observation_max_day],
+                    reset_days,
                 )
             )
         )
     )
     node_days_array = np.asarray(data["node_days"], dtype=float)
-    pre_node_indices = np.flatnonzero(node_days_array < reset_day)
-    post_node_indices = np.flatnonzero(node_days_array >= reset_day)
+    segment_node_indices = []
+    for segment_index in range(segment_boundaries.size - 1):
+        left = segment_boundaries[segment_index]
+        right = segment_boundaries[segment_index + 1]
+        if segment_index == segment_boundaries.size - 2:
+            mask = (node_days_array >= left) & (node_days_array <= right)
+        else:
+            mask = (node_days_array >= left) & (node_days_array < right)
+        indices = np.flatnonzero(mask)
+        if indices.size < 2:
+            raise ValueError(
+                "The trajectory requires at least two nodes in each reset segment"
+            )
+        segment_node_indices.append(indices)
 
     def segment_rate_means(values, state):
-        cross_reset_rate = (
-            (state["ice"][:, -1] - state["ice"][:, 0])
-            / (observation_max_day - observation_min_day)
+        cross_reset_rate = (state["ice"][:, -1] - state["ice"][:, 0]) / (
+            observation_max_day - observation_min_day
         )
-        if not observation_min_day < reset_day < observation_max_day:
-            return cross_reset_rate, cross_reset_rate, cross_reset_rate
-        if pre_node_indices.size < 2 or post_node_indices.size < 2:
-            raise ValueError(
-                "The trajectory requires at least two nodes on each reset side"
+        if not active_reset_days.size:
+            return (
+                cross_reset_rate[:, None],
+                cross_reset_rate,
+                cross_reset_rate,
             )
         if trajectory_parameterization == "rate":
             profiles = rate_nodes_from_values(values).reshape(
@@ -1744,32 +2088,27 @@ def build_model(
                     profile,
                 )[0][0]
 
-            reset_integrated = jax.vmap(
-                lambda profile: integrated_at(profile, reset_day)
+            boundary_integrated = jax.vmap(
+                lambda profile: jax.vmap(
+                    lambda target_day: integrated_at(profile, target_day)
+                )(jnp.asarray(segment_boundaries))
             )(profiles)
-            final_integrated = jax.vmap(
-                lambda profile: integrated_at(profile, observation_max_day)
-            )(profiles)
-            pre_accumulation = reset_integrated
-            post_accumulation = final_integrated - reset_integrated
+            segment_accumulation = jnp.diff(boundary_integrated, axis=1)
         else:
             node_ice = state["node_ice"]
-            pre_accumulation = (
-                node_ice[:, pre_node_indices[-1]]
-                - node_ice[:, pre_node_indices[0]]
+            segment_accumulation = jnp.stack(
+                [
+                    node_ice[:, indices[-1]] - node_ice[:, indices[0]]
+                    for indices in segment_node_indices
+                ],
+                axis=1,
             )
-            post_accumulation = (
-                node_ice[:, post_node_indices[-1]]
-                - node_ice[:, post_node_indices[0]]
-            )
-        pre_duration = reset_day - observation_min_day
-        post_duration = observation_max_day - reset_day
-        pre_rate = pre_accumulation / pre_duration
-        post_rate = post_accumulation / post_duration
-        reset_aware_rate = (
-            pre_accumulation + post_accumulation
-        ) / (pre_duration + post_duration)
-        return pre_rate, post_rate, reset_aware_rate
+        segment_duration = jnp.asarray(np.diff(segment_boundaries))
+        segment_rates = segment_accumulation / segment_duration[None, :]
+        reset_aware_rate = jnp.sum(segment_accumulation, axis=1) / jnp.sum(
+            segment_duration
+        )
+        return segment_rates, segment_rates[:, 0], reset_aware_rate
 
     def state_from_values(values):
         ar_parameters = _physical_ar_parameters(values["ar_tile_raw"], jax, jnp)
@@ -1796,7 +2135,12 @@ def build_model(
                 data,
                 rate_nodes_from_values(values),
                 values[thickness_names[0]],
-                values[thickness_names[1]],
+                jnp.stack(
+                    [values[name] for name in thickness_names[1:]],
+                    axis=0,
+                )
+                if len(thickness_names) > 2
+                else values[thickness_names[1]],
                 jax,
                 jnp,
                 initial_thickness_prior=initial_thickness_prior,
@@ -1806,12 +2150,17 @@ def build_model(
             (values["absolute_hgcdte_n_log_scale"], values["absolute_hgcdte_k_log_scale"]),
             axis=-1,
         ).reshape((n_rows, 2))
+        reset_offsets = (
+            jnp.stack([values[name] for name in offset_names], axis=0)
+            if len(offset_names) > 1
+            else values[offset_names[0]]
+        )
         total_sse, prediction = predictor.residual_sum_squares(
             ice,
             row_ar,
             hgcdte,
             values["incidence_angle_deg"] if fit_incidence_angle else 0.0,
-            post_reset_tile_log_offsets=values["post_reset_tile_log_offset"].reshape(-1),
+            post_reset_tile_log_offsets=reset_offsets,
             ice_n_log_modulation=(
                 values["ice_n_log_modulation"]
                 if fit_ice_n_modulation
@@ -1876,10 +2225,14 @@ def build_model(
         state = state_from_values(values)
         counts = jnp.asarray(data["counts"])
         observed = jnp.asarray(data["sums"]) / jnp.maximum(counts, 1.0)
-        post_mask = jnp.asarray(np.asarray(data["days"]) >= reset_day)
-        observed = observed + (
-            jnp.asarray(values["post_reset_tile_log_offset"]).reshape(-1, 1)
-            * post_mask[None, :]
+        post_mask = jnp.asarray(
+            np.asarray(data["days"], dtype=float)[None, :] >= reset_days[:, None]
+        )
+        reset_offsets = jnp.stack(
+            [values[name].reshape(-1) for name in offset_names], axis=0
+        )
+        observed = observed + jnp.sum(
+            reset_offsets[:, :, None] * post_mask[:, None, :], axis=0
         )
         data_residual = (
             jnp.sqrt(likelihood_weight / n_tiles)
@@ -1933,12 +2286,6 @@ def build_model(
                 .expand((n_scas, n_tiles, len(active)))
                 .to_event(3),
             ),
-            "post_reset_tile_log_offset": numpyro.sample(
-                "post_reset_tile_log_offset",
-                dist.Normal(0.0, POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA)
-                .expand((n_scas, n_tiles))
-                .to_event(2),
-            ),
             "absolute_hgcdte_k_log_scale": numpyro.sample(
                 "absolute_hgcdte_k_log_scale",
                 dist.Normal(
@@ -1949,6 +2296,13 @@ def build_model(
                 .to_event(2),
             ),
         }
+        for name in offset_names:
+            values[name] = numpyro.sample(
+                name,
+                dist.Normal(0.0, POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA)
+                .expand((n_scas, n_tiles))
+                .to_event(2),
+            )
         if trajectory_parameterization == "thickness":
             values["np_log_thickness_nodes"] = numpyro.sample(
                 "np_log_thickness_nodes",
@@ -1957,37 +2311,24 @@ def build_model(
                 .to_event(3),
             )
         elif initial_thickness_prior == INITIAL_THICKNESS_PRIOR_LOGNORMAL:
-            values[thickness_names[0]] = numpyro.sample(
-                thickness_names[0],
-                dist.Normal(
-                    np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM),
-                    INITIAL_THICKNESS_LOG_SIGMA,
+            for name in thickness_names:
+                values[name] = numpyro.sample(
+                    name,
+                    dist.Normal(
+                        np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM),
+                        INITIAL_THICKNESS_LOG_SIGMA,
+                    )
+                    .expand((n_scas, n_tiles))
+                    .to_event(2),
                 )
-                .expand((n_scas, n_tiles))
-                .to_event(2),
-            )
-            values[thickness_names[1]] = numpyro.sample(
-                thickness_names[1],
-                dist.Normal(
-                    np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM),
-                    INITIAL_THICKNESS_LOG_SIGMA,
-                )
-                .expand((n_scas, n_tiles))
-                .to_event(2),
-            )
         else:
-            values[thickness_names[0]] = numpyro.sample(
-                thickness_names[0],
-                dist.HalfNormal(initial_thickness_prior_sigma_nm)
-                .expand((n_scas, n_tiles))
-                .to_event(2),
-            )
-            values[thickness_names[1]] = numpyro.sample(
-                thickness_names[1],
-                dist.HalfNormal(initial_thickness_prior_sigma_nm)
-                .expand((n_scas, n_tiles))
-                .to_event(2),
-            )
+            for name in thickness_names:
+                values[name] = numpyro.sample(
+                    name,
+                    dist.HalfNormal(initial_thickness_prior_sigma_nm)
+                    .expand((n_scas, n_tiles))
+                    .to_event(2),
+                )
         if fixed_absolute_hgcdte_n_log_scale is None:
             values["absolute_hgcdte_n_log_scale"] = numpyro.sample(
                 "absolute_hgcdte_n_log_scale",
@@ -2115,7 +2456,7 @@ def build_model(
                 .to_event(2),
             )
         state = state_from_values(values)
-        pre_reset_rate, post_reset_rate, reset_aware_rate = segment_rate_means(
+        segment_rates, pre_reset_rate, reset_aware_rate = segment_rate_means(
             values,
             state,
         )
@@ -2195,8 +2536,15 @@ def build_model(
         )
         numpyro.deterministic(
             "tile_post_reset_mean_rate_nm_day",
-            post_reset_rate.reshape((n_scas, n_tiles)),
+            segment_rates[:, min(1, segment_rates.shape[1] - 1)].reshape(
+                (n_scas, n_tiles)
+            ),
         )
+        if active_reset_days.size >= 2:
+            numpyro.deterministic(
+                "tile_post_third_decon_mean_rate_nm_day",
+                segment_rates[:, 2].reshape((n_scas, n_tiles)),
+            )
         numpyro.deterministic(
             "tile_cross_reset_mean_rate_nm_day",
             cross_reset_rate.reshape((n_scas, n_tiles)),
@@ -2211,8 +2559,13 @@ def build_model(
         )
         numpyro.deterministic(
             "post_reset_mean_rate_nm_day",
-            jnp.mean(post_reset_rate),
+            jnp.mean(segment_rates[:, min(1, segment_rates.shape[1] - 1)]),
         )
+        if active_reset_days.size >= 2:
+            numpyro.deterministic(
+                "post_third_decon_mean_rate_nm_day",
+                jnp.mean(segment_rates[:, 2]),
+            )
         numpyro.deterministic(
             "cross_reset_mean_rate_nm_day",
             jnp.mean(cross_reset_rate),
@@ -2243,49 +2596,50 @@ def initial_values_for_data(
         raise ValueError("Trajectory parameterization must be 'rate' or 'thickness'")
     if trajectory_parameterization == "thickness" and constant_rate:
         raise ValueError("Direct thickness cannot be combined with constant_rate")
-    initial_thickness_prior, initial_thickness_prior_sigma_nm, thickness_names = (
+    initial_thickness_prior, initial_thickness_prior_sigma_nm, _ = (
         _initial_thickness_settings(
             initial_thickness_prior,
             initial_thickness_prior_sigma_nm,
         )
+    )
+    thickness_names, offset_names = reset_site_names(
+        data, initial_thickness_prior
     )
     active = ar_active_parameter_indices()
     reference_raw = ar_reference_raw(*ar_prior_arrays(), active)
     shape = (int(data["n_scas"]), int(data["n_tiles"]))
     values = {
         "ar_tile_raw": np.broadcast_to(reference_raw, shape + (len(active),)).copy(),
-        "post_reset_tile_log_offset": np.zeros(shape),
         "absolute_hgcdte_n_log_scale": np.zeros(shape),
         "absolute_hgcdte_k_log_scale": np.zeros(shape),
     }
+    for name in offset_names:
+        values[name] = np.zeros(shape)
     if trajectory_parameterization == "rate":
         if initial_thickness_prior == INITIAL_THICKNESS_PRIOR_LOGNORMAL:
-            values[thickness_names[0]] = np.full(
-                shape,
-                np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM),
-            )
-            values[thickness_names[1]] = np.full(
-                shape,
-                np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM),
-            )
+            thickness_initial = np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM)
         else:
             # Start at the half-normal mean while retaining a zero lower bound.
-            initial_mean = initial_thickness_prior_sigma_nm * np.sqrt(2.0 / np.pi)
-            values[thickness_names[0]] = np.full(shape, initial_mean)
-            values[thickness_names[1]] = np.full(shape, initial_mean)
+            thickness_initial = initial_thickness_prior_sigma_nm * np.sqrt(2.0 / np.pi)
+        for name in thickness_names:
+            values[name] = np.full(shape, thickness_initial)
     if fit_incidence_angle:
         values["incidence_angle_deg"] = float(INCIDENCE_ANGLE_INIT_DEG)
     if fixed_absolute_hgcdte_n_log_scale is not None:
         values.pop("absolute_hgcdte_n_log_scale")
     if trajectory_parameterization == "thickness":
         node_days = np.asarray(data["node_days"], dtype=float)
-        reset_day = float(data.get("reset_day", PRODUCTION_RESET_DAY))
+        reset_days = reset_days_for_data(data)
         initial = INITIAL_THICKNESS_LOG_MEDIAN_NM
-        thickness = np.where(
-            node_days < reset_day,
-            initial + TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY * (node_days - node_days[0]),
-            initial + TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY * (node_days - reset_day),
+        thickness = initial + TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY * (
+            node_days - node_days[0]
         )
+        for reset_day in reset_days:
+            thickness = np.where(
+                node_days >= reset_day,
+                initial + TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY * (node_days - reset_day),
+                thickness,
+            )
         values["np_log_thickness_nodes"] = np.broadcast_to(
             np.log(thickness), shape + (len(node_days),)
         ).copy()
@@ -2407,6 +2761,9 @@ def map_parameter_scale_values(
         "log_rate_scale": trajectory_rate_prior_sigma_log,
         "np_log_thickness_nodes": 1.0,
         "post_reset_tile_log_offset": POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA,
+        "post_third_decon_tile_log_offset": POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA,
+        "third_decon_initial_thickness_log_nm": INITIAL_THICKNESS_LOG_SIGMA,
+        "third_decon_initial_thickness_nm": thickness_scale,
         "absolute_hgcdte_n_log_scale": absolute_hgcdte_n_scale_prior_sigma_log,
         "absolute_hgcdte_k_log_scale": ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG,
         "ice_n_log_modulation": ice_n_modulation_prior_sigma_log,
@@ -2693,6 +3050,19 @@ def load_map_warm_start(
                 source_name = "reset_initial_thickness_nm"
                 transform = np.log
                 require_positive = True
+            elif (
+                name == "third_decon_initial_thickness_nm"
+                and source_name not in samples
+            ):
+                source_name = "third_decon_initial_thickness_log_nm"
+                transform = np.exp
+            elif (
+                name == "third_decon_initial_thickness_log_nm"
+                and source_name not in samples
+            ):
+                source_name = "third_decon_initial_thickness_nm"
+                transform = np.log
+                require_positive = True
             if source_name not in samples:
                 continue
             target_array = np.asarray(target)
@@ -2749,7 +3119,10 @@ def fit_map_state(config):
     """Fit a map and return its state without writing production outputs."""
     jax, _, _, _ = require_numpyro()
     jax.config.update("jax_enable_x64", True)
-    data = load_tile_statistics(config.tile_statistics)
+    data = load_tile_statistics(
+        config.tile_statistics,
+        third_decon_day=config.third_decon_day,
+    )
     context = load_response_context(
         data["sca_names"],
         sed_weighting=config.sed_weighting,
@@ -2829,6 +3202,7 @@ def fit_map_state(config):
         fit_ice_n_constant=config.fit_ice_n_constant,
         ice_n_constant_prior_sigma_log=config.ice_n_constant_prior_sigma_log,
         ice_n_constant_reference=config.ice_n_constant_reference,
+        ice_n_porosity_parameters=config.ice_n_porosity_parameters,
         fit_ice_k_constant=config.fit_ice_k_constant,
         ice_k_prior_sigma=config.ice_k_prior_sigma,
         fit_ar_k_constant=config.fit_ar_k_constant,
@@ -3030,7 +3404,9 @@ def write_outputs(
             if initial_thickness_prior == INITIAL_THICKNESS_PRIOR_LOGNORMAL
             else np.nan
         ),
-        "ice_reset_day": np.asarray(float(data.get("reset_day", PRODUCTION_RESET_DAY))),
+        "ice_reset_day": np.asarray(
+            float(reset_days_for_data(data)[0])
+        ),
         "fit_post_reset_tile_log_offset": np.asarray(1),
         "post_reset_tile_log_offset_prior_sigma": np.asarray(POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA),
         "fit_incidence_angle": np.asarray(1),
@@ -3047,6 +3423,11 @@ def write_outputs(
         "map_group_rms_log": np.asarray(group_rms_log),
         "map_count_weighted_rms_log": np.asarray(count_weighted_rms_log),
     }
+    reset_days = reset_days_for_data(data)
+    if reset_days.size > 1:
+        metadata["ice_reset_days"] = np.asarray(reset_days, dtype=float)
+        metadata["third_decon_day"] = np.asarray(float(reset_days[1]))
+        metadata["fit_post_third_decon_tile_log_offset"] = np.asarray(1)
     for name, value in (model_metadata or {}).items():
         if value is not None:
             metadata[str(name)] = np.asarray(value)
@@ -3186,7 +3567,7 @@ def write_outputs(
             f"- Strict gradient convergence: `{diagnostics['gradient_converged']}`.",
             f"- Function/step/gradient tolerances: `{diagnostics['function_tolerance']}` / `{diagnostics['step_tolerance']}` / `{diagnostics['gradient_tolerance']}`.",
             f"- Termination: `{diagnostics['message']}`.",
-            f"- Ice reset day: `{float(data.get('reset_day', PRODUCTION_RESET_DAY))}` (input Program 1063 boundary when available).",
+            f"- Ice reset days: `{reset_days_for_data(data).tolist()}` (physical boundaries; Program 1063 supplies the first when available).",
             f"- SED weighting: `{(model_metadata or {}).get('sed_weighting', 'energy')}`.",
             f"- QE response mode: `{(model_metadata or {}).get('qe_response_mode', 'none')}`.",
             (
@@ -3202,6 +3583,14 @@ def write_outputs(
             f"- Thickness penalty: shared `{(model_metadata or {}).get('thickness_penalty_lambda_shared', 0.0)}`, disagreement `{(model_metadata or {}).get('thickness_penalty_lambda_disagreement', 0.0)}`.",
             f"- Constant ice n prior reference: `{(model_metadata or {}).get('ice_n_constant_reference', ICE_INDEX_DEFAULT)}`; log sigma `{(model_metadata or {}).get('ice_n_constant_prior_sigma_log', ICE_N_CONSTANT_PRIOR_SIGMA_LOG)}`.",
             f"- Constant ice n fixed: `{(model_metadata or {}).get('ice_n_fixed_value', 'not fixed')}`.",
+            (
+                f"- Ice n relationship: Lorentz-Lorenz porosity with p0 `{(model_metadata or {}).get('ice_n_porosity_p0')}`, "
+                f"p_inf `{(model_metadata or {}).get('ice_n_porosity_pinf')}`, "
+                f"L `{(model_metadata or {}).get('ice_n_porosity_length_nm')}` nm, "
+                f"solid n `{(model_metadata or {}).get('ice_n_porosity_solid_n')}`."
+                if (model_metadata or {}).get("ice_n_model") == "lorentz_lorenz_porosity"
+                else "- Ice n relationship: not using the fixed porosity relation."
+            ),
             f"- Trajectory regularization: `{(model_metadata or {}).get('trajectory_regularization', 'curvature')}`.",
             f"- Trajectory curvature weight: `{(model_metadata or {}).get('trajectory_smoothness_weight', NP_SMOOTHNESS_WEIGHT)}`.",
             f"- Trajectory entropy weight: `{(model_metadata or {}).get('trajectory_entropy_weight', 0.0)}`.",
@@ -3229,9 +3618,13 @@ def fit_one(config):
     run_start = time.perf_counter()
     data, _, map_values, diagnostics, evaluated = fit_map_state(config)
     observed = np.asarray(data["sums"], dtype=float) / np.asarray(data["counts"], dtype=float)
-    observed += np.asarray(map_values["post_reset_tile_log_offset"]).reshape(-1, 1) * (
-        np.asarray(data["days"])[None, :] >= float(data.get("reset_day", PRODUCTION_RESET_DAY))
+    reset_days = reset_days_for_data(data)
+    offset_names = reset_site_names(data, config.initial_thickness_prior)[1]
+    reset_masks = np.asarray(data["days"], dtype=float)[None, :] >= reset_days[:, None]
+    reset_offsets = np.stack(
+        [np.asarray(map_values[name]).reshape(-1) for name in offset_names], axis=0
     )
+    observed += np.sum(reset_offsets[:, :, None] * reset_masks[:, None, :], axis=0)
     fit_diagnostics = {
         "observed": observed,
         "prediction": np.asarray(evaluated["_map_least_squares_prediction"]),
@@ -3287,6 +3680,15 @@ def fit_one(config):
     model_metadata.setdefault(
         "ice_n_constant_reference", float(config.ice_n_constant_reference)
     )
+    if config.ice_n_porosity_parameters is not None:
+        p0, pinf, length_nm, n_solid = validate_ice_n_porosity_parameters(
+            config.ice_n_porosity_parameters
+        )
+        model_metadata.setdefault("ice_n_model", "lorentz_lorenz_porosity")
+        model_metadata.setdefault("ice_n_porosity_p0", p0)
+        model_metadata.setdefault("ice_n_porosity_pinf", pinf)
+        model_metadata.setdefault("ice_n_porosity_length_nm", length_nm)
+        model_metadata.setdefault("ice_n_porosity_solid_n", n_solid)
     if config.fixed_ice_n_log_constant is not None:
         model_metadata.setdefault(
             "ice_n_fixed_log_constant", float(config.fixed_ice_n_log_constant)

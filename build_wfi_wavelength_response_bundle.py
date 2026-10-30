@@ -156,19 +156,30 @@ def load_fit_trajectory(path):
     ).reshape(-1)
     if thickness.shape != days.shape or rates.shape != days.shape:
         raise ValueError(f"Fit trajectory shape mismatch in {path}")
-    grey_offset = float(
-        np.asarray(fit["post_reset_tile_log_offset"]).reshape(-1)[0]
-    )
+    grey_offset = float(np.asarray(fit["post_reset_tile_log_offset"]).reshape(-1)[0])
     reset_day = float(np.asarray(fit["ice_reset_day"]).reshape(-1)[0])
-    return (
-        fit,
-        days,
-        thickness,
-        rates,
-        load_observation_times(fit, days),
-        grey_offset,
-        reset_day,
-    )
+    third_offset = None
+    third_day = None
+    if "post_third_decon_tile_log_offset" in fit or "third_decon_day" in fit:
+        if "post_third_decon_tile_log_offset" not in fit or "third_decon_day" not in fit:
+            raise ValueError(f"Incomplete third-decon fields in {path}")
+        third_offset = float(
+            np.asarray(fit["post_third_decon_tile_log_offset"]).reshape(-1)[0]
+        )
+        third_day = float(np.asarray(fit["third_decon_day"]).reshape(-1)[0])
+        if not np.isfinite(third_day) or third_day <= reset_day:
+            raise ValueError(f"Invalid third-decon day in {path}")
+    return {
+        "fit": fit,
+        "days": days,
+        "thickness": thickness,
+        "rates": rates,
+        "start_times": load_observation_times(fit, days),
+        "grey_offset": grey_offset,
+        "reset_day": reset_day,
+        "third_offset": third_offset,
+        "third_day": third_day,
+    }
 
 
 def main():
@@ -187,6 +198,8 @@ def main():
     observation_days = None
     observation_start_time = None
     ice_reset_day = None
+    third_decon_day = None
+    third_decon_included = False
     observation_fields = {}
     fit_roots = {}
     for detector, cache_root in cache_roots:
@@ -214,15 +227,16 @@ def main():
                     raise FileNotFoundError(
                         f"No fit archive for {detector} tile {tile_id}"
                     )
-                (
-                    fit,
-                    days,
-                    tile_ice,
-                    tile_rate,
-                    start_times,
-                    grey_offset,
-                    reset_day,
-                ) = load_fit_trajectory(fit_path)
+                trajectory = load_fit_trajectory(fit_path)
+                fit = trajectory["fit"]
+                days = trajectory["days"]
+                tile_ice = trajectory["thickness"]
+                tile_rate = trajectory["rates"]
+                start_times = trajectory["start_times"]
+                grey_offset = trajectory["grey_offset"]
+                reset_day = trajectory["reset_day"]
+                tile_third_offset = trajectory["third_offset"]
+                fit_third_day = trajectory["third_day"]
                 fit_detector = str(np.asarray(fit["sca_names"]).reshape(-1)[0]).upper()
                 fit_tile_id = int(np.asarray(fit["tile_ids"]).reshape(-1)[0])
                 if (fit_detector, fit_tile_id) != (detector, tile_id):
@@ -231,6 +245,8 @@ def main():
                     observation_days = days
                     observation_start_time = start_times
                     ice_reset_day = reset_day
+                    third_decon_day = fit_third_day
+                    third_decon_included = fit_third_day is not None
                     for name in (
                         "observation_led",
                         "observation_repeat",
@@ -242,6 +258,12 @@ def main():
                     raise ValueError(f"Observation days differ in {fit_path}")
                 elif not np.isclose(reset_day, ice_reset_day, rtol=0.0, atol=1.0e-12):
                     raise ValueError(f"Ice reset day differs in {fit_path}")
+                elif (fit_third_day is None) != (third_decon_day is None):
+                    raise ValueError(f"Third-decon metadata differs in {fit_path}")
+                elif fit_third_day is not None and not np.isclose(
+                    fit_third_day, third_decon_day, rtol=0.0, atol=1.0e-12
+                ):
+                    raise ValueError(f"Third-decon day differs in {fit_path}")
                 if not np.array_equal(start_times, observation_start_time):
                     raise ValueError(f"Observation start times differ in {fit_path}")
                 for name, reference in observation_fields.items():
@@ -302,6 +324,10 @@ def main():
                         ),
                     }
                 )
+                if tile_third_offset is not None:
+                    record["post_third_decon_tile_log_offset"] = np.float32(
+                        tile_third_offset
+                    )
             records.append(record)
         validate_tile_ids(
             detector,
@@ -394,6 +420,21 @@ def main():
                 },
             }
         )
+        if third_decon_included:
+            metadata.update(
+                {
+                    "third_decon_day": float(third_decon_day),
+                    "third_decon_grey_throughput_included": True,
+                    "third_decon_grey_throughput_definition": (
+                        "post-third-decon multiplicative tile throughput factor "
+                        "exp(post_third_decon_tile_log_offset)"
+                    ),
+                    "third_decon_grey_throughput_application": (
+                        "add post_third_decon_tile_log_offset to log response for "
+                        "observation_days >= third_decon_day"
+                    ),
+                }
+            )
         trajectory_payload = {
             "observation_days": np.asarray(observation_days, dtype=np.float64),
             "observation_start_time": string_array(observation_start_time),
@@ -434,6 +475,23 @@ def main():
                 [record["fit_statistics_fingerprint"] for record in records]
             ),
         }
+        if third_decon_included:
+            third_offsets = [
+                record.get("post_third_decon_tile_log_offset") for record in records
+            ]
+            if any(value is None for value in third_offsets):
+                raise ValueError("Third-decon offset is missing from a fit archive")
+            trajectory_payload.update(
+                {
+                    "post_third_decon_tile_log_offset": np.asarray(
+                        third_offsets, dtype=np.float32
+                    ),
+                    "post_third_decon_tile_throughput_factor": np.exp(
+                        np.asarray(third_offsets, dtype=np.float64)
+                    ).astype(np.float32),
+                    "third_decon_day": np.asarray(third_decon_day, dtype=np.float64),
+                }
+            )
     else:
         metadata["trajectory_included"] = False
     np.savez_compressed(

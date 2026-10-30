@@ -8,12 +8,14 @@ import os
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+import numpy as np
+
 import fit_wfi_relative_response as relative_fit
 from wfi_relative_response import (
     CACHE_VERSION,
     PRODUCTION_ENTROPY_WEIGHT,
     PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY,
-    VARIABLE_SITES,
+    variable_sites,
     load_response_cache,
     validate_response_cache_provenance,
 )
@@ -99,20 +101,129 @@ def detector_rate_initialization_nm_day(cache_root):
     return initialization
 
 
-def cached_fit_matches(output_dir, statistics_path, cache_path):
+def cached_fit_matches(
+    output_dir,
+    statistics_path,
+    cache_path,
+    third_decon_day=None,
+    third_decon_initial_thickness_start_nm=None,
+    fit_led_log_offsets=False,
+    led_log_offset_prior_sigma_log=relative_fit.production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+    warmup_prior_root=None,
+    thickness_prior_log_sigma=None,
+    thickness_prior_stages=None,
+):
     import numpy as np
 
     try:
         with np.load(Path(output_dir) / "posterior_samples.npz", allow_pickle=False) as fit:
             fit_mode = str(np.asarray(fit["fit_mode"]).reshape(-1)[0])
+            expected_fit_mode = (
+                "relative_response_warmup_centered_thickness_prior"
+                if warmup_prior_root is not None
+                else "relative_response_production"
+            )
             archived_statistics = str(
                 np.asarray(fit["statistics_fingerprint"]).reshape(-1)[0]
             )
             archived_cache = str(np.asarray(fit["response_cache"]).reshape(-1)[0])
+            archived_led = bool(
+                int(np.asarray(fit.get("fit_led_log_offsets", 0)).item())
+            )
+            archived_constant_rate_warmup = bool(
+                int(np.asarray(fit.get("constant_rate_map_warmup", 0)).item())
+            )
+            archived_led_sigma = float(
+                np.asarray(
+                    fit.get(
+                        "led_log_offset_prior_sigma_log",
+                        relative_fit.production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+                    )
+                ).item()
+            )
+            archived_third = None
+            if "third_decon_day" in fit:
+                value = float(np.asarray(fit["third_decon_day"]).item())
+                if np.isfinite(value):
+                    archived_third = value
+            archived_third_start = None
+            if "third_decon_initial_thickness_start_nm" in fit:
+                value = float(
+                    np.asarray(fit["third_decon_initial_thickness_start_nm"]).item()
+                )
+                if np.isfinite(value):
+                    archived_third_start = value
+            archived_warmup_root = None
+            if "warmup_prior_root" in fit:
+                archived_warmup_root = str(
+                    np.asarray(fit["warmup_prior_root"]).reshape(-1)[0]
+                )
+            archived_prior_sigma = None
+            if "thickness_prior_log_sigma" in fit:
+                value = float(np.asarray(fit["thickness_prior_log_sigma"]).item())
+                if np.isfinite(value):
+                    archived_prior_sigma = value
+            archived_prior_stages = None
+            if "thickness_prior_stages" in fit:
+                archived_prior_stages = str(
+                    np.asarray(fit["thickness_prior_stages"]).reshape(-1)[0]
+                )
+        if warmup_prior_root is None:
+            prior_matches = (
+                archived_warmup_root is None
+                and archived_prior_sigma is None
+                and archived_prior_stages is None
+            )
+        else:
+            prior_matches = (
+                archived_warmup_root == str(Path(warmup_prior_root).resolve())
+                and archived_prior_sigma is not None
+                and np.isclose(
+                    archived_prior_sigma,
+                    float(thickness_prior_log_sigma),
+                    rtol=0.0,
+                    atol=1.0e-12,
+                )
+                and archived_prior_stages == str(thickness_prior_stages)
+            )
         return (
-            fit_mode == "relative_response_production"
+            fit_mode == expected_fit_mode
             and archived_statistics == relative_fit.statistics_fingerprint(statistics_path)
             and archived_cache == str(Path(cache_path).resolve())
+            and archived_led == bool(fit_led_log_offsets)
+            and archived_constant_rate_warmup
+            and np.isclose(
+                archived_led_sigma,
+                float(led_log_offset_prior_sigma_log),
+                rtol=0.0,
+                atol=1.0e-12,
+            )
+            and (
+                (third_decon_day is None and archived_third is None)
+                or (
+                    third_decon_day is not None
+                    and archived_third is not None
+                    and np.isclose(
+                        float(third_decon_day),
+                        archived_third,
+                        rtol=0.0,
+                        atol=1.0e-12,
+                    )
+                )
+            )
+            and (
+                third_decon_initial_thickness_start_nm is None
+                or (
+                    archived_third_start is not None
+                    and np.isclose(
+                        float(third_decon_initial_thickness_start_nm),
+                        archived_third_start,
+                        rtol=0.0,
+                        atol=1.0e-12,
+                    )
+                )
+            )
+            and prior_matches
             and (Path(output_dir) / "tile_rate_posterior.csv").is_file()
         )
     except (KeyError, OSError, ValueError):
@@ -126,10 +237,38 @@ def fit_tile(
     output_dir,
     force,
     trajectory_rate_initialization_nm_day=PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY,
+    third_decon_day=None,
+    third_decon_initial_thickness_start_nm=None,
+    fit_led_log_offsets=False,
+    led_log_offset_prior_sigma_log=relative_fit.production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+    warmup_prior_root=None,
+    thickness_prior_log_sigma=None,
+    thickness_prior_stages=None,
 ):
     output_dir = Path(output_dir)
+    (
+        warmup_prior_root,
+        thickness_prior_log_sigma,
+        thickness_prior_stages,
+    ) = relative_fit.resolve_warmup_prior_settings(
+        third_decon_day,
+        warmup_prior_root,
+        thickness_prior_log_sigma,
+        thickness_prior_stages,
+    )
     posterior_path = output_dir / "posterior_samples.npz"
-    if not force and cached_fit_matches(output_dir, statistics_path, cache_path):
+    if not force and cached_fit_matches(
+        output_dir,
+        statistics_path,
+        cache_path,
+        third_decon_day=third_decon_day,
+        third_decon_initial_thickness_start_nm=third_decon_initial_thickness_start_nm,
+        fit_led_log_offsets=fit_led_log_offsets,
+        led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+        warmup_prior_root=warmup_prior_root,
+        thickness_prior_log_sigma=thickness_prior_log_sigma,
+        thickness_prior_stages=thickness_prior_stages,
+    ):
         print(f"Skipping tile {tile_id}: cached fit already exists", flush=True)
         return output_dir
     if posterior_path.is_file() and not force:
@@ -142,12 +281,57 @@ def fit_tile(
         initial_statistics,
         output_dir,
         trajectory_rate_initialization_nm_day=trajectory_rate_initialization_nm_day,
+        third_decon_day=third_decon_day,
+        fit_led_log_offsets=fit_led_log_offsets,
+        led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+        third_decon_initial_thickness_start_nm=third_decon_initial_thickness_start_nm,
+        warmup_prior_root=warmup_prior_root,
+        thickness_prior_log_sigma=thickness_prior_log_sigma,
+        thickness_prior_stages=thickness_prior_stages,
     )
     return output_dir
 
 
 def _fit_tile_worker(arguments):
     return fit_tile(*arguments)
+
+
+def _run_constant_rate_warmups(
+    data_list,
+    cache_list,
+    initial_values_list,
+    jax,
+    jnp,
+    led_log_offset_prior_sigma_log,
+):
+    """Warm every tile with one scalar rate before the production MAP."""
+    if not data_list:
+        return [], []
+    evaluator = relative_fit.build_ice_only_constant_rate_evaluator(
+        data_list[0],
+        initial_values_list[0],
+        cache_list[0],
+        jax,
+        jnp,
+        led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+    )
+    warm_values_list = []
+    warmup_diagnostics = []
+    for data, cache, initial_values in zip(
+        data_list, cache_list, initial_values_list
+    ):
+        values, diagnostics = relative_fit.fit_ice_only_constant_rate_reusable(
+            data,
+            cache,
+            initial_values,
+            evaluator,
+            jax,
+            jnp,
+            led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+        )
+        warm_values_list.append(values)
+        warmup_diagnostics.append(diagnostics)
+    return warm_values_list, warmup_diagnostics
 
 
 def fit_tiles_batch(jobs):
@@ -165,9 +349,27 @@ def fit_tiles_batch(jobs):
             output_dir,
             force,
             trajectory_rate_initialization_nm_day,
+            third_decon_day,
+            third_decon_initial_thickness_start_nm,
+            fit_led_log_offsets,
+            led_log_offset_prior_sigma_log,
+            warmup_prior_root,
+            thickness_prior_log_sigma,
+            thickness_prior_stages,
         ) = job
         output_dir = Path(output_dir)
-        if not force and cached_fit_matches(output_dir, statistics_path, cache_path):
+        if not force and cached_fit_matches(
+            output_dir,
+            statistics_path,
+            cache_path,
+            third_decon_day=third_decon_day,
+            third_decon_initial_thickness_start_nm=third_decon_initial_thickness_start_nm,
+            fit_led_log_offsets=fit_led_log_offsets,
+            led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+            warmup_prior_root=warmup_prior_root,
+            thickness_prior_log_sigma=thickness_prior_log_sigma,
+            thickness_prior_stages=thickness_prior_stages,
+        ):
             print(f"Skipping tile {tile_id}: cached fit already exists", flush=True)
             continue
         if output_dir.joinpath("posterior_samples.npz").is_file() and not force:
@@ -192,9 +394,19 @@ def fit_tiles_batch(jobs):
         output_dir,
         force,
         trajectory_rate_initialization_nm_day,
-    ) in active_jobs:
+        third_decon_day,
+         third_decon_initial_thickness_start_nm,
+         fit_led_log_offsets,
+         led_log_offset_prior_sigma_log,
+         warmup_prior_root,
+         thickness_prior_log_sigma,
+         thickness_prior_stages,
+     ) in active_jobs:
         initial_fit, initial_statistics = cache_source_paths(cache_path)
-        data = relative_fit.production.load_tile_statistics(statistics_path)
+        data = relative_fit.production.load_tile_statistics(
+            statistics_path,
+            third_decon_day=third_decon_day,
+        )
         data["statistics_path"] = str(statistics_path)
         context = relative_fit.production.load_response_context(data["sca_names"])
         data["qe_columns"] = context["qe_columns"]
@@ -206,6 +418,8 @@ def fit_tiles_batch(jobs):
             initial_fit,
             initial_statistics,
             trajectory_rate_initialization_nm_day=trajectory_rate_initialization_nm_day,
+            fit_led_log_offsets=fit_led_log_offsets,
+            third_decon_initial_thickness_start_nm=third_decon_initial_thickness_start_nm,
         )
         data_list.append(data)
         cache_list.append(cache)
@@ -219,12 +433,21 @@ def fit_tiles_batch(jobs):
     ):
         raise ValueError("Cannot batch tiles with different response contexts")
 
+    initial_values_list, warmup_diagnostics = _run_constant_rate_warmups(
+        data_list,
+        cache_list,
+        initial_values_list,
+        jax,
+        jnp,
+        led_log_offset_prior_sigma_log,
+    )
     values, diagnostics = relative_fit.fit_ice_only_batch(
         data_list,
         cache_list,
         initial_values_list,
         jax,
         jnp,
+        led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
     )
     diagnostics_by_tile = {
         "converged": diagnostics["converged"],
@@ -243,9 +466,16 @@ def fit_tiles_batch(jobs):
             output_dir,
             force,
             trajectory_rate_initialization_nm_day,
-        ) = job
+            third_decon_day,
+         third_decon_initial_thickness_start_nm,
+         fit_led_log_offsets,
+         led_log_offset_prior_sigma_log,
+         warmup_prior_root,
+         thickness_prior_log_sigma,
+         thickness_prior_stages,
+     ) = job
         tile_values = dict(initial_values_list[index])
-        for name in VARIABLE_SITES:
+        for name in variable_sites(tile_values):
             source = np.asarray(tile_values[name])
             target_shape = source.shape
             batch_value = np.asarray(values[name])
@@ -276,6 +506,10 @@ def fit_tiles_batch(jobs):
             cache_path,
             jax,
             jnp,
+            fit_led_log_offsets=fit_led_log_offsets,
+            led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+            third_decon_initial_thickness_start_nm=third_decon_initial_thickness_start_nm,
+            constant_rate_warmup_diagnostics=warmup_diagnostics[index],
         )
         print(
             f"Wrote relative-response fit under {output_dir} "
@@ -305,9 +539,27 @@ def fit_tiles_reusable(jobs):
             output_dir,
             force,
             trajectory_rate_initialization_nm_day,
+            third_decon_day,
+            third_decon_initial_thickness_start_nm,
+            fit_led_log_offsets,
+            led_log_offset_prior_sigma_log,
+            warmup_prior_root,
+            thickness_prior_log_sigma,
+            thickness_prior_stages,
         ) = job
         output_dir = Path(output_dir)
-        if not force and cached_fit_matches(output_dir, statistics_path, cache_path):
+        if not force and cached_fit_matches(
+            output_dir,
+            statistics_path,
+            cache_path,
+            third_decon_day=third_decon_day,
+            third_decon_initial_thickness_start_nm=third_decon_initial_thickness_start_nm,
+            fit_led_log_offsets=fit_led_log_offsets,
+            led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+            warmup_prior_root=warmup_prior_root,
+            thickness_prior_log_sigma=thickness_prior_log_sigma,
+            thickness_prior_stages=thickness_prior_stages,
+        ):
             print(f"Skipping tile {tile_id}: cached fit already exists", flush=True)
             continue
         if output_dir.joinpath("posterior_samples.npz").is_file() and not force:
@@ -332,9 +584,19 @@ def fit_tiles_reusable(jobs):
         output_dir,
         force,
         trajectory_rate_initialization_nm_day,
-    ) in active_jobs:
+        third_decon_day,
+         third_decon_initial_thickness_start_nm,
+         fit_led_log_offsets,
+         led_log_offset_prior_sigma_log,
+         warmup_prior_root,
+         thickness_prior_log_sigma,
+         thickness_prior_stages,
+     ) in active_jobs:
         initial_fit, initial_statistics = cache_source_paths(cache_path)
-        data = relative_fit.production.load_tile_statistics(statistics_path)
+        data = relative_fit.production.load_tile_statistics(
+            statistics_path,
+            third_decon_day=third_decon_day,
+        )
         data["statistics_path"] = str(statistics_path)
         context = relative_fit.production.load_response_context(data["sca_names"])
         data["qe_columns"] = context["qe_columns"]
@@ -346,6 +608,8 @@ def fit_tiles_reusable(jobs):
             initial_fit,
             initial_statistics,
             trajectory_rate_initialization_nm_day=trajectory_rate_initialization_nm_day,
+            fit_led_log_offsets=fit_led_log_offsets,
+            third_decon_initial_thickness_start_nm=third_decon_initial_thickness_start_nm,
         )
         data_list.append(data)
         cache_list.append(cache)
@@ -371,6 +635,7 @@ def fit_tiles_reusable(jobs):
         "repeat_index",
         "exposure_times",
         "reset_day",
+        "reset_days",
     )
     for data in data_list[1:]:
         for name in shared_names:
@@ -381,12 +646,21 @@ def fit_tiles_reusable(jobs):
     first_grid = np.asarray(cache_list[0]["grid_nm"])
     if any(not np.array_equal(first_grid, cache["grid_nm"]) for cache in cache_list[1:]):
         raise ValueError("Cannot reuse an evaluator across different cache grids")
+    initial_values_list, warmup_diagnostics = _run_constant_rate_warmups(
+        data_list,
+        cache_list,
+        initial_values_list,
+        jax,
+        jnp,
+        led_log_offset_prior_sigma_log,
+    )
     evaluator = relative_fit.build_ice_only_evaluator(
         data_list[0],
         initial_values_list[0],
         cache_list[0],
         jax,
         jnp,
+        led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
     )
     output_dirs = []
     for index, job in enumerate(active_jobs):
@@ -397,6 +671,13 @@ def fit_tiles_reusable(jobs):
             output_dir,
             force,
             trajectory_rate_initialization_nm_day,
+            third_decon_day,
+            third_decon_initial_thickness_start_nm,
+            fit_led_log_offsets,
+            led_log_offset_prior_sigma_log,
+            warmup_prior_root,
+            thickness_prior_log_sigma,
+            thickness_prior_stages,
         ) = job
         values, diagnostics = relative_fit.fit_ice_only_reusable(
             data_list[index],
@@ -405,6 +686,7 @@ def fit_tiles_reusable(jobs):
             evaluator,
             jax,
             jnp,
+            led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
         )
         state = relative_fit.relative_state(
             data_list[index],
@@ -422,6 +704,10 @@ def fit_tiles_reusable(jobs):
             cache_path,
             jax,
             jnp,
+            fit_led_log_offsets=fit_led_log_offsets,
+            led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
+            third_decon_initial_thickness_start_nm=third_decon_initial_thickness_start_nm,
+            constant_rate_warmup_diagnostics=warmup_diagnostics[index],
         )
         print(
             f"Wrote relative-response fit under {output_dir} "
@@ -494,6 +780,31 @@ def parse_args(argv=None):
             "another production run instead of requiring current-run fits."
         ),
     )
+    parser.add_argument("--third-decon-day", type=float, default=None)
+    parser.add_argument(
+        "--third-decon-initial-thickness-start-nm",
+        type=float,
+        default=None,
+        help="Override the post-third-decon thickness warm start in nm.",
+    )
+    parser.add_argument("--fit-led-log-offsets", action="store_true")
+    parser.add_argument(
+        "--led-log-offset-prior-sigma-log",
+        type=float,
+        default=relative_fit.production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+    )
+    parser.add_argument(
+        "--warmup-prior-root",
+        type=Path,
+        default=None,
+        help="Constant-rate warmup directory containing fits/tile_### archives.",
+    )
+    parser.add_argument("--thickness-prior-log-sigma", type=float, default=None)
+    parser.add_argument(
+        "--thickness-prior-stages",
+        choices=("all", "third-decon"),
+        default=None,
+    )
     return parser.parse_args(argv)
 
 
@@ -509,12 +820,57 @@ def run_detector(
     batch_size=8,
     joint_batch=False,
     allow_external_cache_source=False,
+    third_decon_day=None,
+    third_decon_initial_thickness_start_nm=None,
+    fit_led_log_offsets=False,
+    led_log_offset_prior_sigma_log=relative_fit.production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+    warmup_prior_root=None,
+    thickness_prior_log_sigma=None,
+    thickness_prior_stages=None,
 ):
     detector = normalize_detector(detector)
     statistics_dir = Path(statistics_dir)
     statistics = corrected_statistics_path(statistics_dir, detector, tile_size)
     if not statistics.is_file():
         raise FileNotFoundError(statistics)
+    if third_decon_day is not None:
+        third_decon_day = float(third_decon_day)
+        if not np.isfinite(third_decon_day):
+            raise ValueError("third_decon_day must be finite")
+    if third_decon_initial_thickness_start_nm is not None:
+        third_decon_initial_thickness_start_nm = float(
+            third_decon_initial_thickness_start_nm
+        )
+        if (
+            not np.isfinite(third_decon_initial_thickness_start_nm)
+            or third_decon_initial_thickness_start_nm <= 0.0
+        ):
+            raise ValueError(
+                "third_decon_initial_thickness_start_nm must be positive and finite"
+            )
+    (
+        warmup_prior_root,
+        thickness_prior_log_sigma,
+        thickness_prior_stages,
+    ) = relative_fit.resolve_warmup_prior_settings(
+        third_decon_day,
+        warmup_prior_root,
+        thickness_prior_log_sigma,
+        thickness_prior_stages,
+    )
+    led_log_offset_prior_sigma_log = float(led_log_offset_prior_sigma_log)
+    if (
+        not np.isfinite(led_log_offset_prior_sigma_log)
+        or led_log_offset_prior_sigma_log <= 0.0
+    ):
+        raise ValueError("LED log-offset prior sigma must be positive and finite")
+    if warmup_prior_root is not None:
+        if batch_size != 1 or joint_batch:
+            raise ValueError(
+                "Warmup-centered thickness priors require independent tile mode: "
+                "batch_size=1, joint_batch=False"
+            )
+        warmup_prior_root = Path(warmup_prior_root)
     output_root = (
         detector_output_root(statistics_dir, detector, tile_size)
         / "relative_response"
@@ -571,14 +927,30 @@ def run_detector(
                 fit_root / f"tile_{tile_id:03d}",
                 force,
                 rate_initialization_nm_day,
+                third_decon_day,
+                third_decon_initial_thickness_start_nm,
+                bool(fit_led_log_offsets),
+                led_log_offset_prior_sigma_log,
+                warmup_prior_root,
+                thickness_prior_log_sigma,
+                thickness_prior_stages,
             )
         )
     active_workers = min(workers, len(jobs)) if jobs else 1
     _configure_parallel_environment(active_workers)
+    if batch_size <= 1 and not joint_batch:
+        fit_mode_label = (
+            "one-tile sequential"
+            if active_workers == 1
+            else "independent one-tile workers"
+        )
+    elif joint_batch:
+        fit_mode_label = f"joint batch size {batch_size}"
+    else:
+        fit_mode_label = "reused evaluator"
     print(
         f"Fitting {len(jobs)} {detector} tile(s) with "
-        f"{active_workers} cached-response worker(s), "
-        f"{'joint batch size ' + str(batch_size) if joint_batch else 'reused evaluator'}",
+        f"{active_workers} cached-response worker(s), {fit_mode_label}",
         flush=True,
     )
     fit_root.mkdir(parents=True, exist_ok=True)
@@ -619,7 +991,11 @@ def run_detector(
     output = write_detector_rate_posterior(fit_root, output_root)
     metadata = {
         "detector": detector,
-        "fit_mode": "relative_response_production",
+        "fit_mode": (
+            "relative_response_warmup_centered_thickness_prior"
+            if warmup_prior_root is not None
+            else "relative_response_production"
+        ),
         "response_cache_version": int(CACHE_VERSION),
         "cache_policy": "pinned_current_run_rebuild_only_after_reprocessing_or_model_change",
         "temperature_dependent_gain_uncorrected_data_supported": False,
@@ -639,6 +1015,20 @@ def run_detector(
         ),
         "trajectory_entropy_weight": float(PRODUCTION_ENTROPY_WEIGHT),
         "trajectory_regularization": "none",
+        "constant_rate_warmup": True,
+        "third_decon_day": third_decon_day,
+        "third_decon_initial_thickness_start_nm": (
+            None
+            if third_decon_initial_thickness_start_nm is None
+            else float(third_decon_initial_thickness_start_nm)
+        ),
+        "fit_led_log_offsets": bool(fit_led_log_offsets),
+        "led_log_offset_prior_sigma_log": led_log_offset_prior_sigma_log,
+        "warmup_prior_root": (
+            None if warmup_prior_root is None else str(Path(warmup_prior_root).resolve())
+        ),
+        "thickness_prior_log_sigma": thickness_prior_log_sigma,
+        "thickness_prior_stages": thickness_prior_stages,
     }
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "relative_response_mode.json").write_text(
@@ -662,6 +1052,13 @@ def main(argv=None):
         batch_size=args.batch_size,
         joint_batch=args.joint_batch,
         allow_external_cache_source=args.allow_external_cache_source,
+        third_decon_day=args.third_decon_day,
+        third_decon_initial_thickness_start_nm=args.third_decon_initial_thickness_start_nm,
+        fit_led_log_offsets=args.fit_led_log_offsets,
+        led_log_offset_prior_sigma_log=args.led_log_offset_prior_sigma_log,
+        warmup_prior_root=args.warmup_prior_root,
+        thickness_prior_log_sigma=args.thickness_prior_log_sigma,
+        thickness_prior_stages=args.thickness_prior_stages,
     )
 
 
