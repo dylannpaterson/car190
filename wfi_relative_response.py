@@ -266,16 +266,33 @@ def _led_log_offset_values(data, values, jnp):
 
 
 def load_optical_values(fit_archive):
-    with np.load(Path(fit_archive), allow_pickle=False) as source:
-        values = {}
-        for name in OPTICAL_SITES:
-            if name not in source:
-                if name == "incidence_angle_deg":
-                    # Current production fixes incidence at normal and omits this site.
-                    values[name] = np.asarray(0.0)
-                    continue
-                raise ValueError(f"{name} is missing from {fit_archive}")
-            values[name] = np.asarray(source[name], dtype=float).copy()
+    fit_archive = Path(fit_archive)
+    with np.load(fit_archive, allow_pickle=False) as source:
+        values = {
+            name: np.asarray(source[name], dtype=float).copy()
+            for name in OPTICAL_SITES
+            if name in source
+        }
+        missing = [name for name in OPTICAL_SITES if name not in values]
+        response_cache = source.get("response_cache") if missing else None
+
+    if missing and response_cache is not None:
+        response_cache_path = Path(str(np.asarray(response_cache).reshape(-1)[0]))
+        if not response_cache_path.is_absolute():
+            response_cache_path = fit_archive.parent / response_cache_path
+        if response_cache_path.is_file():
+            with np.load(response_cache_path, allow_pickle=False) as cache:
+                for name in missing:
+                    if name in cache:
+                        values[name] = np.asarray(cache[name], dtype=float).copy()
+
+    for name in OPTICAL_SITES:
+        if name not in values:
+            if name == "incidence_angle_deg":
+                # Current production fixes incidence at normal and omits this site.
+                values[name] = np.asarray(0.0)
+                continue
+            raise ValueError(f"{name} is missing from {fit_archive}")
     return values
 
 
@@ -1734,6 +1751,7 @@ def build_spectral_response_lookup(
     wavelengths_nm,
     ice_thickness_nm,
     incidence_pupil_half_angle_deg=0.0,
+    complex_reflection_modulation_ratio=None,
 ):
     """Evaluate fixed-optics response before LED/SED/QE integration.
 
@@ -1753,6 +1771,22 @@ def build_spectral_response_lookup(
         raise ValueError("wavelengths_nm must be finite and strictly increasing")
     if thickness.size < 1 or np.any(~np.isfinite(thickness)) or np.any(thickness < 0.0):
         raise ValueError("ice_thickness_nm must be finite and non-negative")
+    if complex_reflection_modulation_ratio is None:
+        modulation_ratio = None
+    else:
+        modulation_ratio = np.asarray(
+            complex_reflection_modulation_ratio, dtype=complex
+        ).reshape(-1)
+        if (
+            modulation_ratio.shape != wavelengths.shape
+            or np.any(~np.isfinite(modulation_ratio))
+            or np.any(np.abs(modulation_ratio) <= 0.0)
+        ):
+            raise ValueError(
+                "complex_reflection_modulation_ratio must be finite, nonzero, "
+                "and match the wavelength grid"
+            )
+        modulation_ratio = jnp.asarray(modulation_ratio)
 
     pupil_directions, pupil_weights = production.incidence_pupil_quadrature(
         incidence_pupil_half_angle_deg
@@ -1858,7 +1892,23 @@ def build_spectral_response_lookup(
             old_first, old_second = boundary_first, boundary_second
             boundary_first = cosine_phase * old_first + sine_phase / admittance[:, None] * old_second
             boundary_second = sine_phase * admittance[:, None] * old_first + cosine_phase * old_second
+        coated_boundary_second = boundary_second
         clean_denominator = incident_admittance[:, None] * boundary_first + boundary_second
+        if modulation_ratio is not None:
+            clean_reflection = (
+                incident_admittance[:, None] * boundary_first - boundary_second
+            ) / clean_denominator
+            modulated_clean_reflection = (
+                clean_reflection * modulation_ratio[None, :]
+            )
+            clean_input_admittance = incident_admittance[:, None] * (
+                1.0 - modulated_clean_reflection
+            ) / (1.0 + modulated_clean_reflection)
+            coated_boundary_second = boundary_first * clean_input_admittance
+            clean_denominator = (
+                incident_admittance[:, None] * boundary_first
+                + coated_boundary_second
+            )
         clean = (
             jnp.real(substrate_admittance / incident_admittance[:, None])
             * jnp.abs(2.0 * incident_admittance[:, None] / clean_denominator) ** 2
@@ -1882,11 +1932,11 @@ def build_spectral_response_lookup(
         ice_sine_phase = -1j * jnp.sin(ice_phase)
         coated_first = (
             ice_cosine_phase * boundary_first
-            + ice_sine_phase / ice_admittance * boundary_second
+            + ice_sine_phase / ice_admittance * coated_boundary_second
         )
         coated_second = (
             ice_sine_phase * ice_admittance * boundary_first
-            + ice_cosine_phase * boundary_second
+            + ice_cosine_phase * coated_boundary_second
         )
         coated_denominator = (
             incident_admittance[:, None] * coated_first + coated_second

@@ -36,8 +36,10 @@ MAX_MAP_WORKERS = 2
 DEFAULT_MAP_WORKERS = 2
 DEFAULT_TILE_TIMEOUT_SECONDS = 1800.0
 PRODUCTION_MODEL_VERSION = (
-    "fixed_ice_n125_normal_incidence_arhgcdte_no_penalty_no_maxent_rate12_v6"
+    "fixed_ice_n125_normal_incidence_arhgcdte_no_penalty_no_maxent_rate12_v6_initial1nm"
 )
+PRODUCTION_INITIAL_THICKNESS_LOG_MEDIAN_NM = 1.0
+PRODUCTION_INITIAL_THICKNESS_LOG_SIGMA = production.INITIAL_THICKNESS_LOG_SIGMA
 PRODUCTION_FIT_ICE_N_CONSTANT = True
 PRODUCTION_FIXED_ICE_N_LOG_CONSTANT = 0.0
 PRODUCTION_ICE_N_CONSTANT_PRIOR_SIGMA_LOG = 0.01
@@ -54,6 +56,8 @@ PRODUCTION_FIT_INCIDENCE_ANGLE = False
 PRODUCTION_FIT_AR_HGCDTE_MODULATION = True
 PRODUCTION_AR_HGCDTE_MODULATION_PRIOR_SIGMA_LOG = 0.10
 PRODUCTION_LED_LOG_OFFSET_PRIOR_SIGMA_LOG = production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG
+DEFAULT_WARMUP_THICKNESS_PRIOR_LOG_SIGMA = 0.10
+DEFAULT_WARMUP_THICKNESS_PRIOR_STAGES = "third-decon"
 
 
 def production_model_version(fit_led_log_offsets=False, ice_n_porosity_parameters=None):
@@ -61,6 +65,79 @@ def production_model_version(fit_led_log_offsets=False, ice_n_porosity_parameter
     if fit_led_log_offsets:
         return f"{PRODUCTION_MODEL_VERSION}_led_offsets{suffix}"
     return f"{PRODUCTION_MODEL_VERSION}{suffix}"
+
+
+def resolve_warmup_prior_settings(
+    third_decon_day,
+    warmup_prior_root,
+    thickness_prior_log_sigma,
+    thickness_prior_stages,
+):
+    """Resolve optional warmup-centered thickness-prior settings."""
+    if warmup_prior_root is None:
+        if thickness_prior_log_sigma is not None or thickness_prior_stages is not None:
+            raise ValueError("Thickness prior settings require warmup_prior_root")
+        return None, None, None
+    if third_decon_day is None:
+        raise ValueError(
+            "Warmup-centered thickness priors require an explicit third_decon_day"
+        )
+    if thickness_prior_log_sigma is None:
+        thickness_prior_log_sigma = DEFAULT_WARMUP_THICKNESS_PRIOR_LOG_SIGMA
+    thickness_prior_log_sigma = float(thickness_prior_log_sigma)
+    if (
+        not np.isfinite(thickness_prior_log_sigma)
+        or thickness_prior_log_sigma <= 0.0
+    ):
+        raise ValueError("Thickness prior log sigma must be positive and finite")
+    if thickness_prior_stages is None:
+        thickness_prior_stages = DEFAULT_WARMUP_THICKNESS_PRIOR_STAGES
+    if thickness_prior_stages not in ("all", "third-decon"):
+        raise ValueError("Thickness prior stages must be 'all' or 'third-decon'")
+    return Path(warmup_prior_root), thickness_prior_log_sigma, thickness_prior_stages
+
+
+def load_warmup_thickness_prior(
+    warmup_prior_root,
+    tile_id,
+    statistics_path,
+    third_decon_day,
+    thickness_prior_log_sigma,
+    thickness_prior_stages,
+):
+    """Load per-tile log-thickness prior centers from a scalar-rate warmup."""
+    if production.INITIAL_THICKNESS_PRIOR_LOGNORMAL != "lognormal":
+        raise ValueError("Warmup-centered production priors require lognormal thickness")
+    data = production.load_tile_statistics(
+        statistics_path,
+        third_decon_day=third_decon_day,
+    )
+    thickness_names, _ = production.reset_site_names(data)
+    archive_path = (
+        Path(warmup_prior_root)
+        / "fits"
+        / f"tile_{int(tile_id):03d}"
+        / "constant_rate_map.npz"
+    )
+    if not archive_path.is_file():
+        raise FileNotFoundError(archive_path)
+    centers = {}
+    sigmas = {}
+    with np.load(archive_path, allow_pickle=False) as archive:
+        for name in thickness_names:
+            if thickness_prior_stages == "third-decon" and (
+                name != "third_decon_initial_thickness_log_nm"
+            ):
+                centers[name] = np.asarray(
+                    np.log(PRODUCTION_INITIAL_THICKNESS_LOG_MEDIAN_NM)
+                )
+                sigmas[name] = PRODUCTION_INITIAL_THICKNESS_LOG_SIGMA
+                continue
+            if name not in archive:
+                raise ValueError(f"Warmup archive lacks {name}: {archive_path}")
+            centers[name] = np.asarray(archive[name], dtype=float).copy()
+            sigmas[name] = thickness_prior_log_sigma
+    return centers, sigmas
 
 
 def normalize_detector(value):
@@ -213,6 +290,9 @@ def archive_matches_production_model(
     fit_led_log_offsets=False,
     led_log_offset_prior_sigma_log=PRODUCTION_LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
     ice_n_porosity_parameters=None,
+    warmup_prior_root=None,
+    thickness_prior_log_sigma=None,
+    thickness_prior_stages=None,
 ):
     """Return whether an archive uses the current production configuration."""
     posterior_path = tile_fit_dir / "posterior_samples.npz"
@@ -236,6 +316,39 @@ def archive_matches_production_model(
                     )
                 ).item()
             )
+            archived_warmup_prior_root = (
+                str(np.asarray(samples["warmup_prior_root"]).reshape(-1)[0])
+                if "warmup_prior_root" in samples
+                else None
+            )
+            archived_thickness_prior_log_sigma = (
+                float(np.asarray(samples["thickness_prior_log_sigma"]).item())
+                if "thickness_prior_log_sigma" in samples
+                else None
+            )
+            archived_thickness_prior_stages = (
+                str(np.asarray(samples["thickness_prior_stages"]).reshape(-1)[0])
+                if "thickness_prior_stages" in samples
+                else None
+            )
+        if warmup_prior_root is None:
+            thickness_prior_matches = (
+                archived_warmup_prior_root is None
+                and archived_thickness_prior_log_sigma is None
+                and archived_thickness_prior_stages is None
+            )
+        else:
+            thickness_prior_matches = (
+                archived_warmup_prior_root == str(Path(warmup_prior_root).resolve())
+                and archived_thickness_prior_log_sigma is not None
+                and np.isclose(
+                    archived_thickness_prior_log_sigma,
+                    float(thickness_prior_log_sigma),
+                    rtol=0.0,
+                    atol=1.0e-12,
+                )
+                and archived_thickness_prior_stages == str(thickness_prior_stages)
+            )
         return (
             model_version
             == production_model_version(
@@ -253,6 +366,7 @@ def archive_matches_production_model(
                 rtol=0.0,
                 atol=1.0e-12,
             )
+            and thickness_prior_matches
         )
     except (KeyError, OSError, ValueError):
         return False
@@ -329,12 +443,25 @@ def fit_tile(
     fixed_absolute_hgcdte_n_log_scale=None,
     thickness_penalty_enabled=PRODUCTION_THICKNESS_PENALTY_ENABLED,
     third_decon_day=None,
+    warmup_prior_root=None,
+    thickness_prior_log_sigma=None,
+    thickness_prior_stages=None,
     fit_led_log_offsets=False,
     led_log_offset_prior_sigma_log=PRODUCTION_LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
     ice_n_porosity_parameters=None,
 ):
     ice_n_porosity_parameters = production.validate_ice_n_porosity_parameters(
         ice_n_porosity_parameters
+    )
+    (
+        warmup_prior_root,
+        thickness_prior_log_sigma,
+        thickness_prior_stages,
+    ) = resolve_warmup_prior_settings(
+        third_decon_day,
+        warmup_prior_root,
+        thickness_prior_log_sigma,
+        thickness_prior_stages,
     )
     fit_ice_n_constant = (
         PRODUCTION_FIT_ICE_N_CONSTANT and ice_n_porosity_parameters is None
@@ -357,6 +484,9 @@ def fit_tile(
                 fit_led_log_offsets,
                 led_log_offset_prior_sigma_log,
                 ice_n_porosity_parameters,
+                warmup_prior_root,
+                thickness_prior_log_sigma,
+                thickness_prior_stages,
             )
         ):
             print(f"Skipping tile {tile_id}: matching archived fit exists", flush=True)
@@ -435,12 +565,137 @@ def fit_tile(
         if name != "log_rate_scale"
     }
     final_initial_values["np_log_rate_nodes"] = rate_reference.copy()
+    thickness_prior_centers = None
+    thickness_prior_sigmas = None
+    if warmup_prior_root is not None:
+        thickness_prior_centers, thickness_prior_sigmas = load_warmup_thickness_prior(
+            warmup_prior_root,
+            tile_id,
+            statistics_path,
+            third_decon_day,
+            thickness_prior_log_sigma,
+            thickness_prior_stages,
+        )
+    final_model_metadata = {
+        "production_model_version": production_model_version(
+            fit_led_log_offsets,
+            ice_n_porosity_parameters=ice_n_porosity_parameters,
+        ),
+        "initial_thickness_log_median_nm": float(
+            PRODUCTION_INITIAL_THICKNESS_LOG_MEDIAN_NM
+        ),
+        "initial_thickness_log_sigma": float(PRODUCTION_INITIAL_THICKNESS_LOG_SIGMA),
+        "initial_reset_thickness_prior_center_nm": float(
+            PRODUCTION_INITIAL_THICKNESS_LOG_MEDIAN_NM
+        ),
+        "initial_reset_thickness_prior_log_sigma": float(
+            PRODUCTION_INITIAL_THICKNESS_LOG_SIGMA
+        ),
+        "trajectory_regularization": (
+            "maxent" if entropy_weight else "none"
+        ),
+        "trajectory_smoothness_weight": 0.0,
+        "trajectory_entropy_weight": float(entropy_weight),
+        "trajectory_entropy_reference": "constant_rate_map_warmup",
+        "trajectory_rate_prior_mean_nm_day": (
+            PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY
+        ),
+        "constant_rate_map_warmup": 1,
+        "fit_incidence_angle": int(PRODUCTION_FIT_INCIDENCE_ANGLE),
+        "fit_ice_n_constant": int(fit_ice_n_constant),
+        "ice_n_constant_prior_sigma_log": (
+            float(ice_n_constant_prior_sigma_log)
+        ),
+        "ice_n_constant_reference": float(ice_n_constant_reference),
+        "ice_n_fixed_log_constant": fixed_ice_n_log_constant,
+        "ice_n_fixed_value": float(
+            production.ICE_INDEX_DEFAULT * np.exp(fixed_ice_n_log_constant)
+        )
+        if fixed_ice_n_log_constant is not None
+        else None,
+        "ice_n_model": (
+            "lorentz_lorenz_porosity"
+            if ice_n_porosity_parameters is not None
+            else "constant"
+        ),
+        "ice_n_porosity_p0": (
+            None
+            if ice_n_porosity_parameters is None
+            else ice_n_porosity_parameters[0]
+        ),
+        "ice_n_porosity_pinf": (
+            None
+            if ice_n_porosity_parameters is None
+            else ice_n_porosity_parameters[1]
+        ),
+        "ice_n_porosity_length_nm": (
+            None
+            if ice_n_porosity_parameters is None
+            else ice_n_porosity_parameters[2]
+        ),
+        "ice_n_porosity_solid_n": (
+            None
+            if ice_n_porosity_parameters is None
+            else ice_n_porosity_parameters[3]
+        ),
+        "fit_ar_hgcdte_modulation": int(
+            PRODUCTION_FIT_AR_HGCDTE_MODULATION
+        ),
+        "ar_hgcdte_modulation_prior_sigma_log": (
+            PRODUCTION_AR_HGCDTE_MODULATION_PRIOR_SIGMA_LOG
+        ),
+        "fit_led_log_offsets": int(fit_led_log_offsets),
+        "led_log_offset_prior_sigma_log": float(
+            led_log_offset_prior_sigma_log
+        ),
+        "constant_rate_map_rate_nm_day": warmup_metadata["rate_nm_day"],
+        "constant_rate_map_objective": warmup_diagnostics["objective"],
+        "absolute_hgcdte_n_log_scale_fixed": int(
+            fixed_absolute_hgcdte_n_log_scale is not None
+        ),
+        "fixed_absolute_hgcdte_n_log_scale": (
+            None
+            if fixed_absolute_hgcdte_n_log_scale is None
+            else float(fixed_absolute_hgcdte_n_log_scale)
+        ),
+        "thickness_penalty_enabled": int(thickness_penalty_enabled),
+        "thickness_penalty_lambda_shared": (
+            PRODUCTION_THICKNESS_PENALTY_LAMBDA_SHARED
+            if thickness_penalty_enabled
+            else 0.0
+        ),
+        "thickness_penalty_lambda_disagreement": (
+            PRODUCTION_THICKNESS_PENALTY_LAMBDA_DISAGREEMENT
+            if thickness_penalty_enabled
+            else 0.0
+        ),
+    }
+    if warmup_prior_root is not None:
+        third_name = "third_decon_initial_thickness_log_nm"
+        final_model_metadata.update(
+            {
+                "warmup_prior_root": str(Path(warmup_prior_root).resolve()),
+                "thickness_prior_log_sigma": float(thickness_prior_log_sigma),
+                "thickness_prior_stages": str(thickness_prior_stages),
+                "third_decon_thickness_prior_center_log_nm": float(
+                    np.asarray(thickness_prior_centers[third_name]).reshape(-1)[0]
+                ),
+                "third_decon_thickness_prior_center_nm": float(
+                    np.exp(
+                        np.asarray(thickness_prior_centers[third_name])
+                        .reshape(-1)[0]
+                    )
+                ),
+            }
+        )
     production.fit_one(
         production.ProductionConfig(
             tile_statistics=statistics_path,
             output_dir=tile_fit_dir,
             third_decon_day=third_decon_day,
             map_initial_values=final_initial_values,
+            thickness_prior_centers=thickness_prior_centers,
+            thickness_prior_sigmas=thickness_prior_sigmas,
             smoothness_weight=0.0,
             entropy_reference_log_rates=rate_reference,
             entropy_weight=entropy_weight,
@@ -473,89 +728,7 @@ def fit_tile(
                 else 0.0
             ),
             model_metadata={
-                "production_model_version": production_model_version(
-                    fit_led_log_offsets,
-                    ice_n_porosity_parameters=ice_n_porosity_parameters,
-                ),
-                "trajectory_regularization": (
-                    "maxent" if entropy_weight else "none"
-                ),
-                "trajectory_smoothness_weight": 0.0,
-                "trajectory_entropy_weight": float(entropy_weight),
-                "trajectory_entropy_reference": "constant_rate_map_warmup",
-                "trajectory_rate_prior_mean_nm_day": (
-                    PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY
-                ),
-                "constant_rate_map_warmup": 1,
-                "fit_incidence_angle": int(PRODUCTION_FIT_INCIDENCE_ANGLE),
-                "fit_ice_n_constant": int(fit_ice_n_constant),
-                "ice_n_constant_prior_sigma_log": (
-                    float(ice_n_constant_prior_sigma_log)
-                ),
-                "ice_n_constant_reference": float(ice_n_constant_reference),
-                "ice_n_fixed_log_constant": fixed_ice_n_log_constant,
-                "ice_n_fixed_value": float(
-                    production.ICE_INDEX_DEFAULT
-                    * np.exp(fixed_ice_n_log_constant)
-                )
-                if fixed_ice_n_log_constant is not None
-                else None,
-                "ice_n_model": (
-                    "lorentz_lorenz_porosity"
-                    if ice_n_porosity_parameters is not None
-                    else "constant"
-                ),
-                "ice_n_porosity_p0": (
-                    None
-                    if ice_n_porosity_parameters is None
-                    else ice_n_porosity_parameters[0]
-                ),
-                "ice_n_porosity_pinf": (
-                    None
-                    if ice_n_porosity_parameters is None
-                    else ice_n_porosity_parameters[1]
-                ),
-                "ice_n_porosity_length_nm": (
-                    None
-                    if ice_n_porosity_parameters is None
-                    else ice_n_porosity_parameters[2]
-                ),
-                "ice_n_porosity_solid_n": (
-                    None
-                    if ice_n_porosity_parameters is None
-                    else ice_n_porosity_parameters[3]
-                ),
-                "fit_ar_hgcdte_modulation": int(
-                    PRODUCTION_FIT_AR_HGCDTE_MODULATION
-                ),
-                "ar_hgcdte_modulation_prior_sigma_log": (
-                    PRODUCTION_AR_HGCDTE_MODULATION_PRIOR_SIGMA_LOG
-                ),
-                "fit_led_log_offsets": int(fit_led_log_offsets),
-                "led_log_offset_prior_sigma_log": float(
-                    led_log_offset_prior_sigma_log
-                ),
-                "constant_rate_map_rate_nm_day": warmup_metadata["rate_nm_day"],
-                "constant_rate_map_objective": warmup_diagnostics["objective"],
-                "absolute_hgcdte_n_log_scale_fixed": int(
-                    fixed_absolute_hgcdte_n_log_scale is not None
-                ),
-                "fixed_absolute_hgcdte_n_log_scale": (
-                    None
-                    if fixed_absolute_hgcdte_n_log_scale is None
-                    else float(fixed_absolute_hgcdte_n_log_scale)
-                ),
-                "thickness_penalty_enabled": int(thickness_penalty_enabled),
-                "thickness_penalty_lambda_shared": (
-                    PRODUCTION_THICKNESS_PENALTY_LAMBDA_SHARED
-                    if thickness_penalty_enabled
-                    else 0.0
-                ),
-                "thickness_penalty_lambda_disagreement": (
-                    PRODUCTION_THICKNESS_PENALTY_LAMBDA_DISAGREEMENT
-                    if thickness_penalty_enabled
-                    else 0.0
-                ),
+                **final_model_metadata,
                 "thickness_penalty_grid_lower_nm": (
                     None
                     if penalty_plan is None
@@ -748,6 +921,9 @@ def write_detector_rate_posterior(
     fit_led_log_offsets=False,
     led_log_offset_prior_sigma_log=PRODUCTION_LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
     ice_n_porosity_parameters=None,
+    warmup_prior_root=None,
+    thickness_prior_log_sigma=None,
+    thickness_prior_stages=None,
 ):
     """Write an aggregate using only complete, current tile fits."""
     rows = []
@@ -781,6 +957,9 @@ def write_detector_rate_posterior(
                 fit_led_log_offsets,
                 led_log_offset_prior_sigma_log,
                 ice_n_porosity_parameters,
+                warmup_prior_root,
+                thickness_prior_log_sigma,
+                thickness_prior_stages,
             )
         ):
             continue
@@ -814,6 +993,9 @@ def write_detector_status(
     fit_led_log_offsets=False,
     led_log_offset_prior_sigma_log=PRODUCTION_LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
     ice_n_porosity_parameters=None,
+    warmup_prior_root=None,
+    thickness_prior_log_sigma=None,
+    thickness_prior_stages=None,
 ):
     complete_tile_ids = []
     for tile_id, statistics_path in sorted(statistics_paths.items()):
@@ -829,6 +1011,9 @@ def write_detector_status(
                 fit_led_log_offsets,
                 led_log_offset_prior_sigma_log,
                 ice_n_porosity_parameters,
+                warmup_prior_root,
+                thickness_prior_log_sigma,
+                thickness_prior_stages,
             )
             and (tile_fit_dir / "tile_rate_posterior.csv").is_file()
         ):
@@ -842,6 +1027,17 @@ def write_detector_status(
         ),
         "fit_led_log_offsets": bool(fit_led_log_offsets),
         "led_log_offset_prior_sigma_log": float(led_log_offset_prior_sigma_log),
+        "warmup_prior_root": (
+            None
+            if warmup_prior_root is None
+            else str(Path(warmup_prior_root).resolve())
+        ),
+        "thickness_prior_log_sigma": (
+            None
+            if thickness_prior_log_sigma is None
+            else float(thickness_prior_log_sigma)
+        ),
+        "thickness_prior_stages": thickness_prior_stages,
         "expected_tile_count": len(statistics_paths),
         "complete_tile_ids": complete_tile_ids,
         "failed_tile_ids": sorted(failed_tile_ids),
@@ -1132,6 +1328,9 @@ def run_detector(
     ),
     fixed_absolute_hgcdte_n_log_scale=None,
     third_decon_day=None,
+    warmup_prior_root=None,
+    thickness_prior_log_sigma=None,
+    thickness_prior_stages=None,
     fit_led_log_offsets=False,
     led_log_offset_prior_sigma_log=PRODUCTION_LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
     ice_n_porosity_parameters=None,
@@ -1175,6 +1374,16 @@ def run_detector(
         third_decon_day = float(third_decon_day)
         if not np.isfinite(third_decon_day):
             raise ValueError("third_decon_day must be finite")
+    (
+        warmup_prior_root,
+        thickness_prior_log_sigma,
+        thickness_prior_stages,
+    ) = resolve_warmup_prior_settings(
+        third_decon_day,
+        warmup_prior_root,
+        thickness_prior_log_sigma,
+        thickness_prior_stages,
+    )
     _configure_parallel_environment(min(workers, MAX_MAP_WORKERS))
     statistics, output_root, statistics_root, fit_root, emcee_output = detector_paths(
         detector,
@@ -1267,6 +1476,9 @@ def run_detector(
                 fit_led_log_offsets,
                 led_log_offset_prior_sigma_log,
                 ice_n_porosity_parameters,
+                warmup_prior_root,
+                thickness_prior_log_sigma,
+                thickness_prior_stages,
             )
         ):
             print(f"Skipping tile {tile_id}: matching archived fit exists", flush=True)
@@ -1285,6 +1497,9 @@ def run_detector(
                 fixed_absolute_hgcdte_n_log_scale,
                 PRODUCTION_THICKNESS_PENALTY_ENABLED,
                 third_decon_day,
+                warmup_prior_root,
+                thickness_prior_log_sigma,
+                thickness_prior_stages,
                 fit_led_log_offsets,
                 led_log_offset_prior_sigma_log,
                 ice_n_porosity_parameters,
@@ -1313,6 +1528,9 @@ def run_detector(
         fit_led_log_offsets=fit_led_log_offsets,
         led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
         ice_n_porosity_parameters=ice_n_porosity_parameters,
+        warmup_prior_root=warmup_prior_root,
+        thickness_prior_log_sigma=thickness_prior_log_sigma,
+        thickness_prior_stages=thickness_prior_stages,
     )
     if output is not None:
         print(f"Wrote {output}", flush=True)
@@ -1327,6 +1545,9 @@ def run_detector(
         fit_led_log_offsets=fit_led_log_offsets,
         led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
         ice_n_porosity_parameters=ice_n_porosity_parameters,
+        warmup_prior_root=warmup_prior_root,
+        thickness_prior_log_sigma=thickness_prior_log_sigma,
+        thickness_prior_stages=thickness_prior_stages,
     )
     if failures:
         print(
@@ -1364,15 +1585,6 @@ def main():
         if selected_args.detector
         else list(DETECTORS)
     )
-    if selected_args.response_cache_root is None and (
-        selected_args.warmup_prior_root is not None
-        or selected_args.thickness_prior_log_sigma is not None
-        or selected_args.thickness_prior_stages is not None
-    ):
-        raise ValueError(
-            "Warmup-centered thickness-prior settings require "
-            "--response-cache-root"
-        )
     if selected_args.response_cache_root is not None:
         run_cached_response(selected_args, detectors)
         return
@@ -1404,6 +1616,9 @@ def main():
                 selected_args.fixed_absolute_hgcdte_n_log_scale
             ),
             third_decon_day=selected_args.third_decon_day,
+            warmup_prior_root=selected_args.warmup_prior_root,
+            thickness_prior_log_sigma=selected_args.thickness_prior_log_sigma,
+            thickness_prior_stages=selected_args.thickness_prior_stages,
             fit_led_log_offsets=selected_args.fit_led_log_offsets,
             led_log_offset_prior_sigma_log=(
                 selected_args.led_log_offset_prior_sigma_log

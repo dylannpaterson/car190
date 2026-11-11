@@ -59,7 +59,44 @@ never inferred by the runner. This mode requires independent one-tile fits
 The normal `run_wfi_production.py` wrapper forwards these options when
 `--response-cache-root` selects the relative-response branch.
 
-## Pinned Cache
+## Current Cache
+
+The current cache for future cached relative-response fits was generated from
+the complete 20261109 full-TMM production outputs:
+
+```text
+20261109/corrected_statistics_4h_thinned/production/relative_response_cache/
+  tile_size_256/sensitivity_hgcdte_n_sigma_0p25/wfiNN_400nm/
+```
+
+Use the detector-specific cache with `--allow-external-cache-source` when fitting
+later corrected-statistics runs. The cache source is intentionally external to
+the fit's output tree; its fixed optical state and provenance are validated from
+the cache archive.
+
+For example:
+
+```bash
+statistics_dir=20261109/corrected_statistics_4h_thinned
+cache_root=20261109/corrected_statistics_4h_thinned/production/relative_response_cache/tile_size_256/sensitivity_hgcdte_n_sigma_0p25/wfi01_400nm
+
+.venv/bin/python -u run_wfi_production.py \
+  --statistics-dir "$statistics_dir" \
+  --detector WFI01 \
+  --tile-size 256 \
+  --response-cache-root "$cache_root" \
+  --third-decon-day 38.79784510416666 \
+  --fit-led-log-offsets \
+  --led-log-offset-prior-sigma-log 0.01 \
+  --batch-size 1 \
+  --allow-external-cache-source \
+  --workers 2
+```
+
+The portable all-wavelength bundle is a separate downstream product and is not
+accepted by the cached production evaluator.
+
+## Historical Pinned Cache
 
 The validated pinned cache used for the 20261030 corrected-statistics run is:
 

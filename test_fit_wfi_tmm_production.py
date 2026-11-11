@@ -107,6 +107,56 @@ class FixedProductionSettingsTests(unittest.TestCase):
         self.assertIn("post_third_decon_tile_log_offset", values)
         self.assertEqual(values["third_decon_initial_thickness_log_nm"].shape, (1, 1))
 
+    def test_custom_third_decon_prior_center_and_scale_are_used(self):
+        data = {
+            "counts": np.ones((1, 6)),
+            "sums": np.zeros((1, 6)),
+            "sum_squared": np.ones((1, 6)),
+            "days": np.asarray([0.0, 0.1, 1.0, 1.1, 5.8, 5.9]),
+            "node_days": np.asarray([0.0, 1.0, 2.0, 3.0, 4.0, 5.0]),
+            "reset_days": np.asarray([1.5, 3.5]),
+            "reset_day": 1.5,
+            "led": np.arange(1, 7),
+            "first_by_led": np.arange(6),
+            "n_scas": 1,
+            "n_tiles": 1,
+            "tile_ids": np.asarray([0]),
+            "sca_index": np.asarray([0]),
+            "sca_names": np.asarray(["WFI01"]),
+            "groups": np.arange(6),
+            "repeat": np.asarray([0, 0, 1, 1, 2, 2]),
+            "metadata": {0: {"tile_row": 0, "tile_col": 0}},
+        }
+        context = {
+            "wavelengths": np.asarray([1000.0]),
+            "model_weights": np.ones((1, 6, 1)),
+            "outside_output": np.zeros((1, 6)),
+            "clean_output": np.ones((1, 6)),
+            "hgcdte_n": np.asarray([3.6]),
+            "hgcdte_k": np.asarray([0.7]),
+            "absolute_substrate_power": True,
+        }
+        model = production.build_model(
+            data,
+            context,
+            fit_incidence_angle=False,
+            thickness_prior_centers={
+                "third_decon_initial_thickness_log_nm": np.asarray([[np.log(40.0)]])
+            },
+            thickness_prior_sigmas={
+                "third_decon_initial_thickness_log_nm": np.asarray([[0.1]])
+            },
+        )
+        jax, _, _, _ = production.require_numpyro()
+        from numpyro.handlers import seed, trace
+
+        sites = trace(seed(model, jax.random.PRNGKey(109))).get_trace()
+        third_site = sites["third_decon_initial_thickness_log_nm"]["fn"]
+        np.testing.assert_allclose(
+            np.asarray(third_site.base_dist.loc), [[np.log(40.0)]]
+        )
+        np.testing.assert_allclose(np.asarray(third_site.base_dist.scale), [[0.1]])
+
     def test_optional_third_decon_resets_trajectory_baseline(self):
         data = _two_reset_trajectory_data()
         jax, jnp, _, _ = production.require_numpyro()

@@ -1,14 +1,15 @@
 # WFI Wavelength-Response Bundle
 
 This bundle is a portable representation of the fixed-optics WFI relative
-response for the current WFI01 256-pixel tile analysis.
+response and fitted ice trajectory for the current all-detector 256-pixel
+tile analysis.
 
 ## Files
 
 The generated data product is one compressed NumPy archive:
 
 ```text
-20261019/corrected_statistics_4h_thinned/production/wfi01/relative_response/wavelength_response_bundle/wfi01_2nm_rank16.npz
+20261102/corrected_statistics_4h_thinned/production/wavelength_response_bundle/wfi_all_2nm_rank16.npz
 ```
 
 The companion reader is:
@@ -22,9 +23,9 @@ repository, JAX, NumPyro, or the production TMM code.
 
 ## Contents
 
-- 256 WFI01 tiles in the current archive, with their original tile row/column
-  and pixel bounds. The format supports multiple detectors in one archive.
-- Wavelength grid from 480 to 2700 nm at 2 nm spacing.
+- 256 tiles for each of WFI01 through WFI18, with their original tile
+  row/column and pixel bounds.
+- Wavelength grid from 470 to 2700 nm at 2 nm spacing.
 - Ice-thickness grid from 0 to 500 nm at 2 nm spacing.
 - Clean fixed-optics spectral power for each tile.
 - Low-rank response factors for each tile. The relative response is
@@ -58,10 +59,10 @@ To rebuild the archive from the per-tile caches:
 
 ```bash
 python build_wfi_wavelength_response_bundle.py \
-  --cache-root 20261012/wavelength_response_cache/tile_size_256/wfi01_2nm_rank16 \
-  --fit-root 20261019/corrected_statistics_4h_thinned/production \
-  --output 20261019/corrected_statistics_4h_thinned/production/wfi01/relative_response/wavelength_response_bundle/wfi01_2nm_rank16.npz \
-  --detector WFI01 \
+  --cache-root 20261102/corrected_statistics_4h_thinned/production/wavelength_response_cache/tile_size_256 \
+  --fit-root 20261102/corrected_statistics_4h_thinned/production \
+  --all-detectors \
+  --output 20261102/corrected_statistics_4h_thinned/production/wavelength_response_bundle/wfi_all_2nm_rank16.npz \
   --tile-size 256
 ```
 
@@ -71,10 +72,10 @@ detector labels from the per-tile cache metadata:
 
 ```bash
 python build_wfi_wavelength_response_bundle.py \
-  --cache-root 20261012/wavelength_response_cache/tile_size_256 \
-  --fit-root 20261019/corrected_statistics_4h_thinned/production \
+  --cache-root 20261102/corrected_statistics_4h_thinned/production/wavelength_response_cache/tile_size_256 \
+  --fit-root 20261102/corrected_statistics_4h_thinned/production \
   --all-detectors \
-  --output 20261019/corrected_statistics_4h_thinned/production/wavelength_response_bundle/wfi_all_2nm_rank16.npz \
+  --output 20261102/corrected_statistics_4h_thinned/production/wavelength_response_bundle/wfi_all_2nm_rank16.npz \
   --tile-size 256
 ```
 
@@ -90,7 +91,7 @@ Inspect the bundle:
 
 ```bash
 python wfi_wavelength_response_bundle.py \
-  20261019/corrected_statistics_4h_thinned/production/wfi01/relative_response/wavelength_response_bundle/wfi01_2nm_rank16.npz \
+  20261102/corrected_statistics_4h_thinned/production/wavelength_response_bundle/wfi_all_2nm_rank16.npz \
   --summary
 ```
 
@@ -98,7 +99,7 @@ List tile locations:
 
 ```bash
 python wfi_wavelength_response_bundle.py \
-  20261019/corrected_statistics_4h_thinned/production/wfi01/relative_response/wavelength_response_bundle/wfi01_2nm_rank16.npz \
+  20261102/corrected_statistics_4h_thinned/production/wavelength_response_bundle/wfi_all_2nm_rank16.npz \
   --tile-map-csv wfi01_tile_mpa_locations.csv
 ```
 
@@ -106,7 +107,8 @@ Evaluate tile 044 at 100 nm ice thickness and 1300 nm wavelength:
 
 ```bash
 python wfi_wavelength_response_bundle.py \
-  20261019/corrected_statistics_4h_thinned/production/wfi01/relative_response/wavelength_response_bundle/wfi01_2nm_rank16.npz \
+  20261102/corrected_statistics_4h_thinned/production/wavelength_response_bundle/wfi_all_2nm_rank16.npz \
+  --detector WFI01 \
   --tile-id 44 \
   --ice-thickness-nm 100 \
   --wavelength-nm 1300
@@ -116,7 +118,7 @@ Find the nearest tile to an MPA location and evaluate it:
 
 ```bash
 python wfi_wavelength_response_bundle.py \
-  20261019/corrected_statistics_4h_thinned/production/wfi01/relative_response/wavelength_response_bundle/wfi01_2nm_rank16.npz \
+  20261102/corrected_statistics_4h_thinned/production/wavelength_response_bundle/wfi_all_2nm_rank16.npz \
   --x-mm -33.66 --y-mm -1.93 \
   --ice-thickness-nm 100 \
   --wavelength-nm 1300
@@ -126,7 +128,7 @@ Query the fitted ice trajectory for a tile:
 
 ```bash
 python wfi_wavelength_response_bundle.py \
-  20261019/corrected_statistics_4h_thinned/production/wfi01/relative_response/wavelength_response_bundle/wfi01_2nm_rank16.npz \
+  20261102/corrected_statistics_4h_thinned/production/wavelength_response_bundle/wfi_all_2nm_rank16.npz \
   --detector WFI01 --tile-id 44 --trajectory
 ```
 
@@ -137,7 +139,7 @@ import numpy as np
 
 from wfi_wavelength_response_bundle import evaluate, load_bundle
 
-bundle = load_bundle("wfi01_2nm_rank16.npz")
+bundle = load_bundle("wfi_all_2nm_rank16.npz")
 clean, log_response = evaluate(
     bundle,
     tile_id=44,
@@ -192,8 +194,38 @@ as-built metrology or distortion-corrected WCS coordinates.
   log-response error for the current WFI01 archive.
 - Filter throughput curves, source SEDs, and detector QE are intentionally not
   embedded. They are downstream weighting inputs.
-- The response uses the fixed per-tile AR/HgCdTe/incidence-angle optics fitted
-  in the source production run. The trajectory arrays are the current
-  relative-response MAP fit supplied through `--fit-root`. The source
-  provenance is retained in the portable archive's `fit_paths`,
-  `statistics_paths`, and `fit_statistics_fingerprints` arrays.
+- The response uses the fixed per-tile AR/HgCdTe/incidence-angle optics in the
+  20261102 wavelength-response caches. The trajectory arrays are the current
+  20261102 relative-response MAP fit supplied through `--fit-root`. The source
+  provenance is retained in `metadata_json`, `fit_paths`, `statistics_paths`,
+  and `fit_statistics_fingerprints`.
+
+## Nexus S3 Publication
+
+For the separate CAR201-modulated release, follow
+`WFI_MODULATED_WAVELENGTH_RESPONSE_BUNDLE.md` for staging, model limitations, and
+the shared current-model S3 prefix. Both current best model variants belong
+together under `rges-pit/ice_model`, with dated archives retained locally.
+The current canonical `wfi_all_2nm_rank16_modulated.npz` uses joint CAR190 +
+Amber's CAR201 photometry (Student-t `nu=4`), refitted per-tile ice histories with 2-day rate controls, and the
+same bundle array schema and 785-point CAR190 time axis. The unmodulated
+`wfi_all_2nm_rank16.npz` is preserved. Rebuild the paired local export with
+`python stage_wfi_current_models_s3.py` before publishing.
+The CAR201 saved-fit diagnostic corrections
+include fitted roll zero points and use a different clean-power normalization;
+they are not identical to integrating the portable modulated optical bundle.
+Do not upload the older staged export unchanged as the new modulated release.
+
+Put the new `wfi_all_2nm_rank16.npz` beside the uploader in the staged export
+directory. The existing Nexus command remains unchanged; the script refreshes
+`SHA256SUMS` before running the same non-destructive sync:
+
+```bash
+python upload_wfi_wavelength_response_s3.py \
+  --bucket roman-s3-romcom \
+  --prefix rges-pit/ice_model \
+  --dry-run
+```
+
+Remove `--dry-run` after checking the planned keys. No AWS profile or rest of
+the repository is required.

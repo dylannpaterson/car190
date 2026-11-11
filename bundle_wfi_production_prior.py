@@ -234,6 +234,16 @@ def find_fit_archives(
             fit_root / detector.lower() / "fits",
         ),
         (
+            "relative_response_production",
+            detector_output_root(fit_root, detector, tile_size)
+            / "relative_response"
+            / "fits",
+        ),
+        (
+            "direct_relative_response",
+            fit_root / detector.lower() / "relative_response" / "fits",
+        ),
+        (
             "legacy_independent_production",
             fit_root / f"{detector.lower()}_{LEGACY_MODEL_NAME}" / "fits",
         ),
@@ -294,7 +304,11 @@ def _series(samples, names, count, required=True):
 def response_wavelengths(samples, path):
     if "response_wavelengths_nm" not in samples:
         raise ValueError(f"Missing response wavelength grid in {path}")
-    wavelengths = np.asarray(samples["response_wavelengths_nm"], dtype=float).reshape(-1)
+    return validate_response_wavelengths(samples["response_wavelengths_nm"], path)
+
+
+def validate_response_wavelengths(values, path):
+    wavelengths = np.asarray(values, dtype=float).reshape(-1)
     if (
         wavelengths.size < 2
         or np.any(~np.isfinite(wavelengths))
@@ -303,6 +317,29 @@ def response_wavelengths(samples, path):
     ):
         raise ValueError(f"Invalid response wavelength grid in {path}")
     return wavelengths.copy()
+
+
+def load_response_grid_cache(path):
+    path = Path(path)
+    with np.load(path, allow_pickle=False) as cache:
+        if "wavelengths_nm" not in cache:
+            raise ValueError(f"Missing wavelengths_nm in response grid cache {path}")
+        return validate_response_wavelengths(cache["wavelengths_nm"], path)
+
+
+def load_model_predictions(path, source_rows, count):
+    prediction_path = Path(path) / "tile_group_predictions.csv"
+    if not prediction_path.is_file():
+        raise ValueError(
+            f"Missing _map_least_squares_prediction and tile_group_predictions.csv in {path}"
+        )
+    with prediction_path.open(newline="") as handle:
+        rows = sorted(csv.DictReader(handle), key=lambda row: int(row["group"]))
+    expected_groups = [int(row["group"]) for row in source_rows]
+    actual_groups = [int(row["group"]) for row in rows]
+    if len(rows) != count or actual_groups != expected_groups:
+        raise ValueError(f"Prediction groups differ from statistics in {prediction_path}")
+    return np.asarray([float(row["model_log_change"]) for row in rows], dtype=float)
 
 
 def reconstruct_hgcdte(reference_n, reference_k, n_log_scale, k_log_scale):
@@ -317,7 +354,7 @@ def reconstruct_hgcdte(reference_n, reference_k, n_log_scale, k_log_scale):
     return physical_n, physical_k
 
 
-def read_fit_archive(path, statistics, tile_id, fit_root):
+def read_fit_archive(path, statistics, tile_id, fit_root, response_grid=None):
     source_rows = statistics["rows_by_tile"][tile_id]
     source_fingerprint = statistics_fingerprint(source_rows)
     with np.load(path / "posterior_samples.npz", allow_pickle=False) as samples:
@@ -327,7 +364,14 @@ def read_fit_archive(path, statistics, tile_id, fit_root):
                 f"Statistics fingerprint mismatch for {path}: "
                 f"archive={archive_fingerprint}, source={source_fingerprint}"
             )
-        fit_wavelengths = response_wavelengths(samples, path)
+        if "response_wavelengths_nm" in samples:
+            fit_wavelengths = response_wavelengths(samples, path)
+        elif response_grid is not None:
+            fit_wavelengths = validate_response_wavelengths(response_grid, path)
+        else:
+            raise ValueError(
+                f"Missing response wavelength grid in {path}; pass --response-grid-cache"
+            )
         observation_count = len(statistics["observations"])
         thickness = _series(
             samples,
@@ -339,7 +383,14 @@ def read_fit_archive(path, statistics, tile_id, fit_root):
             ("tile_instantaneous_rate_nm_day", "instantaneous_rate_nm_day"),
             observation_count,
         )
-        predictions = _series(samples, "_map_least_squares_prediction", observation_count)
+        if "_map_least_squares_prediction" in samples:
+            predictions = _series(
+                samples, "_map_least_squares_prediction", observation_count
+            )
+        else:
+            predictions = load_model_predictions(
+                path, source_rows, observation_count
+            )
         node_count = statistics["node_days"].size
         node_thickness = _series(
             samples,
@@ -388,6 +439,21 @@ def read_fit_archive(path, statistics, tile_id, fit_root):
         ):
             raise ValueError(f"Incomplete third-decon fields in {path}")
         map_history = np.asarray(samples["map_objective_history"], dtype=float).reshape(-1)
+        initial_rate = float(
+            _scalar(samples, ("tile_initial_rate_nm_day", "initial_rate_nm_day"))
+        )
+        final_rate = float(
+            _scalar(samples, ("tile_final_rate_nm_day", "final_rate_nm_day"))
+        )
+        mean_rate = float(
+            _scalar(samples, ("tile_mean_rate_nm_day", "mean_rate_nm_day"))
+        )
+        if not np.isfinite(initial_rate):
+            initial_rate = float(rates[0])
+        if not np.isfinite(final_rate):
+            final_rate = float(rates[-1])
+        if not np.isfinite(mean_rate):
+            mean_rate = float(np.mean(rates))
         fit_values = {
             "ar_parameters": ar_parameters,
             "initial_thickness_nm": np.exp(initial_log),
@@ -406,15 +472,9 @@ def read_fit_archive(path, statistics, tile_id, fit_root):
             "absolute_hgcdte_k_log_scale": float(
                 _scalar(samples, "absolute_hgcdte_k_log_scale")
             ),
-            "initial_rate_nm_day": float(
-                _scalar(samples, ("tile_initial_rate_nm_day", "initial_rate_nm_day"))
-            ),
-            "final_rate_nm_day": float(
-                _scalar(samples, ("tile_final_rate_nm_day", "final_rate_nm_day"))
-            ),
-            "mean_rate_nm_day": float(
-                _scalar(samples, ("tile_mean_rate_nm_day", "mean_rate_nm_day"))
-            ),
+            "initial_rate_nm_day": initial_rate,
+            "final_rate_nm_day": final_rate,
+            "mean_rate_nm_day": mean_rate,
             "trajectory_rate_prior_mean_nm_day": float(
                 _scalar(samples, "trajectory_rate_prior_mean_nm_day")
             ),
@@ -444,6 +504,14 @@ def read_fit_archive(path, statistics, tile_id, fit_root):
                 (path / "posterior_samples.npz").relative_to(fit_root)
             ),
             "response_wavelengths_nm": fit_wavelengths,
+            "fit_mode": _string_scalar(samples, "fit_mode", "unknown"),
+            "response_cache": _string_scalar(samples, "response_cache", ""),
+            "thickness_prior_log_sigma": float(
+                _scalar(samples, "thickness_prior_log_sigma", np.nan)
+            ),
+            "thickness_prior_stages": _string_scalar(
+                samples, "thickness_prior_stages", ""
+            ),
         }
     return fit_values
 
@@ -532,9 +600,15 @@ def build_bundle(
     statistics_dir,
     fit_root,
     tile_size=DEFAULT_TILE_SIZE,
+    response_grid=None,
+    response_grid_source=None,
 ):
     statistics_dir = Path(statistics_dir)
     fit_root = Path(fit_root).resolve()
+    if response_grid is not None:
+        response_grid = validate_response_wavelengths(
+            response_grid, response_grid_source or "response_grid"
+        )
     detector_data = {}
     fit_data = {}
     fit_layouts = {}
@@ -550,7 +624,13 @@ def build_bundle(
         detector_data[detector] = statistics
         fit_layouts[detector] = layout
         fit_data[detector] = {
-            tile_id: read_fit_archive(path, statistics, tile_id, fit_root)
+            tile_id: read_fit_archive(
+                path,
+                statistics,
+                tile_id,
+                fit_root,
+                response_grid=response_grid,
+            )
             for tile_id, path in sorted(archives.items())
         }
 
@@ -768,6 +848,7 @@ def build_bundle(
         len(timeseries_rows),
         len(node_rows),
         response_grid,
+        response_grid_source=response_grid_source,
     )
     primary = fits.PrimaryHDU()
     header = primary.header
@@ -832,10 +913,10 @@ def readme_lines():
         "The source statistics are corrected products; no correction table is applied here.",
         "The bundle contains checksums and per-tile statistics fingerprints for provenance.",
         "HGCDTE_REFERENCE gives the wavelength-dependent internal reference n and k used by the fit.",
-        "PARAMETERS absolute_hgcdte_n and absolute_hgcdte_k are physical per-tile vectors in HGCDTE_REFERENCE row order.",
+        "PARAMETERS absolute_hgcdte_n and absolute_hgcdte_k are physical per-tile vectors in HGCDTE_REFERENCE row order; for cached relative-response fits this is a reconstruction grid.",
         "Physical HgCdTe values are reference_n/k multiplied by exp of the corresponding fitted log scale.",
         "The HgCdTe reference is an internal 80 K, x=0.445 sensitivity model, not a detector-specific validation table.",
-        "Absolute substrate power omits multiplication by the independent measured QE values.",
+        "Absolute-substrate-power fits omit multiplication by independent measured QE values; cached relative-response fits retain their response-cache semantics.",
         "Third-decon fields are NaN/false when the optional third-decon boundary is unset.",
         "post_third_decon marks observations on/after the optional physical third-decon boundary.",
     ]
@@ -850,6 +931,7 @@ def model_rows(
     timeseries_count,
     node_count,
     response_grid,
+    response_grid_source=None,
 ):
     prior_values = [
         (
@@ -878,13 +960,58 @@ def model_rows(
     if len(third_days) > 1:
         raise ValueError("Third-decon day differs across fit archives")
     third_day = next(iter(third_days), None)
+    fit_modes = {
+        fit["fit_mode"]
+        for detector_fits in fit_data.values()
+        for fit in detector_fits.values()
+    }
+    response_caches = {
+        str(Path(fit["response_cache"]).parent.parent)
+        for detector_fits in fit_data.values()
+        for fit in detector_fits.values()
+        if fit["response_cache"]
+    }
+    response_cache_parents = {str(Path(path).parent) for path in response_caches}
+    response_cache_source = (
+        next(iter(response_cache_parents))
+        if len(response_cache_parents) == 1
+        else f"{len(response_cache_parents)} distinct detector cache parent roots"
+    )
+    prior_sigmas = {
+        float(fit["thickness_prior_log_sigma"])
+        for detector_fits in fit_data.values()
+        for fit in detector_fits.values()
+        if np.isfinite(fit["thickness_prior_log_sigma"])
+    }
+    prior_stages = {
+        fit["thickness_prior_stages"]
+        for detector_fits in fit_data.values()
+        for fit in detector_fits.values()
+        if fit["thickness_prior_stages"]
+    }
+    relative_response_fit = fit_modes and all(
+        mode.startswith("relative_response") for mode in fit_modes
+    )
+    response_mode = (
+        "cached six-LED relative response; fixed-optics HgCdTe reconstruction grid"
+        if relative_response_fit
+        else "absolute substrate power; semi-infinite HgCdTe"
+    )
+    initial_thickness_prior = "lognormal median 10, log sigma 1.5"
+    if len(prior_sigmas) == 1:
+        initial_thickness_prior = f"lognormal median 10, log sigma {next(iter(prior_sigmas)):g}"
+    if len(prior_stages) == 1:
+        initial_thickness_prior += f"; stages {next(iter(prior_stages))}"
 
     rows = [
         ("bundle_schema_version", "1.2", "", "Version of the embedded bundle schema."),
         ("product_type", "CAR190_WFI_PRODUCTION_PRIOR", "", "Product purpose."),
         ("fit_estimator", "deterministic least-squares MAP", "", "Estimator used for fitted values."),
         ("fit_uncertainty", "not represented; MAP point estimates only", "", "Uncertainty limitation."),
-        ("response_mode", "absolute substrate power; semi-infinite HgCdTe", "", "Production optical response."),
+        ("response_mode", response_mode, "", "Production optical response."),
+        ("fit_modes", "; ".join(sorted(fit_modes)), "", "Fit mode values recorded by the source archives."),
+        ("response_cache_root", response_cache_source, "", "Common response-cache parent recorded by the source archives."),
+        ("response_grid_source", str(response_grid_source or "fit archives"), "", "Source of the bundled response wavelength grid."),
         ("ar_layers", "3 independent lossless layers", "", "AR model structure."),
         ("sed_weighting", "energy", "", "SED weighting mode."),
         ("ice_index", "1.25", "", "Fixed lossless ice refractive index."),
@@ -895,7 +1022,7 @@ def model_rows(
             "day",
             "Optional physical third-decon boundary; unset for legacy two-decon fits.",
         ),
-        ("initial_thickness_prior", "lognormal median 10, log sigma 1.5", "nm", "Initial/reset thickness prior."),
+        ("initial_thickness_prior", initial_thickness_prior, "nm", "Initial/reset thickness prior."),
         (
             "trajectory_rate_prior",
             f"lognormal mean {trajectory_rate_prior_mean:g}, log sigma {trajectory_rate_prior_log_sigma:g}",
@@ -912,7 +1039,14 @@ def model_rows(
         ("hgcdte_native_n_table_range_nm", f"{HGCDTE_N_TABLE_WAVELENGTHS_NM[0]:.1f}-{HGCDTE_N_TABLE_WAVELENGTHS_NM[-1]:.1f}", "nm", "Native range of the tabulated real-index reference."),
         ("hgcdte_bundle_curve_range_nm", f"{response_grid[0]:.9f}-{response_grid[-1]:.9f}", "nm", "Wavelength range of the bundled response-grid reference and physical vectors."),
         ("hgcdte_physical_reconstruction", "n=reference_n*exp(n_log_scale); k=reference_k*exp(k_log_scale)", "", "Per-tile physical HgCdTe reconstruction."),
-        ("qe_policy", "independent measured QE values are not multiplied", "", "Absolute-substrate-power response policy."),
+        (
+            "qe_policy",
+            "not applicable to cached relative-response fit"
+            if relative_response_fit
+            else "independent measured QE values are not multiplied",
+            "",
+            "Absolute-substrate-power response policy.",
+        ),
         ("system_effective_area", "not used by the production RCS fit", "", "Roman effective-area curves must replace, not multiply, independent QE in a downstream system-throughput model."),
         ("ar_thickness_parameterization", "raw production coordinate * 100 = physical nm", "nm", "AR thickness conversion used by the production TMM."),
         ("time_scale", "UTC", "", "Absolute timestamp scale."),
@@ -1100,6 +1234,15 @@ def parse_args():
         default=DEFAULT_TILE_SIZE,
         help=f"Tile edge length used by the production reduction; default: {DEFAULT_TILE_SIZE}.",
     )
+    parser.add_argument(
+        "--response-grid-cache",
+        type=Path,
+        default=None,
+        help=(
+            "Spectral response cache containing wavelengths_nm; used when the fit "
+            "archives do not carry their own response grid."
+        ),
+    )
     parser.add_argument("--output", type=Path, default=None)
     return parser.parse_args()
 
@@ -1110,7 +1253,18 @@ def main():
         production_output_root(args.statistics_dir, args.tile_size)
         / "wfi_production_map_prior_bundle.fits"
     )
-    hdul = build_bundle(args.statistics_dir, args.fit_root, tile_size=args.tile_size)
+    response_grid = None
+    response_grid_source = None
+    if args.response_grid_cache is not None:
+        response_grid = load_response_grid_cache(args.response_grid_cache)
+        response_grid_source = str(args.response_grid_cache.resolve())
+    hdul = build_bundle(
+        args.statistics_dir,
+        args.fit_root,
+        tile_size=args.tile_size,
+        response_grid=response_grid,
+        response_grid_source=response_grid_source,
+    )
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     hdul.writeto(output, overwrite=True, checksum=True)

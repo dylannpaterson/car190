@@ -207,6 +207,30 @@ def test_optical_values_default_missing_incidence_to_normal(tmp_path):
     assert float(np.asarray(values["incidence_angle_deg"]).item()) == 0.0
 
 
+def test_optical_values_load_fixed_sites_from_response_cache(tmp_path):
+    cache_path = tmp_path / "relative_response.npz"
+    np.savez_compressed(
+        cache_path,
+        ice_n_log_constant=np.asarray(0.3),
+        ar_n_log_modulation=np.full((3, 6), 0.4),
+        hgcdte_n_log_modulation=np.full(6, 0.5),
+        hgcdte_k_log_modulation=np.full(6, 0.6),
+    )
+    fit_path = tmp_path / "spline_fit.npz"
+    np.savez_compressed(
+        fit_path,
+        ar_tile_raw=np.zeros(9),
+        absolute_hgcdte_n_log_scale=np.asarray(0.1),
+        absolute_hgcdte_k_log_scale=np.asarray(0.2),
+        response_cache=np.asarray(str(cache_path)),
+    )
+    values = load_optical_values(fit_path)
+    np.testing.assert_allclose(values["ice_n_log_constant"], 0.3)
+    np.testing.assert_allclose(values["ar_n_log_modulation"], 0.4)
+    np.testing.assert_allclose(values["hgcdte_n_log_modulation"], 0.5)
+    np.testing.assert_allclose(values["hgcdte_k_log_modulation"], 0.6)
+
+
 def test_warm_values_use_current_rate_prior_not_source_trajectory(tmp_path, monkeypatch):
     initial = {
         "ar_tile_raw": np.zeros(9),

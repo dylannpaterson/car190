@@ -32,12 +32,24 @@ or hierarchical tile trajectories, neighboring-tile smoothing, NUTS, and
 alternate MAP optimizers are not production features. An explicit
 `--response-cache-root` dispatches to the definitive six-LED-integrated cached
 production branch documented in `docs/WFI_RELATIVE_RESPONSE_PRODUCTION.md`.
-That branch keeps the old cache's fixed optical state and interpolated response
+That branch keeps the selected pinned cache's fixed optical state and interpolated response
 curves, but fits the current statistics with the current production ice/rate
 objective. It uses only a robust detector-level median of the source rates as a
 constant warm start; it never imports the source fit's time-dependent rate
 trajectory or entropy regularization, and the fitted rate prior remains centered
 at `12 nm/day`.
+
+Future cached relative-response fits should use the detector-specific six-LED
+cache generated from the complete 20261109 full-TMM run:
+
+```text
+20261109/corrected_statistics_4h_thinned/production/relative_response_cache/
+  tile_size_256/sensitivity_hgcdte_n_sigma_0p25/wfiNN_400nm/
+```
+
+Pass that cache with `--response-cache-root` and
+`--allow-external-cache-source`. The portable all-wavelength bundle is a
+separate downstream product and is not an input to the cached production fit.
 
 The standard full-TMM production model leaves per-LED log offsets disabled
 because the LED baselines are normalized. The validated cached
@@ -45,6 +57,9 @@ relative-response run on 20261030 explicitly fits them with
 `--fit-led-log-offsets` and `--led-log-offset-prior-sigma-log 0.01`; its
 archives remain in the separate `relative_response/` subtree and must not
 replace the standard full-TMM outputs.
+
+The production forward model, parameterisation, priors, and regularisation
+are documented in `docs/WFI_TMM_PRODUCTION_MODEL.md`.
 
 The exploratory `fit_wfi_tmm_numpyro.py` workflow retains additional optical
 sensitivity branches. Those branches are not accepted by the production
@@ -380,6 +395,27 @@ sigma `0.1`, independent one-tile fits (`--batch-size 1`), and zero trajectory
 entropy weight. The final fit still performs its own scalar-rate numerical
 warmup; the separate warmup supplies the per-tile third-decon prior centers.
 
+Export the fitted ice state as a spreadsheet-friendly CSV with one row per
+tile and shared repeat-time model node:
+
+```bash
+.venv/bin/python -u export_wfi_production_ice_csv.py \
+  --statistics-dir 20261101/corrected_statistics_4h_thinned \
+  --fit-root 20261101/corrected_statistics_4h_thinned \
+  --output 20261101/corrected_statistics_4h_thinned/production/relative_response/wfi_ice_accumulation_20261101.csv
+```
+
+The primary table contains one row per detector/tile/model node and includes
+`ice_thickness_nm`,
+`accumulation_rate_nm_day`, nominal MPA focal-plane `mpa_x_mm` and
+`mpa_y_mm` coordinates, detector/tile geometry, node metadata, reset
+boundaries, fit mode, and archive provenance. The 20261101 export contains
+124 shared model nodes per tile; LED exposures are not separate model rows.
+Add `--current-output <path>` when a separate latest-node snapshot is useful.
+When `--output` is omitted, the exporter derives the
+`YYYYMMDD` filename label from the dated statistics directory; use
+`--date-label` for an undated input path.
+
 Generate matching detector and all-detector plots from the same statistics
 directory with the default 256-pixel layout. Add `--tile-size 512` to each
 command when plotting the alternate layout:
@@ -448,6 +484,21 @@ Bundle the complete production outputs into one self-describing FITS product:
 
 Add `--tile-size 256` when bundling the alternate-size fit archives. The
 bundle records the discovered tile count and detector grid in its metadata.
+
+For the current cached relative-response production branch, fit archives are
+under each detector's `relative_response/fits` directory and the wavelength
+grid is supplied explicitly from a fixed-optics spectral cache:
+
+```bash
+.venv/bin/python -u bundle_wfi_production_prior.py \
+  --statistics-dir 20261102/corrected_statistics_4h_thinned \
+  --fit-root 20261102/corrected_statistics_4h_thinned/production \
+  --response-grid-cache 20261102/corrected_statistics_4h_thinned/production/wavelength_response_cache/tile_size_256/wfi01_470nm_2nm_rank16/tile_000/spectral_response.npz \
+  --output 20261102/corrected_statistics_4h_thinned/production/wfi_production_map_prior_bundle.fits
+```
+
+The resulting FITS product records the cached fit mode and external response
+grid source in its `MODEL` extension.
 
 The default output is
 `production/wfi_production_map_prior_bundle.fits` below the statistics directory.
@@ -700,6 +751,7 @@ the separate legacy output format.
 - `wfi_production_layout.py`: shared default and alternate tile-size layout rules;
 - `run_wfi_production.py`: fixed all-detector independent-tile production runner;
 - `run_wfi_relative_response_production.py`: provenance-checked six-LED cached-response runner;
+- `export_wfi_production_ice_csv.py`: current and optional trajectory CSV export;
 - `build_wfi_relative_response_cache.py`: build current-run six-LED response caches;
 - `compress_wfi_relative_response_cache.py`: compress six-LED response caches for production;
 - `run_wfi_tmm_emcee_warmup.py`: fixed one-tile EMCEE initializer;
@@ -718,9 +770,9 @@ the separate legacy output format.
 
 `docs/WFI_WAVELENGTH_RESPONSE_BUNDLE.md` documents the transportable compressed
 wavelength-space response product, including its nominal MPA focal-plane tile
-coordinates and standalone reader examples. The generated WFI01 bundle is
-written under the current run's
-`20261019/corrected_statistics_4h_thinned/production/wfi01/relative_response/wavelength_response_bundle/`.
+coordinates and standalone reader examples. The generated all-detector bundle
+is written under the current run's
+`20261102/corrected_statistics_4h_thinned/production/wavelength_response_bundle/`.
 The bundle also carries
 the fitted MAP ice thickness and rate at each shared observation day and UTC
 exposure-start time for each tile.

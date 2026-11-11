@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--detector", default="WFI01")
     parser.add_argument("--tile-id", type=int, action="append")
-    parser.add_argument("--wavelength-min-nm", type=float, default=480.0)
+    parser.add_argument("--wavelength-min-nm", type=float, default=470.0)
     parser.add_argument("--wavelength-max-nm", type=float, default=2700.0)
     parser.add_argument("--wavelength-step-nm", type=float, default=2.0)
     parser.add_argument("--max-thickness-nm", type=float, default=500.0)

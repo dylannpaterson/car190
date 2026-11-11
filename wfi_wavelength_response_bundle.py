@@ -14,6 +14,7 @@ import numpy as np
 
 BUNDLE_VERSION = 2
 LEGACY_BUNDLE_VERSION = 1
+MODULATED_BUNDLE_VERSION = 3
 DETECTOR_PIXELS = 4096
 ACTIVE_REFERENCE_PIXELS = 4
 ACTIVE_PIXELS = DETECTOR_PIXELS - 2 * ACTIVE_REFERENCE_PIXELS
@@ -122,7 +123,11 @@ def load_bundle(path):
     """Load a bundle into memory and validate its shared dimensions."""
     with np.load(Path(path), allow_pickle=False) as source:
         version = int(np.asarray(source["bundle_version"]).reshape(-1)[0])
-        if version not in (LEGACY_BUNDLE_VERSION, BUNDLE_VERSION):
+        if version not in (
+            LEGACY_BUNDLE_VERSION,
+            BUNDLE_VERSION,
+            MODULATED_BUNDLE_VERSION,
+        ):
             raise ValueError(f"Unsupported wavelength-response bundle version {version}")
         bundle = {name: np.asarray(source[name]) for name in source.files}
     metadata = json.loads(str(np.asarray(bundle["metadata_json"]).reshape(-1)[0]))
@@ -160,6 +165,48 @@ def load_bundle(path):
         raise ValueError("Bundle response_left has an inconsistent tile count")
     if bundle["response_right"].shape[0] != tile_count:
         raise ValueError("Bundle response_right has an inconsistent tile count")
+    if version == MODULATED_BUNDLE_VERSION:
+        modulation_required = (
+            "modulation_detectors",
+            "modulation_wavelengths_nm",
+            "modulation_ratio_real",
+            "modulation_ratio_imag",
+            "modulation_basis_names",
+            "modulation_log_amplitude_coefficients",
+            "modulation_phase_coefficients",
+        )
+        missing = [name for name in modulation_required if name not in bundle]
+        if missing:
+            raise ValueError(
+                f"Modulated bundle is missing modulation arrays: {missing}"
+            )
+        modulation_detectors = np.asarray(bundle["modulation_detectors"]).astype(str)
+        modulation_wavelengths = np.asarray(
+            bundle["modulation_wavelengths_nm"], dtype=float
+        )
+        modulation_ratio_shape = (
+            modulation_detectors.size,
+            modulation_wavelengths.size,
+        )
+        if not np.array_equal(modulation_wavelengths, bundle["wavelengths_nm"]):
+            raise ValueError("Modulation wavelength grid differs from bundle grid")
+        for name in ("modulation_ratio_real", "modulation_ratio_imag"):
+            if np.asarray(bundle[name]).shape != modulation_ratio_shape:
+                raise ValueError(f"Bundle {name} has an inconsistent shape")
+        mode_count = np.asarray(bundle["modulation_basis_names"]).size
+        for name in (
+            "modulation_log_amplitude_coefficients",
+            "modulation_phase_coefficients",
+        ):
+            if np.asarray(bundle[name]).shape != (modulation_detectors.size, mode_count):
+                raise ValueError(f"Bundle {name} has an inconsistent shape")
+        if not set(modulation_detectors.tolist()).issubset(
+            set(np.asarray(bundle["detectors"]).astype(str).tolist())
+        ):
+            raise ValueError("Modulation detectors are not present in bundle tiles")
+        bundle["clean_reflectance_modulation_included"] = True
+    else:
+        bundle["clean_reflectance_modulation_included"] = False
     trajectory_fields = (
         "observation_days",
         "observation_start_time",
@@ -282,6 +329,9 @@ def bundle_summary(bundle):
         "thickness_max_nm": float(bundle["ice_thickness_nm"][-1]),
         "response_rank": int(np.asarray(bundle["response_rank"]).reshape(-1)[0]),
         "metadata": bundle["metadata"],
+        "clean_reflectance_modulation_included": bool(
+            bundle.get("clean_reflectance_modulation_included", False)
+        ),
     }
     if bundle.get("trajectory_included", False):
         summary.update(

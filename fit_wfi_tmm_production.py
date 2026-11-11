@@ -235,6 +235,8 @@ class ProductionConfig:
     trajectory_parameterization: str = "rate"
     initial_thickness_prior: str = INITIAL_THICKNESS_PRIOR_LOGNORMAL
     initial_thickness_prior_sigma_nm: float = INITIAL_THICKNESS_HALF_NORMAL_SIGMA_NM
+    thickness_prior_centers: dict | None = None
+    thickness_prior_sigmas: dict | None = None
     absolute_hgcdte_n_scale_prior_sigma_log: float = (
         ABSOLUTE_HGCDTE_N_SCALE_PRIOR_SIGMA_LOG
     )
@@ -1666,6 +1668,8 @@ def _least_squares_prior_residuals(
     trajectory_parameterization="rate",
     initial_thickness_prior=INITIAL_THICKNESS_PRIOR_LOGNORMAL,
     initial_thickness_prior_sigma_nm=INITIAL_THICKNESS_HALF_NORMAL_SIGMA_NM,
+    thickness_prior_centers=None,
+    thickness_prior_sigmas=None,
     absolute_hgcdte_n_scale_prior_sigma_log=ABSOLUTE_HGCDTE_N_SCALE_PRIOR_SIGMA_LOG,
     fixed_absolute_hgcdte_n_log_scale=None,
     ice_n_modulation_prior_sigma_log=ICE_N_MODULATION_PRIOR_SIGMA_LOG,
@@ -1710,16 +1714,24 @@ def _least_squares_prior_residuals(
         thickness_names, offset_names = reset_site_names(
             data, initial_thickness_prior
         )
+        thickness_prior_centers = thickness_prior_centers or {}
+        thickness_prior_sigmas = thickness_prior_sigmas or {}
         if initial_thickness_prior == INITIAL_THICKNESS_PRIOR_LOGNORMAL:
             for name in thickness_names:
                 add_normal(
                     name,
-                    np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM),
-                    INITIAL_THICKNESS_LOG_SIGMA,
+                    thickness_prior_centers.get(
+                        name, np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM)
+                    ),
+                    thickness_prior_sigmas.get(name, INITIAL_THICKNESS_LOG_SIGMA),
                 )
         else:
             for name in thickness_names:
-                add_normal(name, 0.0, initial_thickness_prior_sigma_nm)
+                add_normal(
+                    name,
+                    thickness_prior_centers.get(name, 0.0),
+                    thickness_prior_sigmas.get(name, initial_thickness_prior_sigma_nm),
+                )
         if rate_prior_log_mean is None:
             rate_prior_log_mean = np.log(TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY)
         add_normal(
@@ -1816,6 +1828,8 @@ def build_model(
     trajectory_parameterization="rate",
     initial_thickness_prior=INITIAL_THICKNESS_PRIOR_LOGNORMAL,
     initial_thickness_prior_sigma_nm=INITIAL_THICKNESS_HALF_NORMAL_SIGMA_NM,
+    thickness_prior_centers=None,
+    thickness_prior_sigmas=None,
     absolute_hgcdte_n_scale_prior_sigma_log=ABSOLUTE_HGCDTE_N_SCALE_PRIOR_SIGMA_LOG,
     fixed_absolute_hgcdte_n_log_scale=None,
     constant_rate=False,
@@ -1943,6 +1957,43 @@ def build_model(
     n_scas = data["n_scas"]
     n_tiles = data["n_tiles"]
     n_nodes = len(data["node_days"])
+    thickness_prior_centers = dict(thickness_prior_centers or {})
+    thickness_prior_sigmas = dict(thickness_prior_sigmas or {})
+    thickness_prior_shape = (n_scas, n_tiles)
+    default_thickness_center = (
+        np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM)
+        if initial_thickness_prior == INITIAL_THICKNESS_PRIOR_LOGNORMAL
+        else 0.0
+    )
+    default_thickness_sigma = (
+        INITIAL_THICKNESS_LOG_SIGMA
+        if initial_thickness_prior == INITIAL_THICKNESS_PRIOR_LOGNORMAL
+        else initial_thickness_prior_sigma_nm
+    )
+    for name in thickness_names:
+        thickness_prior_centers[name] = np.broadcast_to(
+            np.asarray(
+                thickness_prior_centers.get(name, default_thickness_center),
+                dtype=float,
+            ),
+            thickness_prior_shape,
+        ).copy()
+        thickness_prior_sigmas[name] = np.broadcast_to(
+            np.asarray(
+                thickness_prior_sigmas.get(name, default_thickness_sigma),
+                dtype=float,
+            ),
+            thickness_prior_shape,
+        ).copy()
+        if (
+            np.any(~np.isfinite(thickness_prior_centers[name]))
+            or np.any(~np.isfinite(thickness_prior_sigmas[name]))
+            or np.any(thickness_prior_sigmas[name] <= 0.0)
+        ):
+            raise ValueError(
+                f"Thickness prior center and sigma for {name} must be finite; "
+                "sigma must be positive"
+            )
     rate_prior_shape = (n_scas, n_tiles, n_nodes)
     if rate_prior_log_mean is None:
         rate_prior_log_mean = np.full(
@@ -2256,6 +2307,8 @@ def build_model(
             trajectory_parameterization=trajectory_parameterization,
             initial_thickness_prior=initial_thickness_prior,
             initial_thickness_prior_sigma_nm=initial_thickness_prior_sigma_nm,
+            thickness_prior_centers=thickness_prior_centers,
+            thickness_prior_sigmas=thickness_prior_sigmas,
             absolute_hgcdte_n_scale_prior_sigma_log=(
                 absolute_hgcdte_n_scale_prior_sigma_log
             ),
@@ -2315,18 +2368,16 @@ def build_model(
                 values[name] = numpyro.sample(
                     name,
                     dist.Normal(
-                        np.log(INITIAL_THICKNESS_LOG_MEDIAN_NM),
-                        INITIAL_THICKNESS_LOG_SIGMA,
+                        jnp.asarray(thickness_prior_centers[name]),
+                        jnp.asarray(thickness_prior_sigmas[name]),
                     )
-                    .expand((n_scas, n_tiles))
                     .to_event(2),
                 )
         else:
             for name in thickness_names:
                 values[name] = numpyro.sample(
                     name,
-                    dist.HalfNormal(initial_thickness_prior_sigma_nm)
-                    .expand((n_scas, n_tiles))
+                    dist.HalfNormal(jnp.asarray(thickness_prior_sigmas[name]))
                     .to_event(2),
                 )
         if fixed_absolute_hgcdte_n_log_scale is None:
@@ -2689,6 +2740,7 @@ def map_parameter_scale_values(
     initial_values,
     trajectory_rate_prior_sigma_log=TRAJECTORY_RATE_PRIOR_SIGMA_LOG,
     initial_thickness_prior_sigma_nm=INITIAL_THICKNESS_HALF_NORMAL_SIGMA_NM,
+    thickness_prior_sigmas=None,
     absolute_hgcdte_n_scale_prior_sigma_log=ABSOLUTE_HGCDTE_N_SCALE_PRIOR_SIGMA_LOG,
     ice_n_modulation_prior_sigma_log=ICE_N_MODULATION_PRIOR_SIGMA_LOG,
     ice_n_constant_prior_sigma_log=ICE_N_CONSTANT_PRIOR_SIGMA_LOG,
@@ -2738,6 +2790,7 @@ def map_parameter_scale_values(
         if "initial_thickness_nm" in initial_values
         else INITIAL_THICKNESS_LOG_SIGMA
     )
+    thickness_prior_sigmas = thickness_prior_sigmas or {}
     if ar_prior_sigma_raw is None:
         ar_tile_raw_scale = ar_mean_prior_sigma
     else:
@@ -2752,18 +2805,30 @@ def map_parameter_scale_values(
             raise ValueError("Custom AR prior scales must be finite and positive")
     scales = {
         "ar_tile_raw": ar_tile_raw_scale,
-        "initial_thickness_log_nm": INITIAL_THICKNESS_LOG_SIGMA,
-        "reset_initial_thickness_log_nm": INITIAL_THICKNESS_LOG_SIGMA,
-        "initial_thickness_nm": thickness_scale,
-        "reset_initial_thickness_nm": thickness_scale,
+        "initial_thickness_log_nm": thickness_prior_sigmas.get(
+            "initial_thickness_log_nm", INITIAL_THICKNESS_LOG_SIGMA
+        ),
+        "reset_initial_thickness_log_nm": thickness_prior_sigmas.get(
+            "reset_initial_thickness_log_nm", INITIAL_THICKNESS_LOG_SIGMA
+        ),
+        "initial_thickness_nm": thickness_prior_sigmas.get(
+            "initial_thickness_nm", thickness_scale
+        ),
+        "reset_initial_thickness_nm": thickness_prior_sigmas.get(
+            "reset_initial_thickness_nm", thickness_scale
+        ),
         "incidence_angle_deg": INCIDENCE_ANGLE_MAX_DEG,
         "np_log_rate_nodes": trajectory_rate_prior_sigma_log,
         "log_rate_scale": trajectory_rate_prior_sigma_log,
         "np_log_thickness_nodes": 1.0,
         "post_reset_tile_log_offset": POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA,
         "post_third_decon_tile_log_offset": POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA,
-        "third_decon_initial_thickness_log_nm": INITIAL_THICKNESS_LOG_SIGMA,
-        "third_decon_initial_thickness_nm": thickness_scale,
+        "third_decon_initial_thickness_log_nm": thickness_prior_sigmas.get(
+            "third_decon_initial_thickness_log_nm", INITIAL_THICKNESS_LOG_SIGMA
+        ),
+        "third_decon_initial_thickness_nm": thickness_prior_sigmas.get(
+            "third_decon_initial_thickness_nm", thickness_scale
+        ),
         "absolute_hgcdte_n_log_scale": absolute_hgcdte_n_scale_prior_sigma_log,
         "absolute_hgcdte_k_log_scale": ABSOLUTE_HGCDTE_SCALE_PRIOR_SIGMA_LOG,
         "ice_n_log_modulation": ice_n_modulation_prior_sigma_log,
@@ -2828,6 +2893,7 @@ def run_least_squares_map_optimization(
     tolerance=1.0e-9,
     trajectory_rate_prior_sigma_log=TRAJECTORY_RATE_PRIOR_SIGMA_LOG,
     initial_thickness_prior_sigma_nm=INITIAL_THICKNESS_HALF_NORMAL_SIGMA_NM,
+    thickness_prior_sigmas=None,
     absolute_hgcdte_n_scale_prior_sigma_log=ABSOLUTE_HGCDTE_N_SCALE_PRIOR_SIGMA_LOG,
     ice_n_modulation_prior_sigma_log=ICE_N_MODULATION_PRIOR_SIGMA_LOG,
     ice_n_constant_prior_sigma_log=ICE_N_CONSTANT_PRIOR_SIGMA_LOG,
@@ -2869,6 +2935,7 @@ def run_least_squares_map_optimization(
         initial_values,
         trajectory_rate_prior_sigma_log=trajectory_rate_prior_sigma_log,
         initial_thickness_prior_sigma_nm=initial_thickness_prior_sigma_nm,
+        thickness_prior_sigmas=thickness_prior_sigmas,
         absolute_hgcdte_n_scale_prior_sigma_log=(
             absolute_hgcdte_n_scale_prior_sigma_log
         ),
@@ -3188,6 +3255,8 @@ def fit_map_state(config):
         trajectory_parameterization=config.trajectory_parameterization,
         initial_thickness_prior=config.initial_thickness_prior,
         initial_thickness_prior_sigma_nm=config.initial_thickness_prior_sigma_nm,
+        thickness_prior_centers=config.thickness_prior_centers,
+        thickness_prior_sigmas=config.thickness_prior_sigmas,
         absolute_hgcdte_n_scale_prior_sigma_log=(
             config.absolute_hgcdte_n_scale_prior_sigma_log
         ),
@@ -3237,6 +3306,7 @@ def fit_map_state(config):
         jax,
         trajectory_rate_prior_sigma_log=config.trajectory_rate_prior_sigma_log,
         initial_thickness_prior_sigma_nm=config.initial_thickness_prior_sigma_nm,
+        thickness_prior_sigmas=config.thickness_prior_sigmas,
         absolute_hgcdte_n_scale_prior_sigma_log=(
             config.absolute_hgcdte_n_scale_prior_sigma_log
         ),
@@ -3309,6 +3379,18 @@ def write_outputs(
             ),
         )
     )
+    initial_thickness_log_median_nm = float(
+        (model_metadata or {}).get(
+            "initial_thickness_log_median_nm",
+            INITIAL_THICKNESS_LOG_MEDIAN_NM,
+        )
+    )
+    initial_thickness_log_sigma = float(
+        (model_metadata or {}).get(
+            "initial_thickness_log_sigma",
+            INITIAL_THICKNESS_LOG_SIGMA,
+        )
+    )
     initial_thickness_prior, initial_thickness_prior_sigma_nm, _ = (
         _initial_thickness_settings(
             (model_metadata or {}).get(
@@ -3321,6 +3403,15 @@ def write_outputs(
             ),
         )
     )
+    if initial_thickness_prior == INITIAL_THICKNESS_PRIOR_LOGNORMAL and (
+        not np.isfinite(initial_thickness_log_median_nm)
+        or initial_thickness_log_median_nm <= 0.0
+        or not np.isfinite(initial_thickness_log_sigma)
+        or initial_thickness_log_sigma <= 0.0
+    ):
+        raise ValueError(
+            "Lognormal initial-thickness metadata must have positive finite median and sigma"
+        )
     observed = np.asarray(fit_diagnostics["observed"], dtype=float)
     prediction = np.asarray(fit_diagnostics["prediction"], dtype=float)
     residual = observed - prediction
@@ -3395,12 +3486,12 @@ def write_outputs(
             initial_thickness_prior_sigma_nm
         ),
         "tile_initial_thickness_log_median_nm": np.asarray(
-            INITIAL_THICKNESS_LOG_MEDIAN_NM
+            initial_thickness_log_median_nm
             if initial_thickness_prior == INITIAL_THICKNESS_PRIOR_LOGNORMAL
             else np.nan
         ),
         "tile_initial_thickness_log_sigma": np.asarray(
-            INITIAL_THICKNESS_LOG_SIGMA
+            initial_thickness_log_sigma
             if initial_thickness_prior == INITIAL_THICKNESS_PRIOR_LOGNORMAL
             else np.nan
         ),
@@ -3555,6 +3646,20 @@ def write_outputs(
                     row[f"{prefix}_p84"] = np.percentile(values[:, sca_index, tile_index], 84)
                 writer.writerow(row)
 
+    warmup_prior_summary = []
+    initial_reset_prior_summary = []
+    if (model_metadata or {}).get("initial_reset_thickness_prior_center_nm") is not None:
+        initial_reset_prior_summary = [
+            f"- Initial/first-reset thickness prior center: `{(model_metadata or {}).get('initial_reset_thickness_prior_center_nm')}` nm.",
+            f"- Initial/first-reset thickness prior log sigma: `{(model_metadata or {}).get('initial_reset_thickness_prior_log_sigma')}`.",
+        ]
+    if (model_metadata or {}).get("warmup_prior_root") is not None:
+        warmup_prior_summary = [
+            f"- Warmup-centered thickness prior root: `{(model_metadata or {}).get('warmup_prior_root')}`.",
+            f"- Warmup-centered thickness prior log sigma: `{(model_metadata or {}).get('thickness_prior_log_sigma')}`.",
+            f"- Warmup-centered thickness prior stages: `{(model_metadata or {}).get('thickness_prior_stages')}`.",
+            f"- Third-Decon thickness prior center: `{(model_metadata or {}).get('third_decon_thickness_prior_center_nm')}` nm.",
+        ]
     summary = "\n".join(
         [
             "# Production least-squares MAP fit",
@@ -3571,8 +3676,8 @@ def write_outputs(
             f"- SED weighting: `{(model_metadata or {}).get('sed_weighting', 'energy')}`.",
             f"- QE response mode: `{(model_metadata or {}).get('qe_response_mode', 'none')}`.",
             (
-                f"- Initial-thickness prior: lognormal median `{INITIAL_THICKNESS_LOG_MEDIAN_NM}` nm, "
-                f"log sigma `{INITIAL_THICKNESS_LOG_SIGMA}`."
+                f"- Initial-thickness prior: lognormal median `{initial_thickness_log_median_nm}` nm, "
+                f"log sigma `{initial_thickness_log_sigma}`."
                 if initial_thickness_prior == INITIAL_THICKNESS_PRIOR_LOGNORMAL
                 else (
                     "- Initial-thickness prior: half-normal location `0` nm, "
@@ -3610,6 +3715,8 @@ def write_outputs(
             "- Corrections: already applied in the input statistics; no correction table used.",
             "",
         ]
+        + initial_reset_prior_summary
+        + warmup_prior_summary
     )
     (output_dir / "map_summary.md").write_text(summary)
 

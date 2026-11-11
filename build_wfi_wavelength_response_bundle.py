@@ -29,8 +29,18 @@ def parse_args():
         required=False,
         help="Current relative-response fit root containing tile posterior archives.",
     )
+    parser.add_argument(
+        "--fit-subdir",
+        type=Path,
+        required=False,
+        help="Fit subdirectory below each detector root, such as spline_relative_response_normal.",
+    )
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--detector", help="Restrict discovery to one detector.")
+    parser.add_argument(
+        "--detector",
+        action="append",
+        help="Restrict discovery to the selected detector; may be repeated.",
+    )
     parser.add_argument(
         "--all-detectors",
         action="store_true",
@@ -70,8 +80,11 @@ def discover_cache_roots(root, detector=None, require_all=False):
                 if current_detector is not None:
                     candidates.append((current_detector, child))
     if detector is not None:
-        requested = str(detector).strip().upper()
-        candidates = [item for item in candidates if item[0] == requested]
+        if isinstance(detector, str):
+            requested = {detector.strip().upper()}
+        else:
+            requested = {str(value).strip().upper() for value in detector}
+        candidates = [item for item in candidates if item[0] in requested]
     if not candidates:
         raise FileNotFoundError(
             f"No detector spectral caches found under {root}"
@@ -114,13 +127,19 @@ def validate_tile_ids(detector, tile_ids, tile_size, require_complete=False):
         )
 
 
-def fit_root_for_detector(root, detector):
+def fit_root_for_detector(root, detector, fit_subdir=None):
     root = Path(root)
-    candidates = (
-        root / detector.lower() / "relative_response" / "fits",
-        root / detector.lower() / "fits",
-        root / "relative_response" / "fits",
-        root,
+    detector_root = root / detector.lower()
+    candidates = []
+    if fit_subdir is not None:
+        candidates.append(detector_root / fit_subdir / "fits")
+    candidates.extend(
+        (
+            detector_root / "relative_response" / "fits",
+            detector_root / "fits",
+            root / "relative_response" / "fits",
+            root,
+        )
     )
     for candidate in candidates:
         if (candidate / "tile_000" / "posterior_samples.npz").is_file():
@@ -209,7 +228,11 @@ def main():
         fit_root = None
         fit_by_tile = {}
         if args.fit_root is not None:
-            fit_root = fit_root_for_detector(args.fit_root, detector)
+            fit_root = fit_root_for_detector(
+                args.fit_root,
+                detector,
+                fit_subdir=args.fit_subdir,
+            )
             fit_roots[detector] = fit_root
             fit_paths = sorted(fit_root.glob("tile_*/posterior_samples.npz"))
             fit_by_tile = {
@@ -391,7 +414,7 @@ def main():
         metadata.update(
             {
                 "trajectory_included": True,
-                "trajectory_definition": "MAP tile_ice_thickness from relative_response_production posterior_samples.npz",
+                "trajectory_definition": "MAP tile_ice_thickness from source-fit posterior_samples.npz",
                 "trajectory_rate_definition": "MAP tile_instantaneous_rate_nm_day",
                 "trajectory_uncertainties": "not included; this is a deterministic MAP export",
                 "grey_throughput_included": True,

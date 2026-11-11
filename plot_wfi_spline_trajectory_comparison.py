@@ -42,9 +42,12 @@ def load_comparison(path):
     comparison_path = path.with_name("comparison.json")
     with comparison_path.open() as handle:
         metadata = json.load(handle)
+    reset_days = metadata.get("reset_days")
+    if reset_days is None:
+        reset_days = [metadata["reset_day"]]
     return {
         "path": path,
-        "label": _label_for_path(path),
+        "label": metadata.get("label", _label_for_path(path)),
         "days": np.asarray([float(row["days"]) for row in rows]),
         "current_rate": np.asarray(
             [float(row["current_rate_nm_day"]) for row in rows]
@@ -55,7 +58,12 @@ def load_comparison(path):
         "delta_rate": np.asarray(
             [float(row["delta_rate_nm_day"]) for row in rows]
         ),
-        "reset_day": float(metadata["reset_day"]),
+        "reset_days": tuple(float(day) for day in reset_days),
+        "spline_label": metadata.get(
+            "spline_label",
+            f"Natural cubic spline ({metadata.get('spline_knot_count', '?')} knots)",
+        ),
+        "title": metadata.get("title", "Ice-trajectory rate comparison"),
     }
 
 
@@ -85,7 +93,7 @@ def plot_comparisons(comparison_paths, output_path):
             comparison["spline_rate"],
             color=SPLINE_COLOR,
             linewidth=1.2,
-            label="72-knot natural cubic spline",
+            label=comparison["spline_label"],
         )
         delta_axis.plot(
             days,
@@ -94,13 +102,14 @@ def plot_comparisons(comparison_paths, output_path):
             linewidth=1.1,
         )
         for axis in (rate_axis, delta_axis):
-            axis.axvline(
-                comparison["reset_day"],
-                color=RESET_COLOR,
-                linestyle="--",
-                linewidth=0.9,
-                alpha=0.8,
-            )
+            for reset_day in comparison["reset_days"]:
+                axis.axvline(
+                    reset_day,
+                    color=RESET_COLOR,
+                    linestyle="--",
+                    linewidth=0.9,
+                    alpha=0.8,
+                )
             axis.grid(True, color="#d9d9d9", linewidth=0.6, alpha=0.8)
             axis.set_axisbelow(True)
         delta_axis.axhline(0.0, color="#333333", linewidth=0.8)
@@ -128,8 +137,8 @@ def plot_comparisons(comparison_paths, output_path):
     )
     axes[0, 1].set_title("Spline-rate difference", loc="left", fontsize=10)
     figure.suptitle(
-        "20261016 ice-trajectory rate comparison\n"
-        "Dashed line: physical Decon2/reset boundary",
+        f"{comparisons[0]['title']}\n"
+        "Dashed lines: physical reset boundaries",
         fontsize=13,
     )
     output_path = Path(output_path)

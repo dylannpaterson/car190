@@ -161,6 +161,9 @@ def write_outputs(
     thickness_prior_log_sigma=None,
     thickness_prior_stages=None,
     warmup_prior_root=None,
+    spline_knot_days=None,
+    spline_knot_boundaries=None,
+    spline_knot_segment_sizes=None,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
     observed = np.asarray(data["sums"], dtype=float) / np.asarray(data["counts"], dtype=float)
@@ -273,6 +276,16 @@ def write_outputs(
             int(constant_rate_warmup_diagnostics is not None)
         ),
     )
+    if spline_knot_days is not None:
+        archive_values["spline_knot_days"] = np.asarray(spline_knot_days, dtype=float)
+    if spline_knot_boundaries is not None:
+        archive_values["spline_knot_boundaries"] = np.asarray(
+            spline_knot_boundaries, dtype=float
+        )
+    if spline_knot_segment_sizes is not None:
+        archive_values["spline_knot_segment_sizes"] = np.asarray(
+            spline_knot_segment_sizes, dtype=int
+        )
     if thickness_prior_log_sigma is not None:
         archive_values["thickness_prior_log_sigma"] = np.asarray(
             float(thickness_prior_log_sigma)
