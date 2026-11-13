@@ -1,8 +1,9 @@
 # Production WFI TMM Model
 
 This document describes the model and regularisation used by the production
-entrypoints. The ordinary `run_wfi_production.py` path evaluates the transfer
-matrix at every objective evaluation. The validated 20261030 branch uses the
+entrypoints. The internal `wfi_pipeline/run_wfi_production.py` stage evaluates the transfer
+matrix at every objective evaluation. The current validated 20261111 cached
+branch uses the
 same ice/rate objective with a pinned six-LED relative-response cache; its
 fixed optical state and reduced parameter set are described separately below.
 
@@ -167,7 +168,7 @@ defaults support diagnostic experiments and differ from these wrapper values.
 | Post-reset grey offset | Per tile and reset | `Normal(0, 0.1)` in log throughput |
 | Per-LED log offset | Disabled in standard full-TMM production | When enabled for the validated cached run: `Normal(0, 0.01)` per detector and LED |
 
-The prior on each third-decon thickness in the validated 20261030 cached run
+The prior on each third-decon thickness in the current validated 20261111 cached run
 is replaced only for that stage by a per-tile center from an independent
 constant-rate warm-up, with log sigma `0.10`. With
 `--thickness-prior-stages third-decon`, the initial and first-reset thickness
@@ -194,7 +195,7 @@ The validated production regularisation settings are:
 - tile-to-tile smoothing or hierarchical sharing: disabled.
 
 The module constant `NP_SMOOTHNESS_WEIGHT = 0.1` is a legacy/diagnostic
-default. `run_wfi_production.py` explicitly passes zero for production. The
+default. `wfi_pipeline/run_wfi_production.py` explicitly passes zero for production. The
 constant-rate warm-up is an initialization stage, not a regulariser on the
 final non-parametric trajectory. The source trajectory from a cached optical
 fit is likewise not imported as a rate prior or entropy reference.
@@ -229,7 +230,7 @@ response curves per tile. The validated cache grid is `0--400 nm` at
 - normal incidence.
 
 The final cached fit estimates only the ice trajectory, reset grey offsets,
-and, in the validated 20261030 run, the per-LED log offsets. It performs an
+and, in the validated 20261111 run, the per-LED log offsets. It performs an
 in-process constant-rate warm-up before the final non-parametric MAP. The
 source fit's time-dependent trajectory is not reused as a prior or entropy
 reference. The cached branch uses the same `12 nm/day`, log sigma `1.5` rate
@@ -250,9 +251,9 @@ thickness penalties.
 
 ## Source References
 
-- `fit_wfi_tmm_production.py`: forward model, likelihood, priors, and MAP objective.
-- `run_wfi_production.py`: full-TMM production overrides and initialization.
-- `run_wfi_tmm_emcee_warmup.py`: EMCEE basin-search configuration.
-- `fit_wfi_relative_response.py` and `wfi_relative_response.py`: cached branch objective and response interpolation.
+- `wfi_pipeline/fit_wfi_tmm_production.py`: forward model, likelihood, priors, and MAP objective.
+- `wfi_pipeline/run_wfi_production.py`: full-TMM production overrides and initialization.
+- `wfi_pipeline/run_wfi_tmm_emcee_warmup.py`: EMCEE basin-search configuration.
+- `wfi_pipeline/fit_wfi_relative_response.py` and `wfi_pipeline/wfi_relative_response.py`: cached branch objective and response interpolation.
 - `docs/tmm_pipeline.md`: sufficient-statistics reduction and transfer-matrix background.
 - `docs/WFI_RELATIVE_RESPONSE_PRODUCTION.md`: validated cached-run command contract.

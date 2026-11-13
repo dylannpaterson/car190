@@ -1,0 +1,181 @@
+{
+  "copied_from": "sibling CAR201 workspace; only active photometry/SED inputs were copied",
+  "copied_utc": "2026-11-13T22:15:02.149642+00:00",
+  "dataset": "CAR201 photometry and stellar SED inputs used by the local joint pipeline",
+  "files": [
+    {
+      "path": "ambers_photometry/photometry-all-star-epochs.parquet",
+      "sha256": "83d72742cfc5e54963a3ff8802184725e7ba0e6041ba5be3b5f9007c9b43325a",
+      "size_bytes": 73237466,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "sed/v1/README.md",
+      "sha256": "ca8e0a9762a2fb58215e26f9d41f47e3394d27e1d4fc25461ef70d7d3a385428",
+      "size_bytes": 4186,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "sed/v1/btsettl-spectral-grid.h5",
+      "sha256": "9eacd725bcb635f4dcce9681728d2282f9dfa96513a4978dfbb809cb7138d862",
+      "size_bytes": 186524792,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "sed/v1/car201-btsettl-posteriors.h5",
+      "sha256": "93e99f6a1efcd79599ac8b822f575db43de6eedea1bd7ee9a7ec20810e655f3c",
+      "size_bytes": 67749616,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "sed/v2/README.md",
+      "sha256": "f8801f86a6cb3ede8acbf4850928d96febaaef0a1d836101f81bad208290d30b",
+      "size_bytes": 9489,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "sed/v2/btsettl-spectral-grid.h5",
+      "sha256": "9eacd725bcb635f4dcce9681728d2282f9dfa96513a4978dfbb809cb7138d862",
+      "size_bytes": 186524792,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "sed/v2/car201-btsettl-posteriors.h5",
+      "sha256": "93e99f6a1efcd79599ac8b822f575db43de6eedea1bd7ee9a7ec20810e655f3c",
+      "size_bytes": 67749616,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "sed/v2/faint-posteriors-v2.h5",
+      "sha256": "50483add801aac2092855de8cfda317ee5e321fe7a0429c11d204a4851a16224",
+      "size_bytes": 117336012,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/20261106/ep3_pass1_master.parquet",
+      "sha256": "d09884d771a3feb73fb2e819c4032c93ced8de413c811b34b45b1f6fd676e744",
+      "size_bytes": 4849852,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/20261106/ep3_pass2_master.parquet",
+      "sha256": "38dd9391738cf01c1ffd8f1e90d9389ed021110e43ac563c6871f85fd39ea478",
+      "size_bytes": 4850819,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/20261106/ep3_pass3_master.parquet",
+      "sha256": "e6e76c62aa7640b479017393cc9151ec598429ce9bae0ebdf787cb895e8220ae",
+      "size_bytes": 4937164,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/20261106/ep3_pass4_master.parquet",
+      "sha256": "38f28230a9758d98cefee26beee13d7ceef02e6c25c2b0dab3879239c0625708",
+      "size_bytes": 4865005,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/20261106/ep3_pass5_master.parquet",
+      "sha256": "2c54714e499361020ef34e23baa1219bc4ec7e75d673d7b4599b2cc571e52fd1",
+      "size_bytes": 4902600,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/20261106/ep3_pass6_master.parquet",
+      "sha256": "fed5ed3bc66885bc6b85d63f201bb1718584b440c3befc315b9136365c98d38b",
+      "size_bytes": 4877422,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/20261106/ep4_pass1_master.parquet",
+      "sha256": "22ba2f8c9e6eb52e4d7826640643920bb94c1c29bb4349a7ce02bcb01cd0eece",
+      "size_bytes": 4799904,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/20261106/ep4_pass2_master.parquet",
+      "sha256": "6cf799fa055b1e29abc17cc2b3e3de658ceee0b641df49eb1784622bda13804e",
+      "size_bytes": 4840548,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/20261106/ep4_pass3_master.parquet",
+      "sha256": "50934475c59f51cd975aba08b9b94623394bc009a920cba2ab576d44013ab9f5",
+      "size_bytes": 4868285,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/20261106/ep4_pass4_master.parquet",
+      "sha256": "7e98124e19b71e94d979bd68651daae194cc99b9e576c4b39f2f6502297748a6",
+      "size_bytes": 4833654,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/20261106/ep4_pass5_master.parquet",
+      "sha256": "f7b75b1ef81d1b017cdc536187123851db3d6660ff238fcb8681393cfca070bc",
+      "size_bytes": 4851433,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/ep3_pass1_master.parquet",
+      "sha256": "c8e46ce23a8baeeb2e728115b3266c60626b5fe477d63112b03a3ac353fd44f9",
+      "size_bytes": 2458260,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/ep3_pass3_master.parquet",
+      "sha256": "c2bc5349bca9d75002af741aed8cd3f1a6ddc55e40dba22b9de0171800ae58bf",
+      "size_bytes": 2511466,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/ep3_pass4_master.parquet",
+      "sha256": "fb83e210e79f6ad90e3afa5580186b4ef5dda71b9e62722f34b7e3118cb63588",
+      "size_bytes": 2466416,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/ep3_pass5_master.parquet",
+      "sha256": "203693256a940e5e9d1c7d1ed11fca499d6336c17c8841ef565a3b927b8a779c",
+      "size_bytes": 2488685,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/ep3_pass6_master.parquet",
+      "sha256": "12a94aed8524a272ef331342f2bacd0a3ec8b2567f9b6c7f533521c5ccc6d92d",
+      "size_bytes": 2476806,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/ep4_pass1_master.parquet",
+      "sha256": "16fdeb96cb836177f89299449a3afaab1b2c2cc91995b48ed0138714368abccf",
+      "size_bytes": 2427082,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/ep4_pass2_master.parquet",
+      "sha256": "10a46076ad4559490fe7f37a572a7277b6f612efc3668633326b82eb0f3848cf",
+      "size_bytes": 2465120,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/ep4_pass3_master.parquet",
+      "sha256": "53cf58ff484bd7b201412a651e16dea6ef693960cce5131bf476c30281f34e3f",
+      "size_bytes": 2483135,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/ep4_pass4_master.parquet",
+      "sha256": "7c06bef1ae63f338a1c56bf7fc3aa80d2f223a412577544441c2997fabae292a",
+      "size_bytes": 2462027,
+      "source": "CAR201 sibling workspace"
+    },
+    {
+      "path": "zanes_photometry/ep4_pass5_master.parquet",
+      "sha256": "f2223f56fc0ee9926986840f346a94b6bc25afe6e196c4c0184c65bf71095183",
+      "size_bytes": 2474764,
+      "source": "CAR201 sibling workspace"
+    }
+  ]
+}

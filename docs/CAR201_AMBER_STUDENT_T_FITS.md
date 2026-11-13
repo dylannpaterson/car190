@@ -1,19 +1,19 @@
 # Canonical Amber stellar-photometry reruns
 
-The default fitting entry point is `run_amber_student_t_detectors.py`. It uses
+The default fitting entry point is `wfi_pipeline/run_amber_student_t_detectors.py`. It uses
 each detector's own effective-area curve, the full imaging throughput support,
 free endpoints at the first and last nonzero throughput, six fixed LED anchors,
 and LED-SED-dependent suppression with red exponents 0.05:
 
 ```bash
-python run_amber_student_t_detectors.py --detector WFI01
+python wfi_pipeline/run_amber_student_t_detectors.py --detector WFI01
 ```
 
 Use explicit repeated `--detector` selections to run several detectors. They
 run sequentially. To inspect input/output selection without fitting:
 
 ```bash
-python run_amber_student_t_detectors.py \
+python wfi_pipeline/run_amber_student_t_detectors.py \
   --detector WFI01 --detector WFI18 --check-configuration
 ```
 
@@ -32,7 +32,7 @@ python run_amber_student_t_detectors.py \
 To retrieve a missing table from the same pinned source:
 
 ```bash
-python fetch_roman_detector_effective_areas.py --detector WFI01 \
+python wfi_pipeline/fetch_roman_detector_effective_areas.py --detector WFI01 \
   --revision 14a9b0c98b0da723d0f2e4c6277956183c1fdd06
 ```
 
@@ -75,7 +75,7 @@ numerical initializer. Otherwise the existing Zane coefficients initialize it.
 The completed strong-red-mask fits are the source of the current
 `wfi_all_2nm_rank16_amber_strong_red_led_mask.npz` archive.
 Reproduce the optical export with
-`build_modulated_wfi_wavelength_response_bundle.py --modulation-fit amber-student-t-strong-red-led-mask`
+`wfi_pipeline/build_modulated_wfi_wavelength_response_bundle.py --modulation-fit amber-student-t-strong-red-led-mask`
 and explicit detector, base-bundle, fit-root and output arguments, as documented
 in `WFI_MODULATED_WAVELENGTH_RESPONSE_BUNDLE.md`. The earlier shared-SCA05
 experiments and optical archive remain available for historical reproduction.

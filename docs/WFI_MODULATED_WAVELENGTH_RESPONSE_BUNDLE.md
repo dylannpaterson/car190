@@ -1,5 +1,9 @@
 # Modulation-Aware WFI Wavelength-Response Bundle
 
+For the separate current reader-compatible joint fit and packaging path to one
+Eric-v3-readable all-detector H5, see
+[`WFI_JOINT_MODULATED_H5_PIPELINE.md`](WFI_JOINT_MODULATED_H5_PIPELINE.md).
+
 The current canonical modulated product is built from the all-detector **joint
 CAR190 + Amber's CAR201 photometry fit with 2-day per-tile ice-rate controls**.
 The Amber observations come from CAR201's `ambers_photometry` dataset and use the
@@ -59,7 +63,7 @@ products by explicitly selecting WFI01–WFI18. The builder checkpoints response
 rerun with `--resume` if a build is interrupted:
 
 ```bash
-python build_modulated_wfi_wavelength_response_bundle.py \
+python wfi_pipeline/build_modulated_wfi_wavelength_response_bundle.py \
   --base-bundle 20261106/corrected_statistics_4h_thinned/production/wavelength_response_bundle/wfi_all_2nm_rank16.npz \
   --fit-root 20261106/corrected_statistics_4h_thinned/production \
   --modulation-root 20261106/corrected_statistics_4h_thinned/production \
@@ -78,7 +82,7 @@ base bundle's array schema, shared grids, 785 observation times, geometry, and
 grey offsets. It records per-detector joint-fit provenance, per-tile updated
 ice-history sources, coefficients and modulation ratios, zero-thickness checks,
 and maximum SVD reconstruction error by detector. Bundle version 3 is read by
-`wfi_wavelength_response_bundle.py`; versions 1 and 2 remain supported.
+`wfi_pipeline/wfi_wavelength_response_bundle.py`; versions 1 and 2 remain supported.
 
 Validation checks all 18 coefficient sets and source-file hashes, confirms all
 4,608 tile thickness/rate histories against the joint fit, and verifies that the
@@ -151,7 +155,7 @@ release. Prepare a new stage inside the workspace containing:
 - The joint CAR190/Amber CAR201 2-day archive from the build command above, staged as
   `wfi_all_2nm_rank16_modulated.npz` (preserve its original source filename in the manifest).
 - The current unmodulated archive, staged as `wfi_all_2nm_rank16.npz`.
-- The current `wfi_wavelength_response_bundle.py`, supporting bundle version 3.
+- The current `wfi_pipeline/wfi_wavelength_response_bundle.py`, supporting bundle version 3.
 - A release-specific `README.md` explaining the modulated model and limitations
   above, and the updated generic `WFI_WAVELENGTH_RESPONSE_BUNDLE.md`.
 - A release-specific `MANIFEST.txt` with actual archive grids, detector/tile
@@ -165,10 +169,10 @@ The S3 prefix contains the current best models together, not dated releases:
 unmodulated and modulated products under distinct stable filenames in that same
 prefix, with shared consumer code and documentation. The uploader recognizes
 both stable filenames. Prepare the paired stage with
-`python stage_wfi_current_models_s3.py`, then:
+`python archive/exploratory/legacy_root_scripts/stage_wfi_current_models_s3.py`, then:
 
 ```bash
-python upload_wfi_wavelength_response_s3.py \
+python archive/exploratory/legacy_root_scripts/upload_wfi_wavelength_response_s3.py \
   --source-dir <new-staged-export-directory> \
   --bucket roman-s3-romcom \
   --prefix rges-pit/ice_model \
@@ -182,7 +186,7 @@ prefix. No upload is implied by building the bundle or generating diagnostics.
 
 ### Prepared paired export
 
-`stage_wfi_current_models_s3.py` prepares and validates the paired stage at
+`archive/exploratory/legacy_root_scripts/stage_wfi_current_models_s3.py` prepares and validates the paired stage at
 `20261106/corrected_statistics_4h_thinned/production/wavelength_response_bundle/s3_export/`.
 The uploader recognizes both `wfi_all_2nm_rank16.npz` and
 `wfi_all_2nm_rank16_modulated.npz`, plus both model documents. Grey reset/decon

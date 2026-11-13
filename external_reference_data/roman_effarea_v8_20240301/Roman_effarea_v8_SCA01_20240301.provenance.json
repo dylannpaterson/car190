@@ -1,0 +1,11 @@
+{
+  "detector": "WFI01",
+  "repository": "RomanSpaceTelescope/roman-technical-information",
+  "commit": "14a9b0c98b0da723d0f2e4c6277956183c1fdd06",
+  "url": "https://raw.githubusercontent.com/RomanSpaceTelescope/roman-technical-information/14a9b0c98b0da723d0f2e4c6277956183c1fdd06/roman_technical_information/data/WideFieldInstrument/Imaging/EffectiveAreas/Roman_effarea_v8_SCA01_20240301.ecsv",
+  "sha256": "d116839810b69fa7e641ef70ed8d43789deb3e41c8c266914460ed0fc6b2d4cb",
+  "size_bytes": 295460,
+  "retrieved_utc": "2026-11-13T20:44:32.322508+00:00",
+  "wavelength_unit": "micron",
+  "effective_area_unit": "m^2"
+}

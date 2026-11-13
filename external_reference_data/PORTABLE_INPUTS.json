@@ -1,0 +1,240 @@
+{
+  "copied_utc": "2026-11-13T22:15:02.652188+00:00",
+  "dataset": "Pinned optical reference inputs used by the local WFI/CAR201 pipeline",
+  "files": [
+    {
+      "path": "WFI_Quantum_efficiency.ecsv",
+      "sha256": "89ef2941d0e788ee52a377cad168af66730b6948c25af968fba5edae982c5f22",
+      "size_bytes": 50027,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "WFI_RCS_LEDP_spectral_energy_distribution.ecsv",
+      "sha256": "0b0361b649c849145eca8e4d845468fcfb64f57f583bf3a706f8a2cb3464aa65",
+      "size_bytes": 335632,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "eric_reader/RST_commissioning-main.zip",
+      "sha256": "e8d2e24e5ece042621b4568659d5ced85052486ab68778a07a523f6d9912b259",
+      "size_bytes": 7615059,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA01_20240301.ecsv",
+      "sha256": "d116839810b69fa7e641ef70ed8d43789deb3e41c8c266914460ed0fc6b2d4cb",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA01_20240301.provenance.json",
+      "sha256": "680254636b145cf438f34b94d9b2f664ca899b5a521ba61019c54b0b6b790688",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA02_20240301.ecsv",
+      "sha256": "f45b5e87ab87d9defd6f1b7d10b1dd275906217ffa08a0442fe4de200cc7aa33",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA02_20240301.provenance.json",
+      "sha256": "04fd018771cd108e22f6704cc752c29dd16c55a4ac30e3d1b4e5f5bac0e9a0bd",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA03_20240301.ecsv",
+      "sha256": "2b9de1de61f4e337c1dd89d3e2c11a6a25777e3504f88d4a21c7e98d2eb9b097",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA03_20240301.provenance.json",
+      "sha256": "53ed574f581fd96f98d9e3aeecffdbff36636af240375a6ea71465cfe6976a41",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA04_20240301.ecsv",
+      "sha256": "4d24cbcb79ff681251f5dbcf19d1f18d49a8bfba12a6f22b122b3b8c6260ec78",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA04_20240301.provenance.json",
+      "sha256": "1d8b80b2308f751852e972171e10a8e59c1d313c7ad3e737a323961fa145fa6d",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA05_20240301.ecsv",
+      "sha256": "06fef6f8a71240a41f4da630304072664fb6cbd1186e14f35c366aa17ce3b17b",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA05_20240301.provenance.json",
+      "sha256": "4f158868a111cfc32a657a4af7228cdda9cad842140bcd48c38205a554db68ce",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA06_20240301.ecsv",
+      "sha256": "a8c241c978e16e87a67236862203e1ede032de246ac3eccb3bb3910ce6085ffc",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA06_20240301.provenance.json",
+      "sha256": "632c20a3f9bc235f8ec5362a1a6133975587491d00e414df80d4159a17c8b0a7",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA07_20240301.ecsv",
+      "sha256": "3454da062e5eb2c9f1b150593c9f08290783debf8508c9a6f4b41693c9a79823",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA07_20240301.provenance.json",
+      "sha256": "b245d7b219569da8c104b2c1dc61b98c3731d92ebbef9a2acdfbf34aff9dc8f3",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA08_20240301.ecsv",
+      "sha256": "32e80e6917d47565487527e87cdbdc4f9e2c16278961db907378fdcbc49d6a0e",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA08_20240301.provenance.json",
+      "sha256": "da37ead21e01ae25419d847e54e480d4d5eb5b6b8664c11a344e4a8efcaac25f",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA09_20240301.ecsv",
+      "sha256": "8bff8cdb679bec081152e6c10837081ca5574a84896c2fa2c271744e186ba703",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA09_20240301.provenance.json",
+      "sha256": "4e1fc7fab804bfa71d9a11fc69465d059c787c4359c9e0ef34afc70bbf04e851",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA10_20240301.ecsv",
+      "sha256": "760345e2fdd6c6d20a5cde14e07e93bf67eb67ad6b38053d7442df5a0f53ea1e",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA10_20240301.provenance.json",
+      "sha256": "ff0b5ccaaf4c2ba46b09a7ddb9174e80e076b5256ff6b3cf14ebb47df443af38",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA11_20240301.ecsv",
+      "sha256": "f18d13e683e07457e6e883a448cdb074431a7552b0a89abe61496424910d5582",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA11_20240301.provenance.json",
+      "sha256": "d5d5b026e9ac541d667a07759e5c09230ee09032462cda49499fe78e5a672044",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA12_20240301.ecsv",
+      "sha256": "a030de0c735866a17697e0f53328351d8ca13526ddd64cc9b53755932bfbc6bb",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA12_20240301.provenance.json",
+      "sha256": "f55485744430c61ce38254ea75f647716cff92dbabbdfd10b00379dd65ce07f5",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA13_20240301.ecsv",
+      "sha256": "9aaf409e07c72d6b35e2179896eb5b43a5641a3c5397676fa23f636db604a982",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA13_20240301.provenance.json",
+      "sha256": "c40a739f7672048b75a900f454fe00056ffc21db1fbf951bce27523f73cd74e7",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA14_20240301.ecsv",
+      "sha256": "c3a3cf7ed7549caf52c64e3067cd16942bdadf175eaf395cbbf6045d24c539fe",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA14_20240301.provenance.json",
+      "sha256": "471ad07978e97b6fb77b07ae92ba6f2ab08da7aca6be07170fd097e8e159340b",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA15_20240301.ecsv",
+      "sha256": "83fefbdd523d5dd4ac7111535a16f89315d53dbf48074f2ac3bb7df5a11658ce",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA15_20240301.provenance.json",
+      "sha256": "e16a579d26a09b0e6466225fcfd9a03cd4c922ce37fde458d15562c1d472d7a4",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA16_20240301.ecsv",
+      "sha256": "4e464b23f7d8067cf0336f9aef76c9000bcb460832c81cf45128765195be1e36",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA16_20240301.provenance.json",
+      "sha256": "390901701f45c6b82c56cbdd3d9780b10b2ce82a847871352a486f6c955396d4",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA17_20240301.ecsv",
+      "sha256": "4dfc0625c16a9040d3270f7ccf73599688a703043f9dcfee80c1e1e308232f29",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA17_20240301.provenance.json",
+      "sha256": "4f351224fc573ea1d2d175581ede8f5c5118690e2c0e0482f01aede62580ba2d",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA18_20240301.ecsv",
+      "sha256": "140392a0eb9789784eeb797f075fdb87059cf4f19a44fd1c8e1abe2783bad113",
+      "size_bytes": 295460,
+      "source": "local reference cache or pinned project source"
+    },
+    {
+      "path": "roman_effarea_v8_20240301/Roman_effarea_v8_SCA18_20240301.provenance.json",
+      "sha256": "727fa7fc80898b680b4f89951007b107b9c10ed162e6ecdb9945bfcf9c171fcc",
+      "size_bytes": 619,
+      "source": "local reference cache or pinned project source"
+    }
+  ]
+}

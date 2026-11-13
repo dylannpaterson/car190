@@ -5,8 +5,14 @@ primary workflow converts calibrated MAST products into compact tile
 sufficient statistics, then fits an air/ice/AR/HgCdTe transfer-matrix model
 to the statistics with NumPyro.
 
-The production model is intentionally fixed and is run through
-`run_wfi_production.py` as fresh-EMCEE-initialized independent per-tile MAP fits:
+The repository root exposes only two local model-pipeline commands:
+`run_wfi_relative_response_pipeline.py` and `run_wfi_full_tmm_pipeline.py`.
+Their shared implementation and stage runners live in `wfi_pipeline/`; retained
+standalone research scripts live in `archive/exploratory/`.
+
+The full-TMM production model is intentionally fixed. The pipeline invokes its
+internal `wfi_pipeline/run_wfi_production.py` stage as fresh-EMCEE-initialized
+independent per-tile MAP fits:
 
 - corrected `*_tile_log_statistics_<tile-size>_count_corrected.csv` inputs,
   with 256 pixels as the production default tile size and no correction table
@@ -52,8 +58,8 @@ Pass that cache with `--response-cache-root` and
 separate downstream product and is not an input to the cached production fit.
 
 The standard full-TMM production model leaves per-LED log offsets disabled
-because the LED baselines are normalized. The validated cached
-relative-response run on 20261030 explicitly fits them with
+because the LED baselines are normalized. The current validated cached
+relative-response run on 20261111 explicitly fits them with
 `--fit-led-log-offsets` and `--led-log-offset-prior-sigma-log 0.01`; its
 archives remain in the separate `relative_response/` subtree and must not
 replace the standard full-TMM outputs.
@@ -61,9 +67,10 @@ replace the standard full-TMM outputs.
 The production forward model, parameterisation, priors, and regularisation
 are documented in `docs/WFI_TMM_PRODUCTION_MODEL.md`.
 
-The exploratory `fit_wfi_tmm_numpyro.py` workflow retains additional optical
-sensitivity branches. Those branches are not accepted by the production
-entrypoint or production output contract.
+The exploratory
+`archive/exploratory/legacy_root_scripts/fit_wfi_tmm_numpyro.py` workflow
+retains additional optical sensitivity branches. Those branches are not
+accepted by the production pipeline or output contract.
 
 The reset-validation workflow below is deliberately separate and retains its
 own raw-input, fixed-correction, and complex-index configuration.
@@ -82,9 +89,10 @@ exact wavelength nodes in the pinned SED tables, covering approximately
 480--2700 nm. Older SOC/effective-boundary tools still use their separate model
 tables. The opt-in cached relative-response branch uses a provenance-checked
 six-LED cache and does not integrate the generic wavelength bundle during each
-fit evaluation. The validated cache is the detector-specific `20261020`
+fit evaluation. The current cache is the detector-specific `20261109`
 six-LED cache described in `docs/WFI_RELATIVE_RESPONSE_PRODUCTION.md`; ordinary
-reruns should reuse it rather than rebuild it. A new cache is expected only
+reruns should reuse it rather than rebuild it. The `20261020` cache is retained
+only for historical reproduction. A new cache is expected only
 after full reprocessing, a reduction improvement, or a deliberate model
 change. Data without temperature-dependent gain correction is a future
 experiment and is not supported by the current cache path.
@@ -159,6 +167,10 @@ The MAST token is read from `mast_api_token.txt` in the repository root.
 
 ### 1a. Nexus S3 reduction and correction pipeline
 
+This reducer runs on Nexus only. See
+[`docs/WFI_NEXUS_REDUCTION_HANDOFF.md`](docs/WFI_NEXUS_REDUCTION_HANDOFF.md)
+for its data handoff to the local model pipeline.
+
 On the Nexus, use the one-step pipeline instead of copying products from a
 user-owned CAR190 directory. It lists calibrated ASDF products under the
 CAR190 S3 prefix, refreshes one unified all-detector MAST index for Programs
@@ -213,7 +225,7 @@ dated `telemetry/` directory. A supplied CSV must contain `ObsTime`, `EUValue`,
 and `mnemonic` columns and must bracket every indexed exposure. The archived
 coefficient table contains one detector/tile-resolution parabola and is not
 refit during a reduction. Rebuild it from the archived 256-pixel statistics
-with `python build_wfi_temperature_quadratic_coefficients.py` when the archive
+with `python archive/exploratory/legacy_root_scripts/build_wfi_temperature_quadratic_coefficients.py` when the archive
 or operational-temperature timestamp changes.
 When the next decon timestamp is known, pass `--decon-time ISO_TIMESTAMP`.
 The pipeline then fits a free local count-space step over a two-day window,
@@ -275,7 +287,7 @@ Each dated directory contains:
 - `diagnostics/`: scaled-versus-corrected current-count plots for each detector,
   including LED3 pre- and post-operational temperature-fit diagnostics. To plot
   the per-exposure photodiode scale recorded in an inventory, run
-  `python plot_wfi_photodiode_correction.py --inventory PATH --output PATH`;
+   `python archive/exploratory/legacy_root_scripts/plot_wfi_photodiode_correction.py --inventory PATH --output PATH`;
   the script also writes a tidy CSV next to the PNG. Use `--quantity percent`
   to plot departure from unity instead of the scale factor. Pass
   `--side-swap-calibration PATH` to mark the fitted per-LED side-swap event;
@@ -311,7 +323,7 @@ unnecessarily difficult, create a derived input directory without changing
 those canonical files:
 
 ```bash
-.venv/bin/python thin_wfi_statistics.py \
+.venv/bin/python wfi_pipeline/thin_wfi_statistics.py \
   --source-dir /path/to/corrected_statistics \
   --output-dir /path/to/corrected_statistics_program1063_1h \
   --spacing-hours 1
@@ -323,18 +335,75 @@ Program 1063 cycles separated by at least one hour. The output includes
 repeats and row counts. The thinning operates on already corrected sufficient
 statistics; it does not average rows or apply another correction.
 
-Use the derived directory as the input to `run_wfi_production.py` only after
+Use the derived directory as input to the relative-response or full-TMM
+pipeline frontend only after
 checking the manifest. The source corrected statistics remain the canonical
 product for auditing and for any analysis that needs the full cadence.
 
-### 2. Production TMM fit
+### 1c. Local model-to-product pipeline
 
-The production orchestration entrypoint is `run_wfi_production.py`.
+After transferring the corrected statistics from Nexus, run one of the
+path-driven local frontends. Relative response is the normal, lower-cost route;
+it reuses the detector-specific pinned 20261109 six-LED cache. Full TMM is the
+occasional, more expensive alternative and builds its six-LED and wavelength
+response caches from that run's fits. Each command selects only one model route
+and accepts the statistics/run-root path plus a dedicated output path:
+
+```bash
+python run_wfi_relative_response_pipeline.py \
+  --input-path /path/to/20261113/corrected_statistics_4h_thinned \
+  --output-path /path/to/20261113/production/pipeline_runs/relative_response
+
+python run_wfi_full_tmm_pipeline.py \
+  --input-path /path/to/20261113/corrected_statistics_4h_thinned \
+  --output-path /path/to/20261113/production/pipeline_runs/full_tmm
+```
+
+`--input-path` may instead be the dated Nexus run root containing
+`corrected_statistics/` or `corrected_statistics_4h_thinned/`. Unthinned
+corrected statistics are thinned locally to four-hour cadence and 256-pixel
+tiles; the existing count corrections are not applied again. The output path
+must be a dedicated directory under the same dated data folder, outside the
+statistics directory.
+
+Each run owns its `pipeline_manifest.json`, central `logs/`, route-specific
+fits and caches, the stable `wfi_all_2nm_rank16.npz` and
+`wfi_all_2nm_rank16_modulated.npz` portable bundles, clearly separated H5 build
+intermediates, one final H5 plus validation report, and TMM/CAR201 plots. The
+manifest fingerprints its input CSVs and records
+resolved model defaults, detector products, stage logs, and hashes for the final
+bundles/H5. A matching incomplete run resumes from completed stages; a changed
+input, route, settings profile, or pipeline version is rejected for that output
+path. See `docs/WFI_FULL_PIPELINE_REFACTOR_PLAN.md` for the output layout and
+regression contract.
+
+The deliverable H5 is `production/wavelength_response_bundle/final/joint_modulated_v2.h5`.
+The reflectance-mode, history-reference, and prototype H5s are build-stage
+intermediates under `production/wavelength_response_bundle/intermediates/h5/`.
+
+The runtime data inputs that used to live beside the repository are now copied
+under `car201_data/` and `external_reference_data/`. Their `INPUTS.json` and
+`PORTABLE_INPUTS.json` files record sizes and SHA256 hashes. Copy both data
+folders with the repository when moving the pipeline to another machine; the
+active code resolves them from the repository root and no longer uses sibling
+`CAR201/` or workspace paths.
+
+The repository root intentionally contains only those two model-pipeline
+entrypoints. Stage modules in `wfi_pipeline/` are implementation details, not
+separate operator workflows. Standalone analysis and experiment scripts have
+been moved to `archive/exploratory/`.
+
+### 2. Internal production TMM stage
+
+The supported orchestration entrypoints are the two pipeline commands in
+section 1c. Their full-TMM stage is implemented by
+`wfi_pipeline/run_wfi_production.py`. Direct invocation is intended only for
+focused development checks.
 Point it at a directory containing corrected per-detector tile-statistics files:
 
 ```bash
 .venv/bin/python -u \
-  run_wfi_production.py \
+  wfi_pipeline/run_wfi_production.py \
   --statistics-dir /path/to/corrected_statistics
 ```
 
@@ -378,7 +447,7 @@ For a non-default tile size, outputs are isolated under
 mix with the default 256-pixel archives. Pass the same `--tile-size` to the
 production plotters and bundle command.
 
-`fit_wfi_tmm_production.py` contains only the fixed production TMM model and
+`wfi_pipeline/fit_wfi_tmm_production.py` contains only the fixed production TMM model and
 MAP writer. The independent runner is the supported entrypoint for the current
 cold-EMCEE plus per-tile least-squares production configuration.
 
@@ -387,29 +456,32 @@ workflow in `docs/WFI_RELATIVE_RESPONSE_PRODUCTION.md`. It writes a separate
 `relative_response/` output subtree and never replaces the standard full-TMM
 `fits/` archives.
 
-The validated cached run uses the 20261030 256-pixel corrected statistics, a
-separate constant-rate warmup rooted at
+The current validated cached run uses the 20261111 256-pixel corrected
+statistics, a separate constant-rate warmup rooted at
 `relative_response_constant_rate_warmup_start40/`, an explicit third-decon day
 of `38.79784510416666`, a third-decon warmup-centered thickness prior with log
 sigma `0.1`, independent one-tile fits (`--batch-size 1`), and zero trajectory
 entropy weight. The final fit still performs its own scalar-rate numerical
 warmup; the separate warmup supplies the per-tile third-decon prior centers.
+Use the detector-specific six-LED cache from the complete 20261109 run with
+`--response-cache-root` and `--allow-external-cache-source`. Do not pass
+`--joint-batch` or a fixed-correction table.
 
 Export the fitted ice state as a spreadsheet-friendly CSV with one row per
 tile and shared repeat-time model node:
 
 ```bash
-.venv/bin/python -u export_wfi_production_ice_csv.py \
-  --statistics-dir 20261101/corrected_statistics_4h_thinned \
-  --fit-root 20261101/corrected_statistics_4h_thinned \
-  --output 20261101/corrected_statistics_4h_thinned/production/relative_response/wfi_ice_accumulation_20261101.csv
+.venv/bin/python -u archive/exploratory/legacy_root_scripts/export_wfi_production_ice_csv.py \
+  --statistics-dir 20261111/corrected_statistics_4h_thinned \
+  --fit-root 20261111/corrected_statistics_4h_thinned \
+  --output 20261111/corrected_statistics_4h_thinned/production/relative_response/wfi_ice_accumulation_20261111.csv
 ```
 
 The primary table contains one row per detector/tile/model node and includes
 `ice_thickness_nm`,
 `accumulation_rate_nm_day`, nominal MPA focal-plane `mpa_x_mm` and
 `mpa_y_mm` coordinates, detector/tile geometry, node metadata, reset
-boundaries, fit mode, and archive provenance. The 20261101 export contains
+boundaries, fit mode, and archive provenance. The 20261111 export contains
 124 shared model nodes per tile; LED exposures are not separate model rows.
 Add `--current-output <path>` when a separate latest-node snapshot is useful.
 When `--output` is omitted, the exporter derives the
@@ -421,15 +493,15 @@ directory with the default 256-pixel layout. Add `--tile-size 512` to each
 command when plotting the alternate layout:
 
 ```bash
-.venv/bin/python -u plot_wfi_independent_production.py --root /path/to/corrected_statistics
-.venv/bin/python -u plot_wfi_all_detector_trajectories.py \
+.venv/bin/python -u wfi_pipeline/plot_wfi_independent_production.py --root /path/to/corrected_statistics
+.venv/bin/python -u archive/exploratory/legacy_root_scripts/plot_wfi_all_detector_trajectories.py \
   --root /path/to/corrected_statistics \
   --reset-day 12.907397928240743
-.venv/bin/python -u plot_wfi_fitted_incidence_angle_mosaic.py \
+.venv/bin/python -u archive/exploratory/legacy_root_scripts/plot_wfi_fitted_incidence_angle_mosaic.py \
   --root /path/to/corrected_statistics
-.venv/bin/python -u plot_wfi_post_reset_initial_thickness_mosaic.py \
+.venv/bin/python -u archive/exploratory/legacy_root_scripts/plot_wfi_post_reset_initial_thickness_mosaic.py \
   --root /path/to/fit_archive_root
-.venv/bin/python -u plot_wfi_full_focal_plane_rates.py \
+.venv/bin/python -u archive/exploratory/legacy_root_scripts/plot_wfi_full_focal_plane_rates.py \
   --root /path/to/corrected_statistics
 ```
 
@@ -449,7 +521,7 @@ Isolated fit trees can be plotted without copying them into the canonical
 `production/` layout. Use `--fit-root` for the post-reset, incidence-angle, and
 focal-plane mosaic plotters, `--detector-output-root` for the trajectory plotter,
 and the detector directory itself with `--fit-root` for
-`plot_wfi_independent_production.py`. For example, an offset branch under
+`wfi_pipeline/plot_wfi_independent_production.py`. For example, an offset branch under
 `production_led_offsets/` can be plotted by selecting `WFI01` and pointing
 these options at that branch. The incidence-angle plot remains empty for the
 normal-incidence production model because those archives intentionally contain
@@ -464,7 +536,7 @@ the last pre-AOM rate in absolute nm/day and percent. Corrected tile-statistics
 diagnostics use scatter points rather than connected data lines; for example:
 
 ```bash
-.venv/bin/python -u plot_wfi_corrected_tile_neighborhood.py \
+.venv/bin/python -u archive/exploratory/legacy_root_scripts/plot_wfi_corrected_tile_neighborhood.py \
   --root /path/to/corrected_statistics \
   --detector WFI06 \
   --tile-id 98 \
@@ -477,7 +549,7 @@ diagnostics use scatter points rather than connected data lines; for example:
 Bundle the complete production outputs into one self-describing FITS product:
 
 ```bash
-.venv/bin/python -u bundle_wfi_production_prior.py \
+.venv/bin/python -u archive/exploratory/legacy_root_scripts/bundle_wfi_production_prior.py \
   --statistics-dir /path/to/corrected_statistics \
   --fit-root /path/to/fit_archive_root
 ```
@@ -490,11 +562,11 @@ under each detector's `relative_response/fits` directory and the wavelength
 grid is supplied explicitly from a fixed-optics spectral cache:
 
 ```bash
-.venv/bin/python -u bundle_wfi_production_prior.py \
-  --statistics-dir 20261102/corrected_statistics_4h_thinned \
-  --fit-root 20261102/corrected_statistics_4h_thinned/production \
-  --response-grid-cache 20261102/corrected_statistics_4h_thinned/production/wavelength_response_cache/tile_size_256/wfi01_470nm_2nm_rank16/tile_000/spectral_response.npz \
-  --output 20261102/corrected_statistics_4h_thinned/production/wfi_production_map_prior_bundle.fits
+.venv/bin/python -u archive/exploratory/legacy_root_scripts/bundle_wfi_production_prior.py \
+  --statistics-dir 20261111/corrected_statistics_4h_thinned \
+  --fit-root 20261111/corrected_statistics_4h_thinned/production \
+  --response-grid-cache 20261109/corrected_statistics_4h_thinned/production/wavelength_response_cache/tile_size_256/wfi01/tile_000/spectral_response.npz \
+  --output 20261111/corrected_statistics_4h_thinned/production/wfi_production_map_prior_bundle.fits
 ```
 
 The resulting FITS product records the cached fit mode and external response
@@ -527,8 +599,9 @@ When a third-decon fit is supplied, the bundle additionally carries the third
 boundary and per-tile post-third-decon thickness/grey-offset fields; those
 fields are absent from legacy bundles.
 
-The original `fit_wfi_tmm_numpyro.py` remains the exploratory/reproduction
-implementation and is not the production entrypoint.
+The legacy `archive/exploratory/legacy_root_scripts/fit_wfi_tmm_numpyro.py`
+implementation is retained for historical reproduction and is not a supported
+pipeline entrypoint.
 
 ### WFI01 reset validation
 
@@ -545,7 +618,7 @@ For all 64 WFI01 tiles, use the same command with only `--max-tiles 1` removed
 and the output directory changed:
 
 ```bash
-.venv/bin/python3 fit_wfi_tmm_numpyro.py \
+.venv/bin/python3 archive/exploratory/legacy_root_scripts/fit_wfi_tmm_numpyro.py \
   --single-sca \
   --tile-statistics rrn_reduction_20260930/wfi01_tile_log_statistics_512.csv \
   --fixed-corrections rrn_reduction_20260930/wfi01_count_space_fixed_corrections_three_events_grey_corrected.csv \
@@ -581,19 +654,15 @@ and the output directory changed:
   --output-dir wfi01_absolute_substrate_power_grey_corrected_complex_ice_map5000_all_tiles
 ```
 
-Generate matching plots with the same raw statistics:
-
-```bash
-.venv/bin/python3 -u plot_wfi_tmm_numpyro.py \
-  --output-dir wfi01_absolute_substrate_power_grey_corrected_complex_ice_map5000_all_tiles \
-  --tile-statistics rrn_reduction_20260930/wfi01_tile_log_statistics_512.csv
-```
+The legacy plotting companion is not included in this checkout; keep the
+historical fit output and summary for reproduction provenance.
 
 All reset-validation outputs and logs stay inside the repository workspace.
 
 ### Legacy NumPyro comparison workflow
 
-The following options apply only to `fit_wfi_tmm_numpyro.py` comparison runs.
+The following options apply only to
+`archive/exploratory/legacy_root_scripts/fit_wfi_tmm_numpyro.py` comparison runs.
 They are not supported by the fixed production entrypoint.
 
 Use `--ar-layers 1` or `--ar-layers 2` for comparison models. If the default
@@ -687,7 +756,7 @@ thicknesses from air toward HgCdTe only for the MAP start.
 For a legacy single-SCA fit:
 
 ```bash
-python fit_wfi_tmm_numpyro.py \
+python archive/exploratory/legacy_root_scripts/fit_wfi_tmm_numpyro.py \
   --single-sca \
   --tile-statistics wfi01_tile_log_statistics_512.csv \
   --max-tiles 1 \
@@ -715,14 +784,9 @@ not the default model.
 
 ### 3. Plot posterior products
 
-```bash
-python plot_wfi_tmm_numpyro.py \
-  --output-dir wfi_all_sca_tmm_numpyro_tile_production \
-  --tile-statistics wfi_tile_log_statistics_512
-```
-
-The plotter writes the shared trajectory, posterior corners, per-SCA AR maps,
-tile fit diagnostics, and observed-versus-modeled residual plots.
+Legacy NumPyro plotting scripts are retained only when their source remains in
+`archive/exploratory/`; the supported model pipeline writes its diagnostics
+under the selected run output path.
 
 ## Outputs
 
@@ -742,37 +806,20 @@ the separate legacy output format.
 
 ## Code Map
 
-- `build_wfi01_tile_statistics.py`: tile sufficient-statistic calculation;
-- `run_wfi_reduction_pipeline.py`: Nexus S3/MAST streaming, dated reduction,
-  per-detector side-swap calibration, and count-space correction application;
-- `fit_wfi_side_swap.py`: detector-local image/photodiode side-swap calibration;
-- `wfi_side_swap.py`: log-space spline-plus-step fitting utilities;
-- `build_wfi_tile_statistics_stream.py`: resumable MAST downloader;
-- `wfi_production_layout.py`: shared default and alternate tile-size layout rules;
-- `run_wfi_production.py`: fixed all-detector independent-tile production runner;
-- `run_wfi_relative_response_production.py`: provenance-checked six-LED cached-response runner;
-- `export_wfi_production_ice_csv.py`: current and optional trajectory CSV export;
-- `build_wfi_relative_response_cache.py`: build current-run six-LED response caches;
-- `compress_wfi_relative_response_cache.py`: compress six-LED response caches for production;
-- `run_wfi_tmm_emcee_warmup.py`: fixed one-tile EMCEE initializer;
-- `fit_wfi_tmm_production.py`: fixed production TMM model and MAP writer;
-- `fit_wfi_tmm_numpyro.py`: single- and all-SCA TMM model and output writer;
-- `plot_wfi_tmm_numpyro.py`: posterior prediction and plotting;
-- `plot_wfi_post_reset_initial_thickness_mosaic.py`: post-reset initial-thickness focal-plane mosaic;
-- `analyze_rcs_soc_ice_model.py`: shared trajectory and sufficient-statistic utilities;
-- `fit_wfi01_joint_complex_q_soc.py`: response integration and effective-response diagnostics;
-- `fit_wfi01_effective_boundary_numpyro.py`: separate effective-boundary diagnostic;
-- `build_wfi_wavelength_response_bundle.py`: pack generic wavelength-space response caches;
-- `wfi_wavelength_response_bundle.py`: standalone bundle reader and MPA tile lookup;
-- `test_*.py`: synthetic and local fixture tests.
+- `run_wfi_relative_response_pipeline.py`: default, pinned-cache route;
+- `run_wfi_full_tmm_pipeline.py`: occasional full-TMM route;
+- `wfi_pipeline/`: shared model, fit, bundle, H5, and plotting implementation;
+- `tests/`: active regression tests;
+- `archive/exploratory/`: retired standalone analyses, comparisons, and legacy
+  commands, indexed in `archive/exploratory/README.md`.
 
 ## Portable Wavelength Response
 
 `docs/WFI_WAVELENGTH_RESPONSE_BUNDLE.md` documents the transportable compressed
 wavelength-space response product, including its nominal MPA focal-plane tile
 coordinates and standalone reader examples. The generated all-detector bundle
-is written under the current run's
-`20261102/corrected_statistics_4h_thinned/production/wavelength_response_bundle/`.
+is written under the selected run's `production/wavelength_response_bundle/`
+directory.
 The bundle also carries
 the fitted MAP ice thickness and rate at each shared observation day and UTC
 exposure-start time for each tile.
@@ -788,9 +835,8 @@ six-LED relative-response caches documented above.
 Run the tests from the project root:
 
 ```bash
-python -m unittest test_fit_wfi_tmm_production.py test_run_wfi_production.py
-python -m py_compile fit_wfi_tmm_production.py run_wfi_tmm_emcee_warmup.py run_wfi_production.py
-python -m pytest -q
+python -m pytest -q tests
+python -m py_compile run_wfi_relative_response_pipeline.py run_wfi_full_tmm_pipeline.py
 ```
 
 The tests do not require raw MAST products. The MAST streaming tests use

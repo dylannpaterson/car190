@@ -16,6 +16,13 @@ wfi_tile_log_statistics_512/
 *.partial
 mast_api_token.txt
 
+# Large, locally transferred CAR201 photometry and posterior inputs.
+# Their file inventory and checksums are tracked in car201_data/INPUTS.json.
+car201_data/**/*.parquet
+car201_data/**/*.h5
+!car201_data/README.md
+!car201_data/INPUTS.json
+
 # Generated analysis products
 *.csv
 *.npz
@@ -37,3 +44,7 @@ wfi01_*/
 !README.md
 !docs/
 !docs/**
+!wfi_pipeline/README.md
+!archive/exploratory/README.md
+!car201_data/README.md
+!external_reference_data/README.md
