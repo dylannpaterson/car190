@@ -17,11 +17,8 @@ import pandas as pd
 
 import mock_fit_wfi_star_reflectance_modulation as mock
 import run_amber_student_t_detectors as run
-from experiment_joint_wfi01_fixed_ice import add_full_basis
 from experiment_joint_wfi01_inverse_wavelength_curvature import weight_label
-from fit_amber_wfi01_student_t import StudentObjective
 from plot_wfi01_free_led_complex_reflection import aligned_phase, reciprocal
-from support_aligned_modulation import effective_area_support
 
 
 def parse_weights(value):
@@ -72,6 +69,31 @@ def correction_metrics(corrected, magnitude, valid, label):
     return records
 
 
+def training_magnitudes(source_ids, valid):
+    """Reconstruct the exact fitted star/filter/pass cells from Amber photometry."""
+    frame = pd.read_parquet(run.AMBER)
+    frame = frame.loc[frame["sca"] == "WFI01"].copy()
+    epoch_map = {f"r010430300{i}00": f"ep3_pass{i}" for i in range(1, 7)}
+    epoch_map.update({f"r010430400{i}00": f"ep4_pass{i}" for i in range(1, 6)})
+    frame["pass"] = frame["epoch"].map(epoch_map)
+    frame = frame.loc[frame["pass"].notna()].copy()
+    frame["source_id"] = frame["source_id"].astype(str)
+    indexed = frame.set_index(["source_id", "filter", "pass"])
+    if not indexed.index.is_unique:
+        raise ValueError("Amber source/filter/pass measurements are not unique")
+
+    magnitude = np.full(valid.shape, np.nan)
+    for source_index, filter_index, pass_index in np.argwhere(valid):
+        key = (source_ids[source_index], run.FILTERS[filter_index], run.PASSES[pass_index])
+        try:
+            magnitude[source_index, filter_index, pass_index] = float(indexed.loc[key, "mag_obs"])
+        except KeyError as error:
+            raise KeyError(f"Missing fitted Amber measurement {key}") from error
+    if not np.all(np.isfinite(magnitude[valid])):
+        raise ValueError("A fitted Amber measurement is non-finite")
+    return magnitude
+
+
 def modulation_curves(clean, basis, parameters, mode_count):
     ratio = np.exp(
         parameters[:mode_count] @ basis
@@ -80,26 +102,43 @@ def modulation_curves(clean, basis, parameters, mode_count):
     return clean * ratio[None, :]
 
 
-def plot_reflection(detector, wavelengths, curves, output_stem, csv_path):
+def plot_reflection(detector, wavelengths, curves, output_stem, csv_path,
+                   x_limits=None, zoom_y=False, title_suffix=""):
     reciprocal_wave = reciprocal(wavelengths)
     order = np.argsort(reciprocal_wave)
     x = reciprocal_wave[order]
+    display_indices = order
+    if x_limits is not None:
+        selected = (x >= x_limits[0]) & (x <= x_limits[1])
+        display_indices = order[selected]
+        if not len(display_indices):
+            raise ValueError("The requested reciprocal-wavelength plot range is empty")
+        x = reciprocal_wave[display_indices]
     clean = curves[0][1]
     reference_phase = np.angle(clean[:, -1])
     reference_phase += 2.0 * np.pi * np.round(
         (np.median(reference_phase) - reference_phase) / (2.0 * np.pi)
     )
     fig, axes = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
-    colors = ["#555555", "#2878a5", "#d97721", "#3a936f", "#a24e9c"]
-    styles = ["--", "-", "-", "-", "-"]
+    palette = ["#555555", "#2878a5", "#d97721", "#3a936f", "#a24e9c", "#a07822"]
+    line_styles = ["--", "-", "-.", ":", (0, (5, 1)), (0, (1, 1))]
+    colors = [palette[index % len(palette)] for index in range(len(curves))]
+    styles = [line_styles[index % len(line_styles)] for index in range(len(curves))]
     rows = []
+    curve_stats = []
     for (label, reflection), color, style in zip(curves, colors, styles, strict=False):
         magnitude = np.percentile(np.abs(reflection), [16, 50, 84], axis=0)
         phase = np.percentile(aligned_phase(reflection, reference_phase), [16, 50, 84], axis=0)
+        curve_stats.append((label, color, style, magnitude, phase))
+
+    for label, color, style, magnitude, phase in curve_stats:
         for axis, stats in zip(axes, (magnitude, phase), strict=True):
-            axis.fill_between(x, stats[0, order], stats[2, order], color=color, alpha=0.11, linewidth=0)
-            axis.plot(x, stats[1, order], color=color, linestyle=style, linewidth=1.5, label=label)
-        for index, wavelength in enumerate(wavelengths):
+            axis.fill_between(x, stats[0, display_indices], stats[2, display_indices],
+                              color=color, alpha=0.055, linewidth=0)
+            axis.plot(x, stats[1, display_indices], color=color, linestyle=style,
+                      linewidth=1.9, label=label)
+        for index in display_indices:
+            wavelength = wavelengths[index]
             rows.append({
                 "detector": detector,
                 "variant": label,
@@ -113,10 +152,12 @@ def plot_reflection(detector, wavelengths, curves, output_stem, csv_path):
 
     led_colors = plt.get_cmap("Dark2")(np.linspace(0.0, 1.0, len(mock.LED_CENTERS_NM)))
     for axis in axes:
-        axis.set_xlim(x[0], x[-1])
+        axis.set_xlim(*(x_limits if x_limits is not None else (x[0], x[-1])))
         axis.grid(alpha=0.2)
     for led_number, (center, color) in enumerate(zip(mock.LED_CENTERS_NM, led_colors, strict=True), start=1):
         position = reciprocal(center)
+        if x_limits is not None and not x_limits[0] <= position <= x_limits[1]:
+            continue
         for axis in axes:
             axis.axvline(position, color=color, linestyle=":", linewidth=1.0, alpha=0.9, zorder=0)
         axes[0].text(
@@ -129,18 +170,35 @@ def plot_reflection(detector, wavelengths, curves, output_stem, csv_path):
     axes[1].set_ylabel("Unwrapped phase (rad)")
     axes[1].set_xlabel(r"Reciprocal wavelength, $1/\lambda$ ($\mu$m$^{-1}$)")
     top = axes[0].secondary_xaxis("top", functions=(reciprocal, reciprocal))
-    top_ticks = np.asarray([2300, 1700, 1300, 1000, 800, 600, 500], dtype=float)
-    top_ticks = top_ticks[(top_ticks >= wavelengths.min()) & (top_ticks <= wavelengths.max())]
+    top_ticks = np.asarray([2300, 1700, 1500, 1300, 1000, 800, 600, 500], dtype=float)
+    top_positions = reciprocal(top_ticks)
+    visible = ((top_ticks >= wavelengths.min()) & (top_ticks <= wavelengths.max()))
+    if x_limits is not None:
+        visible &= (top_positions >= x_limits[0]) & (top_positions <= x_limits[1])
+    top_ticks = top_ticks[visible]
     top.set_xticks(top_ticks)
     top.set_xlabel("Wavelength (nm)")
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.94),
                ncol=3, frameon=False)
-    fig.suptitle(f"{detector}: clean complex reflection across curvature strengths", y=0.99, fontsize=14)
-    fig.text(0.5, 0.025,
-             "Lines are tile medians; shading is tile 16th–84th percentiles. "
-             "All curves show the clean boundary response; no ice film is included.",
+    suffix = f" — {title_suffix}" if title_suffix else ""
+    fig.suptitle(f"{detector}: clean complex reflection across curvature strengths{suffix}",
+                 y=0.99, fontsize=14)
+    note = ("Lines are tile medians; shading is tile 16th–84th percentiles. "
+            "All curves show the clean boundary response; no ice film is included.")
+    if zoom_y:
+        note += " Red-end view; y limits use the tile percentile envelope to expose fit differences."
+    fig.text(0.5, 0.025, note,
              ha="center", fontsize=9)
+    if zoom_y:
+        mag_low = min(np.min(item[3][0, display_indices]) for item in curve_stats)
+        mag_high = max(np.max(item[3][2, display_indices]) for item in curve_stats)
+        phase_low = min(np.min(item[4][0, display_indices]) for item in curve_stats)
+        phase_high = max(np.max(item[4][2, display_indices]) for item in curve_stats)
+        mag_pad = max(0.08 * (mag_high - mag_low), 0.002)
+        phase_pad = max(0.08 * (phase_high - phase_low), 0.02)
+        axes[0].set_ylim(mag_low - mag_pad, mag_high + mag_pad)
+        axes[1].set_ylim(phase_low - phase_pad, phase_high + phase_pad)
     fig.tight_layout(rect=(0.025, 0.07, 1, 0.86))
     fig.savefig(output_stem.with_suffix(".png"), dpi=180)
     fig.savefig(output_stem.with_suffix(".pdf"))
@@ -151,32 +209,27 @@ def plot_reflection(detector, wavelengths, curves, output_stem, csv_path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sweep-root", type=Path, required=True)
-    parser.add_argument("--ice-history-fit-root", type=Path, required=True)
     parser.add_argument("--optical-cache-root", type=Path, required=True)
     parser.add_argument("--weights", type=parse_weights, default=parse_weights("0.0001,0.001,0.01"))
+    parser.add_argument("--additional-fit-dir", type=Path)
+    parser.add_argument("--additional-label", default="Reciprocal MaxEnt + curvature 0.01")
     args = parser.parse_args()
     detector = "WFI01"
     baseline_dir = args.sweep_root.parent / "baseline_fixed_ice"
-    area, _ = run.canonical_configuration(detector)
-    _, _, source_ids, magnitude, error, valid, _, model, _ = run.prepare(
-        detector,
-        write_inputs=False,
-        effective_area_path=area,
-        output_dir=args.sweep_root,
-        full_effective_area_support=True,
-        ice_history_fit_root=args.ice_history_fit_root,
-        optical_cache_root=args.optical_cache_root,
-    )
-    add_full_basis(model, effective_area_support(area))
-    objective = StudentObjective(model, magnitude, error, valid)
-    mode = model.mode_count
-    clean = np.asarray(model.clean_reflection_by_tile, dtype=complex)
-    curves = [("Unmodulated clean TMM", clean)]
     fit_dirs = [("No added curvature", baseline_dir)]
     fit_dirs.extend((f"Curvature weight {weight:g}", args.sweep_root / weight_label(weight))
                     for weight in args.weights)
+    if args.additional_fit_dir is not None:
+        fit_dirs.append((args.additional_label, args.additional_fit_dir))
     metric_rows = []
-    per_filter_rows = []
+    source_ids = None
+    valid = None
+    magnitude = None
+    parameter_shape = None
+    curves = []
+    wavelengths = None
+    basis = None
+    clean = None
 
     for label, fit_dir in fit_dirs:
         with np.load(fit_dir / "joint_fit.npz", allow_pickle=False) as archive:
@@ -184,31 +237,34 @@ def main():
             saved_ids = np.asarray(archive["source_ids"]).astype(str)
             saved_valid = np.asarray(archive["stellar_valid"], dtype=bool)
             saved_prediction = np.asarray(archive["stellar_prediction_mag"], dtype=float)
-        np.testing.assert_array_equal(saved_ids, np.asarray(source_ids).astype(str))
-        np.testing.assert_array_equal(saved_valid, valid)
-        coordinates = parameters / objective.coordinate_scale
-        prediction_mmag = objective.prediction(coordinates)
-        np.testing.assert_allclose(prediction_mmag / 1000.0, saved_prediction, atol=2e-9, rtol=0.0)
-        prediction_mag = prediction_mmag / 1000.0
-        curves.append((label, modulation_curves(clean, model.basis, parameters, mode)))
-
-        modulated = correction_metrics(magnitude - prediction_mag, magnitude, valid, label)
-        metric_rows.extend(modulated)
-        theta_unmodulated = parameters.copy()
-        theta_unmodulated[:2 * mode] = 0.0
-        unmodulated_mag = objective.prediction(theta_unmodulated / objective.coordinate_scale) / 1000.0
-        metric_rows.extend(correction_metrics(magnitude - unmodulated_mag, magnitude, valid,
-                                             f"{label} / unmodulated optics"))
-
-        zero_points = parameters[2 * mode:].reshape(len(run.FILTERS), model.zero_point_group_count)
-        roll_mmag = np.zeros_like(magnitude)
-        for pass_index, group in enumerate(model.pass_zero_point_group_ids):
-            if group:
-                roll_mmag[:, :, pass_index] = (
-                    -1000.0 * zero_points[:, group - 1] / run.workflow.LOG_FLUX_PER_MAG
-                )[None, :]
-        metric_rows.extend(correction_metrics(magnitude - roll_mmag / 1000.0, magnitude, valid,
-                                             f"{label} / roll-only"))
+            local_wavelengths = np.asarray(archive["wavelength_nm"], dtype=float)
+            local_basis = np.asarray(archive["basis"], dtype=float)
+        if source_ids is None:
+            source_ids = saved_ids
+            valid = saved_valid
+            magnitude = training_magnitudes(source_ids, valid)
+            wavelengths = local_wavelengths
+            basis = local_basis
+            if basis.shape[0] * 2 > parameters.size:
+                raise ValueError("Saved modulation basis is larger than the fitted parameter vector")
+            clean, *_ = run.workflow._optical_tile_arrays(
+                detector, wavelengths, args.optical_cache_root
+            )
+            curves.append(("Unmodulated clean TMM", clean))
+        else:
+            np.testing.assert_array_equal(saved_ids, source_ids)
+            np.testing.assert_array_equal(saved_valid, valid)
+            np.testing.assert_array_equal(local_wavelengths, wavelengths)
+            np.testing.assert_allclose(local_basis, basis, rtol=0.0, atol=0.0)
+        if parameter_shape is None:
+            parameter_shape = parameters.shape
+        elif parameters.shape != parameter_shape:
+            raise ValueError("The baseline and curvature fit parameter dimensions differ")
+        mode = basis.shape[0]
+        if parameters.size < 2 * mode:
+            raise ValueError(f"Invalid fitted parameter vector in {fit_dir}")
+        curves.append((label, modulation_curves(clean, basis, parameters, mode)))
+        metric_rows.extend(correction_metrics(magnitude - saved_prediction, magnitude, valid, label))
 
     # Keep a compact correction table and a filter-level table from the same rows.
     metrics = pd.DataFrame(metric_rows)
@@ -217,10 +273,23 @@ def main():
     filter_metrics.to_csv(args.sweep_root / "amber_in_sample_filter_within_0p5.csv", index=False)
     plot_reflection(
         detector,
-        np.asarray(model.wavelengths_nm, dtype=float),
+        wavelengths,
         curves,
         args.sweep_root / "curvature_strength_clean_complex_reflection",
         args.sweep_root / "curvature_strength_clean_complex_reflection_quantiles.csv",
+    )
+    red_end = reciprocal(mock.LED_CENTERS_NM[4])
+    red_min = reciprocal(float(wavelengths.max()))
+    red_max = red_end * 1.02
+    plot_reflection(
+        detector,
+        wavelengths,
+        curves,
+        args.sweep_root / "curvature_strength_clean_complex_reflection_led5_red_end",
+        args.sweep_root / "curvature_strength_clean_complex_reflection_led5_red_end_quantiles.csv",
+        x_limits=(red_min, red_max),
+        zoom_y=True,
+        title_suffix="LED 5 and longer wavelengths",
     )
     print(metrics.loc[metrics["filter"] == "ALL"].to_string(index=False))
     print(f"Wrote in-sample correction metrics and complex-reflection plot under {args.sweep_root}")

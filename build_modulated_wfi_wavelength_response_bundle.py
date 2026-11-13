@@ -26,7 +26,11 @@ import pandas as pd
 
 import mock_fit_wfi_star_reflectance_modulation as mock_model
 import wfi_relative_response as relative_response
-from build_wfi_wavelength_response_bundle import load_fit_trajectory, string_array
+from build_wfi_wavelength_response_bundle import (
+    fit_root_for_detector,
+    load_fit_trajectory,
+    string_array,
+)
 from fit_car201_zane_star_reflectance_modulation import (
     DEFAULT_PRODUCTION_ROOT,
 )
@@ -52,6 +56,8 @@ DEFAULT_OUTPUT = (
 )
 DETECTORS = tuple(f"WFI{index:02d}" for index in range(1, 19))
 JOINT_MODULATION_FIT = "joint-car190-amber-2day"
+DEFAULT_JOINT_FIT_NAME = "car190_amber_joint_per_tile_2day_rate_test"
+DEFAULT_JOINT_ICE_FIT_NAME = "car190_amber_joint_fixed_ice_full_reflection_test"
 
 
 def _sha256(path):
@@ -63,43 +69,74 @@ def _sha256(path):
 
 
 def _joint_experiment_dir(root, detector, name):
-    return (
-        Path(root)
-        / detector.lower()
-        / "spline_relative_response_normal/experiments"
-        / name
+    detector_root = Path(root) / detector.lower()
+    candidates = (
+        detector_root / "relative_response/experiments" / name,
+        detector_root / "spline_relative_response_normal/experiments" / name,
     )
+    return next((path for path in candidates if path.exists()), candidates[-1])
 
 
-def _load_joint_detector_modulation(modulation_root, detector, wavelengths_nm):
+def _load_joint_detector_modulation(
+    modulation_root,
+    detector,
+    wavelengths_nm,
+    joint_fit_name=DEFAULT_JOINT_FIT_NAME,
+):
     """Load joint CAR190/Amber spectral coefficients on a requested wavelength grid."""
     import run_amber_student_t_detectors as amber
     from experiment_joint_wfi01_fixed_ice import full_basis
     from support_aligned_modulation import effective_area_support, gap_basis
 
-    joint_dir = _joint_experiment_dir(
-        modulation_root, detector, "car190_amber_joint_per_tile_2day_rate_test"
-    )
+    joint_dir = _joint_experiment_dir(modulation_root, detector, joint_fit_name)
     fixed_dir = _joint_experiment_dir(
-        modulation_root, detector, "car190_amber_joint_fixed_ice_full_reflection_test"
+        modulation_root, detector, DEFAULT_JOINT_ICE_FIT_NAME
     )
     joint_summary_path = joint_dir / "summary.json"
     joint_archive_path = joint_dir / "joint_weekly_ice_fit.npz"
     fixed_summary_path = fixed_dir / "joint_fit_summary.json"
-    fixed_archive_path = fixed_dir / "joint_fit.npz"
     joint_summary = json.loads(joint_summary_path.read_text())
-    fixed_summary = json.loads(fixed_summary_path.read_text())
-    if (joint_summary.get("detector") != detector or not joint_summary.get("optimizer_success")
-            or joint_summary.get("rate_control_spacing_days") != 2.0):
+    rate_spacing = joint_summary.get(
+        "rate_control_spacing_days", joint_summary.get("ice_rate_control_spacing_days")
+    )
+    if (joint_summary.get("detector") != detector
+            or not joint_summary.get("optimizer_success")
+            or rate_spacing != 2.0
+            or not joint_summary.get("ice_histories_refitted", True)):
         raise ValueError(f"Missing converged detector-specific 2-day fit: {joint_summary_path}")
-    if fixed_summary.get("detector") != detector or not fixed_summary.get("optimizer_success"):
-        raise ValueError(f"Missing converged detector-specific fixed-ice fit: {fixed_summary_path}")
+    # Current reader-compatible runs store the fitted spectral coefficients in
+    # their own joint_fit.npz and record the exact optical cache in summary.json.
+    # Historical experiments split the fixed-ice spectral fit from the joint
+    # ice-history fit; preserve that route only for those older products.
+    reader_compatible_fit = joint_summary.get("response_convention") == "eric-reader"
+    fixed_archive_path = fixed_dir / "joint_fit.npz"
+    has_fixed_fit = (
+        not reader_compatible_fit
+        and fixed_summary_path.is_file()
+        and fixed_archive_path.is_file()
+    )
+    parameter_archive_path = joint_archive_path if has_fixed_fit else joint_dir / "joint_fit.npz"
+    if has_fixed_fit:
+        fixed_summary = json.loads(fixed_summary_path.read_text())
+        if fixed_summary.get("detector") != detector or not fixed_summary.get("optimizer_success"):
+            raise ValueError(f"Missing converged detector-specific fixed-ice fit: {fixed_summary_path}")
+        with np.load(fixed_archive_path, allow_pickle=False) as archive:
+            wavelength_key = "wavelength_nm" if "wavelength_nm" in archive else "wavelengths_nm"
+            fit_wavelengths = np.asarray(archive[wavelength_key], dtype=float)
+            fit_basis = np.asarray(archive["basis"], dtype=float)
+        with np.load(joint_archive_path, allow_pickle=False) as archive:
+            theta = np.asarray(archive["shared_parameters"], dtype=float)
+        car190_observations = int(fixed_summary["LED_observations"])
+        optical_root = None
+    else:
+        with np.load(parameter_archive_path, allow_pickle=False) as archive:
+            wavelength_key = "wavelength_nm" if "wavelength_nm" in archive else "wavelengths_nm"
+            fit_wavelengths = np.asarray(archive[wavelength_key], dtype=float)
+            fit_basis = np.asarray(archive["basis"], dtype=float)
+            theta = np.asarray(archive["parameters"], dtype=float)
+        car190_observations = int(joint_summary["CAR190_observations"])
+        optical_root = joint_summary.get("optical_cache_root")
 
-    with np.load(fixed_archive_path, allow_pickle=False) as archive:
-        fit_wavelengths = np.asarray(archive["wavelength_nm"], dtype=float)
-        fit_basis = np.asarray(archive["basis"], dtype=float)
-    with np.load(joint_archive_path, allow_pickle=False) as archive:
-        theta = np.asarray(archive["shared_parameters"], dtype=float)
     area, _ = amber.canonical_configuration(detector)
     bounds = effective_area_support(area)
     fit_basis_expected = full_basis(fit_wavelengths, bounds)[0]
@@ -128,9 +165,24 @@ def _load_joint_detector_modulation(modulation_root, detector, wavelengths_nm):
     led_basis = full_basis(mock_model.LED_CENTERS_NM, bounds)[0]
     led_ratio = np.exp(log_amplitudes @ led_basis + 1j * (phases @ led_basis))
     led_anchor_deviation = float(np.max(np.abs(led_ratio - 1.0)))
-    old_dir, _ = amber.paths(detector)
-    old_summary = json.loads((old_dir / "car201_actual_star_modulation_fit_summary.json").read_text())
-    optical_root = old_summary["ice_history"]["optical_state_source"]
+    if optical_root is None:
+        old_dir, _ = amber.paths(detector)
+        old_summary = json.loads((old_dir / "car201_actual_star_modulation_fit_summary.json").read_text())
+        optical_root = old_summary["ice_history"]["optical_state_source"]
+        maxent_regularization = old_summary["modulation"]["maxent_regularization"]
+        phase_regularization = old_summary["modulation"]["phase_smoothness_regularization"]
+        reciprocal_maxent_weight = float(maxent_regularization["weight"])
+        curvature_weight = None
+        curvature_grid_points = None
+    else:
+        maxent_regularization = {
+            "functional": joint_summary["spectral_maxent"],
+            "weight": float(joint_summary["reciprocal_maxent_weight"]),
+        }
+        phase_regularization = {"weight": float(joint_summary["phase_smoothness_weight"])}
+        reciprocal_maxent_weight = float(joint_summary["reciprocal_maxent_weight"])
+        curvature_weight = float(joint_summary["curvature_weight"])
+        curvature_grid_points = int(joint_summary["curvature_grid_points"])
     modulation_summary = {
         "detector": detector,
         "pass_set": "ep3v2_ep4",
@@ -141,8 +193,12 @@ def _load_joint_detector_modulation(modulation_root, detector, wavelengths_nm):
         },
         "modulation": {
             "basis": "joint detector-specific support-aligned gaps, endpoints, and six LED values",
-            "maxent_regularization": old_summary["modulation"]["maxent_regularization"],
-            "phase_smoothness_regularization": old_summary["modulation"]["phase_smoothness_regularization"],
+            "maxent_regularization": maxent_regularization,
+            "curvature_regularization": (
+                {"weight": curvature_weight, "grid_points": curvature_grid_points}
+                if curvature_weight is not None else None
+            ),
+            "phase_smoothness_regularization": phase_regularization,
         },
     }
     provenance = {
@@ -154,31 +210,36 @@ def _load_joint_detector_modulation(modulation_root, detector, wavelengths_nm):
         "fit_kind": JOINT_MODULATION_FIT,
         "joint_fit_directory": str(joint_dir.resolve()),
         "joint_fit_summary_sha256": _sha256(joint_summary_path),
-        "joint_fit_archive": str(joint_archive_path.resolve()),
-        "joint_fit_archive_sha256": _sha256(joint_archive_path),
-        "fixed_ice_joint_fit_summary": str(fixed_summary_path.resolve()),
-        "fixed_ice_joint_fit_summary_sha256": _sha256(fixed_summary_path),
-        "fixed_ice_joint_fit_archive": str(fixed_archive_path.resolve()),
-        "fixed_ice_joint_fit_archive_sha256": _sha256(fixed_archive_path),
+        "joint_fit_archive": str(parameter_archive_path.resolve()),
+        "joint_fit_archive_sha256": _sha256(parameter_archive_path),
+        "joint_ice_history_archive": str(joint_archive_path.resolve()),
+        "joint_ice_history_archive_sha256": _sha256(joint_archive_path),
         "rate_control_spacing_days": 2.0,
         "tile_specific_ice_history_refitted": True,
-        "ice_parameters_per_tile": joint_summary["ice_parameters_per_tile"],
+        "ice_parameters_per_tile": int(
+            joint_summary.get("ice_parameters_per_tile", joint_summary["total_ice_parameters"] // 256)
+        ),
         "total_ice_parameters": joint_summary["total_ice_parameters"],
-        "amber_stars": joint_summary["stellar_stars"],
-        "amber_measurements": joint_summary["stellar_measurements"],
-        "car190_observations": fixed_summary["LED_observations"],
+        "amber_stars": int(joint_summary.get("stellar_stars", joint_summary.get("training_stars", 0))),
+        "amber_measurements": int(
+            joint_summary.get("stellar_measurements", joint_summary.get("training_measurements", 0))
+        ),
+        "car190_observations": car190_observations,
         "effective_area_file": str(area.resolve()),
         "effective_area_sha256": _sha256(area),
         "effective_area_provenance": json.loads(area.with_suffix(".provenance.json").read_text()),
         "modulation_zero_at_led_centers": False,
         "led_center_max_abs_complex_deviation": led_anchor_deviation,
+        "reciprocal_maxent_weight": reciprocal_maxent_weight,
+        "curvature_weight": curvature_weight,
+        "curvature_grid_points": curvature_grid_points,
         "roll_zeropoints_embedded": False,
         "scatter_scale_applied_to_optical_response": False,
     }
     return {
         "output_dir": joint_dir,
         "summary_path": joint_summary_path,
-        "parameters_path": joint_archive_path,
+        "parameters_path": parameter_archive_path,
         "summary": modulation_summary,
         "basis_name": modulation_summary["modulation"]["basis"],
         "basis_names": names,
@@ -222,12 +283,17 @@ def _load_joint_ice_history(modulation_root, detector, modulation_item=None):
         if np.any(slopes < -1e-7):
             raise ValueError(f"Joint fitted ice trajectory decreases in a growth stage: {joint_path}")
         rates[:, indices] = np.concatenate([slopes, slopes[:, -1:]], axis=1)
+    summary = dict(item["joint_ice_summary"])
+    summary.setdefault("reset_days", RESETS.tolist())
+    summary.setdefault("ice_parameters_per_tile", int(parameters.shape[1]))
+    summary.setdefault("total_ice_parameters", int(parameters.size))
+    summary.setdefault("rate_control_spacing_days", 2.0)
     return {
         "times": times,
         "thickness": thickness,
         "rates": rates,
         "archive_path": joint_path,
-        "summary": item["joint_ice_summary"],
+        "summary": summary,
     }
 
 
@@ -253,9 +319,17 @@ def _modulation_dir(modulation_root, detector):
     )
 
 
-def _load_detector_modulation(modulation_root, detector, wavelengths_nm, fit_kind="zane"):
+def _load_detector_modulation(
+    modulation_root,
+    detector,
+    wavelengths_nm,
+    fit_kind="zane",
+    joint_fit_name=DEFAULT_JOINT_FIT_NAME,
+):
     if fit_kind == JOINT_MODULATION_FIT:
-        return _load_joint_detector_modulation(modulation_root, detector, wavelengths_nm)
+        return _load_joint_detector_modulation(
+            modulation_root, detector, wavelengths_nm, joint_fit_name=joint_fit_name
+        )
     output_dir = _modulation_dir(modulation_root, detector)
     masked_fit = fit_kind == "amber-student-t-strong-red-led-mask"
     support_fit = fit_kind == "amber-student-t-support-aligned" or masked_fit
@@ -468,10 +542,19 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-bundle", type=Path, required=True)
     parser.add_argument("--fit-root", type=Path, default=DEFAULT_FIT_ROOT)
+    parser.add_argument(
+        "--fit-subdir",
+        help="Per-detector fit directory below --fit-root/<detector> (for example, spline_relative_response_normal).",
+    )
     parser.add_argument("--modulation-root", type=Path, default=DEFAULT_PRODUCTION_ROOT)
     parser.add_argument(
         "--modulation-fit", choices=("zane", "amber-student-t", "amber-student-t-detector-effective-area", "amber-student-t-support-aligned", "amber-student-t-strong-red-led-mask", JOINT_MODULATION_FIT), default="zane",
         help="Source modulation fit family; Amber uses the converged fixed-nu=4 Student-t experiments.",
+    )
+    parser.add_argument(
+        "--joint-fit-name",
+        default=DEFAULT_JOINT_FIT_NAME,
+        help="Experiment directory name under the detector's relative-response or spline fit root.",
     )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument(
@@ -529,6 +612,7 @@ def build_bundle(args):
         "base_bundle_sha256": _sha256(args.base_bundle),
         "detectors": requested_detectors,
         "fit_root": str(Path(args.fit_root).resolve()),
+        "fit_subdir": getattr(args, "fit_subdir", None),
         "modulation_root": str(Path(args.modulation_root).resolve()),
         "modulation_fit": getattr(args, "modulation_fit", "zane"),
         "rank": rank,
@@ -555,6 +639,7 @@ def build_bundle(args):
         detector: _load_detector_modulation(
             args.modulation_root, detector, wavelengths_nm,
             fit_kind=getattr(args, "modulation_fit", "zane"),
+            joint_fit_name=getattr(args, "joint_fit_name", DEFAULT_JOINT_FIT_NAME),
         )
         for detector in requested_detectors
     }
@@ -606,7 +691,7 @@ def build_bundle(args):
 
     tile_ice_thickness = None
     tile_rate = None
-    post_reset_offsets = np.empty(tile_count, dtype=np.float32)
+    post_reset_offsets = np.empty(tile_count, dtype=np.float64)
     fit_paths = []
     optical_cache_paths = []
     optical_fit_paths = []
@@ -619,21 +704,23 @@ def build_bundle(args):
     ice_reset_day = None
     third_decon_day = None
     third_decon_included = None
-    post_third_decon_offsets = np.empty(tile_count, dtype=np.float32)
+    post_third_decon_offsets = np.empty(tile_count, dtype=np.float64)
     third_decon_offsets_present = False
 
     fit_root = Path(args.fit_root)
+    detector_fit_roots = {
+        detector: fit_root_for_detector(
+            fit_root, detector, fit_subdir=getattr(args, "fit_subdir", None)
+        )
+        for detector in requested_detectors
+    }
     for tile_index, (detector_value, tile_id_value) in enumerate(
         zip(base_detectors, base["tile_ids"])
     ):
         detector = str(detector_value)
         tile_id = int(tile_id_value)
-        fit_path = (
-            fit_root
-            / detector.lower()
-            / "spline_relative_response_normal/fits"
-            / f"tile_{tile_id:03d}/posterior_samples.npz"
-        )
+        detector_fit_root = detector_fit_roots[detector]
+        fit_path = detector_fit_root / f"tile_{tile_id:03d}/posterior_samples.npz"
         if not fit_path.is_file():
             raise FileNotFoundError(f"Latest per-tile fit is missing: {fit_path}")
         trajectory = load_fit_trajectory(fit_path)

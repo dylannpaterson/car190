@@ -11,11 +11,12 @@ from wfi_wavelength_response_bundle import load_bundle
 
 
 ROOT = Path(__file__).resolve().parent
-MODEL_ROOT = ROOT / "20261106/corrected_statistics_4h_thinned/production/wavelength_response_bundle"
+MODEL_ROOT = ROOT / "20261111/corrected_statistics_4h_thinned/production/wavelength_response_bundle"
+ORIGINAL_MODEL_ROOT = ROOT / "20261106/corrected_statistics_4h_thinned/production/wavelength_response_bundle"
 STAGE = MODEL_ROOT / "s3_export"
 MODELS = {
-    "wfi_all_2nm_rank16.npz": MODEL_ROOT / "wfi_all_2nm_rank16.npz",
-    "wfi_all_2nm_rank16_modulated.npz": MODEL_ROOT / "wfi_all_2nm_rank16_joint_car190_amber_2day_modulated.npz",
+    "wfi_all_2nm_rank16.npz": ORIGINAL_MODEL_ROOT / "wfi_all_2nm_rank16.npz",
+    "wfi_all_2nm_rank16_modulated.npz": MODEL_ROOT / "wfi_all_2nm_rank16_modulated.npz",
 }
 
 
@@ -30,6 +31,14 @@ def main():
         "Stable remote filenames; dated source provenance retained locally and in each archive.",
         "",
     ]
+    joint_bundle = load_bundle(MODELS["wfi_all_2nm_rank16_modulated.npz"])
+    joint_metadata = joint_bundle["metadata"]
+    joint_sources = joint_metadata["modulation_fit_sources"]
+    amber_observations = sum(int(item["amber_measurements"]) for item in joint_sources.values())
+    car190_observations = sum(int(item["car190_observations"]) for item in joint_sources.values())
+    ice_parameters = sum(int(item["total_ice_parameters"]) for item in joint_sources.values())
+    reciprocal_maxent_weight = float(joint_sources["WFI01"]["reciprocal_maxent_weight"])
+    curvature_weight = float(joint_sources["WFI01"]["curvature_weight"])
     for name, source in MODELS.items():
         bundle = load_bundle(source)
         metadata = bundle["metadata"]
@@ -75,7 +84,7 @@ def main():
     for name in ("WFI_WAVELENGTH_RESPONSE_BUNDLE.md", "WFI_MODULATED_WAVELENGTH_RESPONSE_BUNDLE.md"):
         shutil.copy2(ROOT / "docs" / name, STAGE / name)
     (STAGE / "MANIFEST.txt").write_text("\n".join(manifest) + "\n")
-    (STAGE / "README.md").write_text('''# Current best WFI ice-response models
+    (STAGE / "README.md").write_text(f'''# Current best WFI ice-response models
 
 This directory publishes both models together at
 `s3://roman-s3-romcom/rges-pit/ice_model/`:
@@ -85,6 +94,8 @@ This directory publishes both models together at
   Amber's CAR201 photometry fit. It contains detector-specific complex-reflection
   modulation and jointly refitted per-tile ice histories using 2-day positive rate
   controls. Amber uses Student-t nu=4; CAR190 uses its production group weighting.
+  Spectral regularization uses reciprocal-wavelength MaxEnt weight
+  {reciprocal_maxent_weight:.15g} and curvature weight {curvature_weight:g}.
   LED-center modulation is free in this joint model and recorded per detector.
 - `wfi_wavelength_response_bundle.py`: shared loader/interpolator/integrator.
 - The two model documents, manifest, uploader, and SHA256 checksums.
@@ -93,8 +104,9 @@ Both archives describe tile-specific ice histories and wavelength/thickness
 response surfaces before downstream SED, filter, or QE integration. The
 modulated bundle's 2-day joint-fit histories are sampled on the original
 785-point CAR190 bundle time axis; bundle arrays and coordinate grids retain the
-existing format. The joint fit used 603,235 Amber CAR201 measurements, 3,617,280 CAR190
-group observations, and 152,064 tile-trajectory parameters across WFI01–WFI18.
+existing format. The joint fit used {amber_observations:,} Amber CAR201 measurements,
+{car190_observations:,} CAR190 group observations, and {ice_parameters:,} tile-trajectory
+parameters across WFI01–WFI18.
 No stellar SEDs, per-star normalizations, or fitted roll zero-points are embedded.
 Grey reset/decon offsets are retained from the original production fits.
 Modulation and updated-trajectory provenance are recorded in the metadata.

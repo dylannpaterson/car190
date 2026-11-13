@@ -423,13 +423,155 @@ def process_detector(detector, amber_rows, car_rows, reflect_rows, car_pdf, refl
     gc.collect()
 
 
+def plot_car190_h5_audit(detector, fit_dir, h5_path, output_dir):
+    """Compare actual fitted CAR190 predictions to the unchanged public H5 reader."""
+    import h5py
+    import compare_eric_v3_amber_car201 as compare
+
+    summary = json.loads((fit_dir / 'summary.json').read_text())
+    if summary['detector'] != detector:
+        raise ValueError('Detector does not match requested fit')
+    with np.load(fit_dir / 'joint_fit.npz') as archive:
+        theta = np.asarray(archive['parameters'], float)
+    with np.load(fit_dir / 'joint_weekly_ice_fit.npz') as archive:
+        times = np.asarray(archive['times'], float)
+        history = np.asarray(archive['fitted_thickness_nm'], float)
+    with h5py.File(h5_path) as h5:
+        nodes = h5['led_bands/wavelength_nm'][()]
+        weights = h5['led_bands/weight'][()]
+    area, _ = amber.canonical_configuration(detector)
+    led = LedModel(effective_area_support(area), detector=detector,
+        relative_response_root=Path(summary['relative_response_root']),
+        led_wavelength_nm=nodes, led_weights=weights)
+    fitted_rows, fitted_residual = predict_car190(led, theta, times, history)
+    np.testing.assert_allclose(np.sum(fitted_residual**2), summary['car190_chi2'], rtol=1e-8)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    records = []
+    stats = []
+    with compare.load_eric_v3_reader(compare.DEFAULT_SOURCE_ZIP) as reader:
+        model = reader.IceResponseModel(h5_path)
+        tile = np.arange(256)
+        x, y = (tile % 16)*256+128, (tile // 16)*256+128
+        reference = compare.utc_mjd(joint_reference := workflow.fit_model.ICE_REFERENCE_UTC)
+        h5_reference = compare.utc_mjd(model.t0_utc)
+        for bi, band in enumerate(led.bands):
+            days = band[0][9]
+            hours = (reference-h5_reference+days)*24.
+            band_response = model.band_response(int(detector[3:]), x, y, hours,
+                nodes[bi], weights[bi], gray=True, no_ice_weight=True)
+            gray = model.gray(int(detector[3:]), x, y, hours)
+            raw = np.log(band_response)-np.log(band_response[:, :1])
+            gray_delta = np.log(gray)-np.log(gray[:, :1])
+            for ti, item in enumerate(band):
+                first, second, r, y0, factor, basis, saved, observed, sigma, item_days, original, wave, ice = item
+                source_baseline = led.references[bi][ti]
+                calibration = saved-(source_baseline-source_baseline[0])
+                # This is a diagnostic application of the SAME existing source
+                # calibration terms in the CAR190 fit, not a new fitted curve.
+                usual_calibration = raw[ti]-gray_delta[ti]+calibration
+                fit = fitted_rows.loc[(fitted_rows.led == bi+1) & (fitted_rows.tile == ti), 'predicted'].to_numpy()
+                np.testing.assert_allclose(item_days, days, atol=1e-10, rtol=0)
+                # Diagnostic constant only: distinguishes a reference-level
+                # shift from a shape error; it is not written into the model.
+                constant = float(np.median(fit-raw[ti]))
+                for j, day in enumerate(days):
+                    records.append(dict(led=bi+1,tile=ti,day=float(day),observed=float(observed[j]),
+                        fit=float(fit[j]),h5=float(raw[ti,j]),
+                        h5_source_calibration=float(usual_calibration[j]),
+                        h5_constant_aligned=float(raw[ti,j]+constant),
+                        sigma=float(sigma[j]),source_calibration=float(calibration[j]),
+                        h5_gray_delta=float(gray_delta[ti,j])))
+            local = pd.DataFrame(records).query('led == @bi + 1')
+            stats.append(dict(led=bi+1,fit_chi2=float(np.sum(((local['fit']-local.observed)/local.sigma)**2)),
+                h5_chi2=float(np.sum(((local.h5-local.observed)/local.sigma)**2)),
+                h5_source_calibration_chi2=float(np.sum(((local.h5_source_calibration-local.observed)/local.sigma)**2)),
+                h5_constant_aligned_chi2=float(np.sum(((local.h5_constant_aligned-local.observed)/local.sigma)**2)),
+                h5_vs_fit_rms_percent=float(100*np.sqrt(np.mean((local.h5-local['fit'])**2))),
+                h5_source_calibration_vs_fit_rms_percent=float(100*np.sqrt(np.mean((local.h5_source_calibration-local['fit'])**2)))))
+    frame = pd.DataFrame(records)
+    frame.to_csv(output_dir/'car190_h5_tile_predictions.csv',index=False)
+    grouped = frame.groupby(['led','day'],sort=True)
+    cells=[]
+    columns=['observed','fit','h5','h5_source_calibration','h5_constant_aligned']
+    for (number,day),group in grouped:
+        row=dict(led=number,day=day)
+        for column in columns:
+            for q, value in zip((16,50,84),np.percentile(group[column],[16,50,84])):
+                row[f'{column}_p{q}']=value
+        cells.append(row)
+    cells=pd.DataFrame(cells)
+    cells.to_csv(output_dir/'car190_h5_epoch_percentiles.csv',index=False)
+    pdf_path=output_dir/'car190_h5_vs_data.pdf'
+    series=[('fit','#357fa1','Actual joint fit'),('h5','#d47727','H5: public reader'),
+            ('h5_source_calibration','#259c66','H5 + existing CAR190 calibration'),
+            ('h5_constant_aligned','#9865b5','H5 + diagnostic constant per tile/LED')]
+    with PdfPages(pdf_path) as pdf:
+        for residual in (False,True):
+            fig,axes=plt.subplots(2,3,figsize=(17,10),sharex=True)
+            for number,ax in enumerate(axes.flat,start=1):
+                rows=cells.loc[cells.led==number].sort_values('day')
+                dates=Time(reference+rows.day.to_numpy(),format='mjd',scale='utc').to_datetime()
+                if not residual:
+                    ax.scatter(dates,100*rows.observed_p50,s=9,color='.3',label='Corrected CAR190 data')
+                stages=np.searchsorted(RESETS,rows.day.to_numpy(),side='right')
+                for column,color,label in series:
+                    if residual:
+                        residual_rows=frame.loc[frame.led==number].copy()
+                        residual_rows['residual']=residual_rows[column]-residual_rows.observed
+                        percentiles=residual_rows.groupby('day').residual.quantile([.16,.5,.84]).unstack().reindex(rows.day)
+                        median=percentiles[.5].to_numpy()
+                        low=percentiles[.16].to_numpy();high=percentiles[.84].to_numpy()
+                    else:
+                        median=rows[f'{column}_p50'].to_numpy()
+                        low=rows[f'{column}_p16'].to_numpy();high=rows[f'{column}_p84'].to_numpy()
+                    for stage in np.unique(stages):
+                        use=stages==stage
+                        ax.plot(dates[use],100*median[use],color=color,lw=1.25,
+                            label=label if stage==stages[0] else None)
+                        if column in ('fit','h5'):
+                            ax.fill_between(dates[use],100*low[use],100*high[use],color=color,alpha=.1,lw=0)
+                for day in RESETS:
+                    ax.axvline(Time(reference+day,format='mjd').to_datetime(),ls=':',color='.4',lw=.8)
+                for event in EVENTS:
+                    ax.axvline(Time(event,format='isot').to_datetime(),ls='--',color='#b66b2e',lw=.7,alpha=.65)
+                ax.axhline(0,color='.4',lw=.6)
+                ax.set_title(f'LED {number}')
+                ax.grid(alpha=.2)
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
+            axes[0,0].legend(fontsize=7,loc='best')
+            fig.supylabel(('Model minus data' if residual else 'Log response change')+' ×100 (%)')
+            fig.supxlabel('UTC date')
+            fig.suptitle(f'{detector}: CAR190 '+('residuals' if residual else 'data versus joint fit and exported H5'))
+            fig.text(.5,.025,'All curves referenced to the same first exposure of each tile/LED. '
+                'Green uses the existing calibration terms already present in the fit; purple adds only a diagnostic constant. '
+                'No new offsets were fitted to the observations.',ha='center',fontsize=8)
+            fig.tight_layout(rect=(.02,.06,1,.95))
+            path=output_dir/('car190_h5_residuals.png' if residual else 'car190_h5_vs_data.png')
+            fig.savefig(path,dpi=180);pdf.savefig(fig);plt.close(fig)
+            print(f'Wrote {path}',flush=True)
+    report=dict(detector=detector,fit_dir=str(fit_dir.resolve()),h5=str(h5_path.resolve()),
+        source_fit_reference_utc=joint_reference,h5_reference_utc=model.t0_utc,
+        reader_unchanged=True,LED_metrics=stats,pdf=str(pdf_path.resolve()))
+    (output_dir/'car190_h5_reference_audit.json').write_text(json.dumps(report,indent=2)+'\n')
+    print(json.dumps(report,indent=2),flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--detector", action="append", required=True, choices=workflow.DETECTORS)
     parser.add_argument("--complex-only", action="store_true",
-                        help="Regenerate only the clean no-ice complex-reflectance plots")
+                         help="Regenerate only the clean no-ice complex-reflectance plots")
+    parser.add_argument('--fit-dir',type=Path)
+    parser.add_argument('--h5-model',type=Path)
+    parser.add_argument('--output-dir',type=Path)
     args = parser.parse_args()
     detectors = list(dict.fromkeys(args.detector))
+    if args.fit_dir is not None or args.h5_model is not None:
+        if args.fit_dir is None or args.h5_model is None or len(detectors)!=1:
+            parser.error('H5 CAR190 audit requires one detector, --fit-dir and --h5-model')
+        plot_car190_h5_audit(detectors[0],args.fit_dir,args.h5_model,
+                            args.output_dir or args.fit_dir/'car190_h5_diagnostics')
+        return
     OUTPUT.mkdir(parents=True, exist_ok=True)
     amber_rows, car_rows, reflect_rows = [], [], []
     with PdfPages(OUTPUT / "complex_reflectance_all_detectors.pdf") as reflect_pdf:

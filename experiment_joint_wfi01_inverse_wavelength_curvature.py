@@ -72,6 +72,7 @@ class InverseWavelengthCurvature:
         basis = full_basis(self.wavelengths_nm, (low, high))[0]
         if basis.shape[0] != mode_count:
             raise ValueError(f"Expected {mode_count} modes on curvature grid; found {basis.shape[0]}")
+        self.basis = basis
 
         step = self.u[1] - self.u[0]
         # sqrt(step) / step**2 makes the squared residual sum converge to

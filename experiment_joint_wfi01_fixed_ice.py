@@ -59,17 +59,32 @@ def add_full_basis(model,bounds):
 
 
 class LedModel:
-    def __init__(self,bounds,detector="WFI01",relative_response_root=None):
+    def __init__(self,bounds,detector="WFI01",relative_response_root=None,
+                 led_wavelength_nm=None,led_weights=None):
         self.detector=detector
         detector_root=(Path(relative_response_root) if relative_response_root is not None else
                        PRODUCTION/detector.lower()/"spline_relative_response_normal")
-        ctx=production.load_response_context([detector],sed_weighting="energy",qe_response_mode="none")
-        self.wave=np.asarray(ctx["wavelengths"],float)
-        self.weights=np.asarray(ctx["model_weights"],float)[0]
+        if (led_wavelength_nm is None) != (led_weights is None):
+            raise ValueError("LED quadrature wavelengths and weights must be supplied together")
+        if led_wavelength_nm is None:
+            ctx=production.load_response_context([detector],sed_weighting="energy",qe_response_mode="none")
+            self.wave=np.asarray(ctx["wavelengths"],float)
+            self.weights=np.asarray(ctx["model_weights"],float)[0]
+        else:
+            nodes=np.asarray(led_wavelength_nm,float)
+            values=np.asarray(led_weights,float)
+            if nodes.ndim!=2 or values.shape!=nodes.shape or nodes.shape[0]!=NLED:
+                raise ValueError("Eric LED quadrature must have matching (6, node_count) arrays")
+            self.wave,inverse=np.unique(nodes.reshape(-1),return_inverse=True)
+            self.weights=np.zeros((NLED,self.wave.size),float)
+            inverse=inverse.reshape(nodes.shape)
+            for band in range(NLED):
+                np.add.at(self.weights[band],inverse[band],values[band])
         self.basis=full_basis(self.wave,bounds)[0]
         nbase,kbase=production.hgcdte_reference_optical_constants(self.wave)
         spectral=production.spectral_modulation_basis(self.wave)
         self.bands=[]
+        self.clean_reflection_by_tile=np.empty((TILE_COUNT,self.wave.size),dtype=complex)
         led_rows=[]
         by_band=[[] for _ in range(NLED)]
         for tile in range(TILE_COUNT):
@@ -87,6 +102,7 @@ class LedModel:
             first,second,y0,ysub,sine=mock.clean_stack_boundary(state,self.wave)
             if abs(sine)>1e-12:raise ValueError("Non-normal incidence")
             reflect=(y0*first-second)/(y0*first+second)
+            self.clean_reflection_by_tile[tile]=reflect
             counts=stats["n_pair_valid"].to_numpy(float)
             sigma=.005*np.sqrt(np.median(counts)/counts)
             for band in range(1,7):

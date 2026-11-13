@@ -1,5 +1,6 @@
 """Validate the joint CAR190/Amber modulated bundle against its source fits."""
 
+import argparse
 import json
 from pathlib import Path
 
@@ -20,8 +21,18 @@ FIT_KIND = builder.JOINT_MODULATION_FIT
 
 
 def main():
-    bundle = load_bundle(CANDIDATE)
-    previous = load_bundle(PREVIOUS)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--production-root", type=Path, default=PRODUCTION)
+    parser.add_argument("--candidate", type=Path, default=CANDIDATE)
+    parser.add_argument("--previous", type=Path, default=PREVIOUS)
+    parser.add_argument("--joint-fit-name", default=builder.DEFAULT_JOINT_FIT_NAME)
+    args = parser.parse_args()
+    candidate = args.candidate
+    previous_path = args.previous
+    production = args.production_root
+    bundle_dir = candidate.parent
+    bundle = load_bundle(candidate)
+    previous = load_bundle(previous_path)
     metadata = bundle["metadata"]
     if metadata.get("modulation_fit_family") != FIT_KIND:
         raise ValueError("Candidate bundle does not identify the joint 2-day modulation family")
@@ -54,7 +65,13 @@ def main():
     response_checks = []
 
     for detector in builder.DETECTORS:
-        item = builder._load_detector_modulation(PRODUCTION, detector, wavelengths, fit_kind=FIT_KIND)
+        item = builder._load_detector_modulation(
+            production,
+            detector,
+            wavelengths,
+            fit_kind=FIT_KIND,
+            joint_fit_name=args.joint_fit_name,
+        )
         modulation_index = int(np.flatnonzero(modulation_detectors == detector)[0])
         stored_ratio = (np.asarray(bundle["modulation_ratio_real"][modulation_index], dtype=float)
                         + 1j * np.asarray(bundle["modulation_ratio_imag"][modulation_index], dtype=float))
@@ -109,11 +126,11 @@ def main():
         print(f"Validated {detector}: joint coefficients/history and 3 direct-TMM tiles", flush=True)
 
     response_table = pd.DataFrame(response_checks)
-    response_table.to_csv(BUNDLE_DIR / "joint_car190_amber_2day_bundle_direct_tmm_checks.csv", index=False)
+    response_table.to_csv(bundle_dir / "joint_car190_amber_2day_bundle_direct_tmm_checks.csv", index=False)
     result = {
-        "candidate_bundle": str(CANDIDATE),
-        "candidate_bundle_sha256": builder._sha256(CANDIDATE),
-        "comparison_bundle": str(PREVIOUS),
+        "candidate_bundle": str(candidate),
+        "candidate_bundle_sha256": builder._sha256(candidate),
+        "comparison_bundle": str(previous_path),
         "bundle_version_preserved": int(bundle["bundle_version"]),
         "detectors": 18,
         "tiles": int(bundle["tile_ids"].size),
@@ -134,7 +151,7 @@ def main():
         "roll_zeropoints_embedded": False,
         "s3_uploaded": False,
     }
-    summary_path = BUNDLE_DIR / "joint_car190_amber_2day_bundle_validation.json"
+    summary_path = bundle_dir / "joint_car190_amber_2day_bundle_validation.json"
     summary_path.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
 
