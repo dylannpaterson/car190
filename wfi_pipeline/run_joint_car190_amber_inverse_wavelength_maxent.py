@@ -285,7 +285,9 @@ def main():
     if args.optical_cache_root is None:
         mode_path = relative_root / "relative_response_mode.json"
         mode_config = json.loads(mode_path.read_text())
-        optical_cache_root = Path(mode_config["response_cache_root"])
+        from wfi_relative_response import resolve_portable_path
+
+        optical_cache_root = resolve_portable_path(mode_config["response_cache_root"])
     else:
         mode_path = None
         optical_cache_root = Path(args.optical_cache_root)

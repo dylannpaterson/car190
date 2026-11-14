@@ -121,8 +121,10 @@ def write_warmup_outputs(
             {
                 "detector": detector,
                 "tile_id": tile_id,
-                "statistics": str(Path(data["statistics_path"]).resolve()),
-                "response_cache": str(Path(cache_path).resolve()),
+                "statistics": cached_response.portable_path_string(
+                    data["statistics_path"]
+                ),
+                "response_cache": cached_response.portable_path_string(cache_path),
                 "constant_rate": True,
                 "constant_rate_nm_day": diagnostics["constant_rate_map_rate_nm_day"],
                 "third_decon_initial_thickness_start_nm": float(
@@ -364,8 +366,8 @@ def run_detector(
             {
                 "detector": detector,
                 "fit_mode": "relative_response_constant_rate_warmup",
-                "response_cache_root": str(cache_root.resolve()),
-                "statistics": str(statistics.resolve()),
+                "response_cache_root": cached_response.portable_path_string(cache_root),
+                "statistics": cached_response.portable_path_string(statistics),
                 "tile_size": int(tile_size),
                 "workers": int(workers),
                 "third_decon_day": float(third_decon_day),

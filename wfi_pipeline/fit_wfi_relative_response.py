@@ -20,6 +20,8 @@ from wfi_relative_response import (
     fit_ice_only_reusable,
     load_response_cache,
     load_warm_values,
+    portable_path_string,
+    resolve_portable_path,
     relative_state,
 )
 
@@ -87,7 +89,11 @@ def resolve_warmup_prior_settings(
         thickness_prior_stages = DEFAULT_WARMUP_THICKNESS_PRIOR_STAGES
     if thickness_prior_stages not in ("all", "third-decon"):
         raise ValueError("Thickness prior stages must be 'all' or 'third-decon'")
-    return Path(warmup_prior_root), thickness_prior_log_sigma, thickness_prior_stages
+    return (
+        resolve_portable_path(warmup_prior_root),
+        thickness_prior_log_sigma,
+        thickness_prior_stages,
+    )
 
 
 def statistics_fingerprint(statistics_path):
@@ -240,10 +246,10 @@ def write_outputs(
         tile_instantaneous_rate_nm_day=rates[None, None, :],
         np_node_thickness=node_ice[None, None, :],
         node_instantaneous_rate_nm_day=node_rates[None, None, :],
-        response_cache=np.asarray(str(cache_path.resolve())),
+        response_cache=np.asarray(portable_path_string(cache_path)),
         fit_mode=np.asarray(str(fit_mode)),
         statistics_fingerprint=np.asarray(statistics_fingerprint(data["statistics_path"])),
-        statistics_path=np.asarray(str(Path(data["statistics_path"]).resolve())),
+        statistics_path=np.asarray(portable_path_string(data["statistics_path"])),
         observation_program=np.asarray(data["program"], dtype=int),
         groups=np.asarray(data["groups"], dtype=int),
         ice_reset_day=np.asarray(float(reset_days[0])),
@@ -294,7 +300,7 @@ def write_outputs(
         archive_values["thickness_prior_stages"] = np.asarray(str(thickness_prior_stages))
     if warmup_prior_root is not None:
         archive_values["warmup_prior_root"] = np.asarray(
-            str(Path(warmup_prior_root).resolve())
+            portable_path_string(warmup_prior_root)
         )
     if constant_rate_warmup_diagnostics is not None:
         archive_values.update(

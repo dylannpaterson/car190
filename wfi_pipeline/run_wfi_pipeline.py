@@ -423,6 +423,7 @@ class PipelineRun:
         if self.profile.name != RELATIVE_RESPONSE:
             return None
         from run_wfi_relative_response_production import cached_fit_matches
+        from wfi_relative_response import resolve_portable_path
         from wfi_production_layout import tile_statistics_path
 
         source_root = Path(statistics_dir) / "production" / detector.lower() / "relative_response"
@@ -434,8 +435,8 @@ class PipelineRun:
         except (OSError, json.JSONDecodeError):
             return None
         input_statistics = _corrected_stats_file(statistics_dir, detector)
-        source_statistics = Path(mode.get("statistics", ""))
-        warmup_root = Path(mode.get("warmup_prior_root", ""))
+        source_statistics = resolve_portable_path(mode.get("statistics", ""))
+        warmup_root = resolve_portable_path(mode.get("warmup_prior_root", ""))
         cache_root = pinned_relative_response_cache(detector)
         try:
             expected_mode = (
@@ -451,7 +452,7 @@ class PipelineRun:
                 and mode.get("batch_size") == self.profile.relative_batch_size
                 and mode.get("joint_batch") is False
                 and float(mode.get("trajectory_entropy_weight", -1.0)) == 0.0
-                and Path(mode.get("response_cache_root", "")).resolve()
+                and resolve_portable_path(mode.get("response_cache_root", ""))
                 == cache_root.resolve()
                 and source_statistics.is_file()
                 and _sha256(source_statistics) == _sha256(input_statistics)
@@ -475,7 +476,7 @@ class PipelineRun:
             or warmup_mode.get("fit_led_log_offsets") is not True
             or float(warmup_mode.get("led_log_offset_prior_sigma_log", -1.0))
             != self.profile.led_log_offset_prior_sigma_log
-            or Path(warmup_mode.get("statistics", "")).resolve()
+            or resolve_portable_path(warmup_mode.get("statistics", ""))
             != input_statistics.resolve()
             or not self._tile_archives(warmup_root / "fits", "constant_rate_map.npz")
         ):
@@ -528,9 +529,9 @@ class PipelineRun:
                 and summary.get("response_convention") == "eric-reader"
                 and summary.get("ice_histories_refitted") is True
                 and summary.get("ice_rate_control_spacing_days") == 2.0
-                and Path(summary.get("ice_history_fit_root", "")).resolve()
+                and resolve_portable_path(summary.get("ice_history_fit_root", ""))
                 == fit_root.resolve()
-                and Path(summary.get("optical_cache_root", "")).resolve()
+                and resolve_portable_path(summary.get("optical_cache_root", ""))
                 == cache_root.resolve()
             ):
                 joint_root = None

@@ -1,7 +1,10 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 import fit_wfi_tmm_production as production
+import wfi_relative_response as relative_response
 from wfi_relative_response import (
     CACHE_VERSION,
     MODEL_PROVENANCE_FIELDS,
@@ -12,6 +15,7 @@ from wfi_relative_response import (
     load_spectral_response_cache,
     load_response_cache,
     load_optical_values,
+    resolve_portable_path,
     statistics_fingerprint,
     validate_response_cache_provenance,
     write_response_cache,
@@ -21,9 +25,11 @@ from wfi_relative_response import (
 )
 
 
-def _write_provenance_fit(path, statistics_path):
+def _write_provenance_fit(path, statistics_path, recorded_statistics_path=None):
     values = {
-        "statistics_path": np.asarray(str(statistics_path.resolve())),
+        "statistics_path": np.asarray(
+            str((recorded_statistics_path or statistics_path).resolve())
+        ),
         "statistics_fingerprint": np.asarray(statistics_fingerprint(statistics_path)),
     }
     for name in MODEL_PROVENANCE_FIELDS:
@@ -37,6 +43,71 @@ def _write_provenance_fit(path, statistics_path):
             }.get(name, 1.0)
         )
     np.savez_compressed(path, **values)
+
+
+def test_external_cache_provenance_paths_relocate_with_repository(tmp_path, monkeypatch):
+    repository = tmp_path / "new_checkout"
+    relative_statistics = Path(
+        "20261109/corrected_statistics_4h_thinned/production/wfi01/"
+        "tile_statistics/tile_000.csv"
+    )
+    relative_fit = Path(
+        "20261109/corrected_statistics_4h_thinned/production/wfi01/"
+        "fits/tile_000/posterior_samples.npz"
+    )
+    statistics = repository / relative_statistics
+    fit = repository / relative_fit
+    statistics.parent.mkdir(parents=True)
+    fit.parent.mkdir(parents=True)
+    statistics.write_text(
+        "group,n_pair_valid,sum_log_change,sum_squared_log_change\n"
+        "0,4,0.1,0.2\n",
+        encoding="utf-8",
+    )
+
+    old_root = Path("/old_machine/workspace/MAST_2026-09-14T1134")
+    old_statistics = old_root / relative_statistics
+    old_fit = old_root / relative_fit
+    _write_provenance_fit(
+        fit,
+        statistics,
+        recorded_statistics_path=old_statistics,
+    )
+    monkeypatch.setattr(relative_response, "REPOSITORY_ROOT", repository)
+
+    provenance = relative_response.source_provenance(old_fit, old_statistics)
+    cache_path = repository / "response_cache.npz"
+    np.savez_compressed(
+        cache_path,
+        detector=np.asarray("WFI01"),
+        tile_id=np.asarray(0),
+        source_fit=np.asarray(str(old_fit)),
+        source_statistics=np.asarray(str(old_statistics)),
+        source_fit_sha256=np.asarray(provenance["source_fit_sha256"]),
+        source_statistics_sha256=np.asarray(provenance["source_statistics_sha256"]),
+        source_statistics_fingerprint=np.asarray(
+            provenance["source_statistics_fingerprint"]
+        ),
+        source_model_fingerprint=np.asarray(provenance["source_model_fingerprint"]),
+    )
+
+    validated = validate_response_cache_provenance(cache_path)
+    assert validated["source_fit"] == relative_fit.as_posix()
+    assert validated["source_statistics"] == relative_statistics.as_posix()
+    from run_wfi_relative_response_production import cache_source_paths
+
+    resolved_fit, resolved_statistics = cache_source_paths(cache_path)
+    assert resolved_fit == fit.resolve()
+    assert resolved_statistics == statistics.resolve()
+    assert resolve_portable_path(old_fit, repository) == fit.resolve()
+    missing_repository = tmp_path / "checkout_without_source_files"
+    assert resolve_portable_path(old_fit, missing_repository) == (
+        missing_repository / relative_fit
+    ).resolve()
+
+    from mock_fit_wfi_star_reflectance_modulation import source_fit_from_cache
+
+    assert source_fit_from_cache(cache_path, "WFI01", 0) == fit.resolve()
 
 
 def test_spectral_response_cache_round_trip(tmp_path):

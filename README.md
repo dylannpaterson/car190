@@ -366,6 +366,15 @@ tiles; the existing count corrections are not applied again. The output path
 must be a dedicated directory under the same dated data folder, outside the
 statistics directory.
 
+For the cached relative-response route, transfer both the pinned 20261109
+six-LED response caches and their provenance source files: the corresponding
+`production/wfi##/fits/` and `production/wfi##/tile_statistics/` trees from that
+run. The cache uses those fit archives for its optical initialization and rate
+warm start. Cache provenance paths are resolved against the current repository
+root and their hashes are checked, so a relocated checkout works when these
+dated source files are present. Copying the response-cache directory alone is
+not sufficient.
+
 Each run owns its `pipeline_manifest.json`, central `logs/`, route-specific
 fits and caches, the stable `wfi_all_2nm_rank16.npz` and
 `wfi_all_2nm_rank16_modulated.npz` portable bundles, clearly separated H5 build

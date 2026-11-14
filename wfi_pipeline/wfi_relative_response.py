@@ -10,6 +10,7 @@ import numpy as np
 import fit_wfi_tmm_production as production
 
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CACHE_VERSION = 2
 SPECTRAL_CACHE_VERSION = 1
 MODEL_PROVENANCE_FIELDS = (
@@ -58,6 +59,44 @@ VARIABLE_SITES = (
     "post_reset_tile_log_offset",
     "np_log_rate_nodes",
 )
+
+
+def resolve_portable_path(value, repository_root=None):
+    """Resolve a cached path after its repository has moved to another machine.
+
+    Production cache metadata historically stored absolute paths. If that path
+    is no longer present, retain its dated run-relative suffix and resolve it
+    beneath the current repository root.
+    """
+    path = Path(str(value)).expanduser()
+    root = Path(repository_root or REPOSITORY_ROOT).resolve()
+    candidates = []
+    relocated_candidates = []
+    if path.is_absolute():
+        candidates.append(path)
+    else:
+        candidates.extend((root / path, path))
+    for index, part in enumerate(path.parts):
+        if len(part) == 8 and part.isdigit():
+            relocated = root.joinpath(*path.parts[index:])
+            candidates.append(relocated)
+            relocated_candidates.append(relocated)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    if relocated_candidates:
+        return relocated_candidates[0].resolve()
+    return (path if path.is_absolute() else root / path).resolve()
+
+
+def portable_path_string(value, repository_root=None):
+    """Serialize repository inputs relatively when they are inside the checkout."""
+    root = Path(repository_root or REPOSITORY_ROOT).resolve()
+    resolved = resolve_portable_path(value, repository_root=root)
+    try:
+        return resolved.relative_to(root).as_posix()
+    except ValueError:
+        return str(resolved)
 
 
 def variable_sites(values):
@@ -132,14 +171,14 @@ def model_provenance_fingerprint(fit_archive):
 
 def source_provenance(source_fit, source_statistics):
     """Collect and validate provenance from one production fit and its CSV."""
-    source_fit = Path(source_fit).resolve()
-    source_statistics = Path(source_statistics).resolve()
+    source_fit = resolve_portable_path(source_fit)
+    source_statistics = resolve_portable_path(source_statistics)
     with np.load(source_fit, allow_pickle=False) as source:
         if "statistics_path" not in source or "statistics_fingerprint" not in source:
             raise ValueError(f"Production provenance is missing from {source_fit}")
-        archived_statistics = Path(
+        archived_statistics = resolve_portable_path(
             str(np.asarray(source["statistics_path"]).reshape(-1)[0])
-        ).resolve()
+        )
         if archived_statistics != source_statistics:
             raise ValueError(
                 f"Source fit statistics do not match cache statistics: "
@@ -154,8 +193,8 @@ def source_provenance(source_fit, source_statistics):
             f"Source fit statistics fingerprint does not match {source_statistics}"
         )
     return {
-        "source_fit": str(source_fit),
-        "source_statistics": str(source_statistics),
+        "source_fit": portable_path_string(source_fit),
+        "source_statistics": portable_path_string(source_statistics),
         "source_fit_sha256": file_fingerprint(source_fit),
         "source_statistics_sha256": file_fingerprint(source_statistics),
         "source_statistics_fingerprint": archived_statistics_fingerprint,
@@ -479,9 +518,15 @@ def load_response_cache(path, data, context):
         return {
             "grid_nm": grid,
             "relative_log_response": curves,
-            "source_fit": str(np.asarray(source["source_fit"]).reshape(-1)[0]),
+            "source_fit": str(
+                resolve_portable_path(
+                    str(np.asarray(source["source_fit"]).reshape(-1)[0])
+                )
+            ),
             "source_statistics": str(
-                np.asarray(source["source_statistics"]).reshape(-1)[0]
+                resolve_portable_path(
+                    str(np.asarray(source["source_statistics"]).reshape(-1)[0])
+                )
             ),
             "source_fit_sha256": str(
                 np.asarray(source["source_fit_sha256"]).reshape(-1)[0]
@@ -520,10 +565,12 @@ def validate_response_cache_provenance(
             raise ValueError(
                 f"Response cache lacks provenance fields: {', '.join(missing)}"
             )
-        source_fit = Path(str(np.asarray(source["source_fit"]).reshape(-1)[0])).resolve()
-        source_statistics = Path(
+        source_fit = resolve_portable_path(
+            str(np.asarray(source["source_fit"]).reshape(-1)[0])
+        )
+        source_statistics = resolve_portable_path(
             str(np.asarray(source["source_statistics"]).reshape(-1)[0])
-        ).resolve()
+        )
         if expected_fit is not None and source_fit != Path(expected_fit).resolve():
             raise ValueError(
                 f"Response cache source fit is {source_fit}, expected {Path(expected_fit).resolve()}"
@@ -2011,7 +2058,7 @@ def write_spectral_response_cache(
         response_right=right.astype(np.float32),
         response_rank=np.asarray(int(rank)),
         response_representation=np.asarray("low_rank_linear_grid"),
-        source_fit=np.asarray(str(Path(source_fit).resolve())),
+        source_fit=np.asarray(portable_path_string(source_fit)),
     )
     return path
 
@@ -2036,7 +2083,11 @@ def load_spectral_response_cache(path, detector=None, tile_id=None):
             "clean_power": np.asarray(source["clean_power"], dtype=float),
             "response_left": np.asarray(source["response_left"], dtype=float),
             "response_right": np.asarray(source["response_right"], dtype=float),
-            "source_fit": str(np.asarray(source["source_fit"]).reshape(-1)[0]),
+            "source_fit": str(
+                resolve_portable_path(
+                    str(np.asarray(source["source_fit"]).reshape(-1)[0])
+                )
+            ),
         }
 
 

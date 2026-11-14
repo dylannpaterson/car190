@@ -18,6 +18,7 @@ from scipy.optimize import least_squares
 
 import compare_wfi_tile136_complex_reflectance as complex_model
 import fit_wfi_tmm_production as production
+from wfi_relative_response import resolve_portable_path
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -143,7 +144,9 @@ def source_fit_from_cache(path, detector, tile_id):
     with np.load(path, allow_pickle=False) as archive:
         cache_detector = str(np.asarray(archive["detector"]).reshape(-1)[0])
         cache_tile = int(np.asarray(archive["tile_id"]).reshape(-1)[0])
-        source_fit = Path(str(np.asarray(archive["source_fit"]).reshape(-1)[0]))
+        source_fit = resolve_portable_path(
+            str(np.asarray(archive["source_fit"]).reshape(-1)[0])
+        )
     if cache_detector.upper() != detector.upper() or cache_tile != tile_id:
         raise ValueError("The optical cache detector/tile does not match this test")
     if not source_fit.is_file():

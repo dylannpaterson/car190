@@ -15,6 +15,8 @@ from wfi_relative_response import (
     CACHE_VERSION,
     PRODUCTION_ENTROPY_WEIGHT,
     PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY,
+    portable_path_string,
+    resolve_portable_path,
     variable_sites,
     load_response_cache,
     validate_response_cache_provenance,
@@ -65,8 +67,12 @@ def cache_source_paths(cache_path):
     import numpy as np
 
     with np.load(cache_path, allow_pickle=False) as cache:
-        source_fit = Path(str(cache["source_fit"].reshape(-1)[0]))
-        source_statistics = Path(str(cache["source_statistics"].reshape(-1)[0]))
+        source_fit = resolve_portable_path(
+            str(cache["source_fit"].reshape(-1)[0])
+        )
+        source_statistics = resolve_portable_path(
+            str(cache["source_statistics"].reshape(-1)[0])
+        )
     if not source_fit.is_file():
         raise FileNotFoundError(f"Cached source fit is missing: {source_fit}")
     if not source_statistics.is_file():
@@ -114,6 +120,7 @@ def cached_fit_matches(
     thickness_prior_stages=None,
 ):
     import numpy as np
+    from wfi_relative_response import resolve_portable_path
 
     try:
         with np.load(Path(output_dir) / "posterior_samples.npz", allow_pickle=False) as fit:
@@ -126,7 +133,9 @@ def cached_fit_matches(
             archived_statistics = str(
                 np.asarray(fit["statistics_fingerprint"]).reshape(-1)[0]
             )
-            archived_cache = str(np.asarray(fit["response_cache"]).reshape(-1)[0])
+            archived_cache = resolve_portable_path(
+                str(np.asarray(fit["response_cache"]).reshape(-1)[0])
+            )
             archived_led = bool(
                 int(np.asarray(fit.get("fit_led_log_offsets", 0)).item())
             )
@@ -155,8 +164,8 @@ def cached_fit_matches(
                     archived_third_start = value
             archived_warmup_root = None
             if "warmup_prior_root" in fit:
-                archived_warmup_root = str(
-                    np.asarray(fit["warmup_prior_root"]).reshape(-1)[0]
+                archived_warmup_root = resolve_portable_path(
+                    str(np.asarray(fit["warmup_prior_root"]).reshape(-1)[0])
                 )
             archived_prior_sigma = None
             if "thickness_prior_log_sigma" in fit:
@@ -176,7 +185,7 @@ def cached_fit_matches(
             )
         else:
             prior_matches = (
-                archived_warmup_root == str(Path(warmup_prior_root).resolve())
+                archived_warmup_root == Path(warmup_prior_root).resolve()
                 and archived_prior_sigma is not None
                 and np.isclose(
                     archived_prior_sigma,
@@ -189,7 +198,7 @@ def cached_fit_matches(
         return (
             fit_mode == expected_fit_mode
             and archived_statistics == relative_fit.statistics_fingerprint(statistics_path)
-            and archived_cache == str(Path(cache_path).resolve())
+            and archived_cache == Path(cache_path).resolve()
             and archived_led == bool(fit_led_log_offsets)
             and archived_constant_rate_warmup
             and np.isclose(
@@ -999,8 +1008,8 @@ def run_detector(
         "response_cache_version": int(CACHE_VERSION),
         "cache_policy": "pinned_current_run_rebuild_only_after_reprocessing_or_model_change",
         "temperature_dependent_gain_uncorrected_data_supported": False,
-        "response_cache_root": str(cache_root.resolve()),
-        "statistics": str(statistics.resolve()),
+        "response_cache_root": portable_path_string(cache_root),
+        "statistics": portable_path_string(statistics),
         "tile_size": int(tile_size),
         "batch_size": int(batch_size),
         "joint_batch": bool(joint_batch),
@@ -1025,7 +1034,7 @@ def run_detector(
         "fit_led_log_offsets": bool(fit_led_log_offsets),
         "led_log_offset_prior_sigma_log": led_log_offset_prior_sigma_log,
         "warmup_prior_root": (
-            None if warmup_prior_root is None else str(Path(warmup_prior_root).resolve())
+            None if warmup_prior_root is None else portable_path_string(warmup_prior_root)
         ),
         "thickness_prior_log_sigma": thickness_prior_log_sigma,
         "thickness_prior_stages": thickness_prior_stages,
