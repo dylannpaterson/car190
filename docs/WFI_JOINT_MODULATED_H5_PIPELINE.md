@@ -213,8 +213,11 @@ The fitted gray boundaries are the fixed reset days `12.907397928240743` and
 
 Run Eric's original v3 model and the new H5 on the same matched CAR201 cohort.
 The comparison uses the unchanged `IceResponseModel` reader, detector-specific
-effective areas, exact observation times/positions, and applies the saved Amber
-roll offsets identically to each model:
+effective areas, exact observation times/positions, and caches Eric-reader
+response spectra by unique position/time before applying the same no-ice-weighted
+band integral. Distributed measurements are checked against the unchanged
+reader's public `band_response` method. It applies the saved Amber roll offsets
+identically to each model:
 
 ```bash
 comparison_dir="$bundle_dir/unchanged_reader_port/current_gray_v2_car201_all_detectors"

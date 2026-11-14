@@ -212,7 +212,19 @@ def evaluate_model_on_sample(
     normalize_band=True,
     fitted_photometry=False,
 ):
-    """Integrate v3 ice response over each matched source/filter/time measurement."""
+    """Evaluate normalized measurements with Eric-reader spectra and band weights."""
+    if not fitted_photometry and normalize_band:
+        return evaluate_with_eric_cached_spectra(
+            model,
+            core,
+            detector,
+            source_ids,
+            common,
+            wavelengths_nm,
+            photon_shapes,
+            area_by_filter,
+        )
+
     sca = int(detector[3:])
     wavelengths_nm = np.asarray(wavelengths_nm, dtype=float)
     weights = workflow.fit_model.trapezoid_weights(wavelengths_nm)
@@ -386,6 +398,211 @@ def evaluate_model_on_sample(
     }
 
 
+def evaluate_with_eric_cached_spectra(
+    model,
+    core,
+    detector: str,
+    source_ids,
+    common: pd.DataFrame,
+    wavelengths_nm,
+    photon_shapes,
+    area_by_filter,
+):
+    """Cache Eric-reader spectra by unique position/time, then apply its band integral."""
+    sca = int(detector[3:])
+    wavelengths_nm = np.asarray(wavelengths_nm, dtype=float)
+    weights = workflow.fit_model.trapezoid_weights(wavelengths_nm)
+    source_lookup = {source: index for index, source in enumerate(source_ids)}
+    filter_lookup = {name: index for index, name in enumerate(amber.FILTERS)}
+    pass_lookup = {name: index for index, name in enumerate(amber.PASSES)}
+    shape = (len(source_ids), len(amber.FILTERS), len(amber.PASSES))
+
+    source_index = common["source_id"].map(source_lookup).to_numpy(dtype=int)
+    filter_index = common["filter"].map(filter_lookup).to_numpy(dtype=int)
+    pass_index = common["pass"].map(pass_lookup).to_numpy(dtype=int)
+    if len(set(zip(source_index, filter_index, pass_index))) != len(common):
+        raise ValueError(f"{detector}: duplicate source/filter/pass cells in evaluation sample")
+
+    x_pixel = pd.to_numeric(common["x_pixel"], errors="coerce").to_numpy(float)
+    y_pixel = pd.to_numeric(common["y_pixel"], errors="coerce").to_numpy(float)
+    mjd = pd.to_numeric(common["mjd_amber"], errors="coerce").to_numpy(float)
+    if np.any(~np.isfinite(x_pixel) | ~np.isfinite(y_pixel) | ~np.isfinite(mjd)):
+        raise ValueError(f"{detector}: nonfinite position or time in matched cohort")
+
+    reference_mjd = utc_mjd(model.t0_utc)
+    relative_hours = (mjd - reference_mjd) * 24.0
+    model_valid_rows = np.asarray(model.valid(relative_hours), dtype=bool).reshape(-1)
+    if model_valid_rows.size != len(common):
+        raise ValueError(f"{detector}: v3 validity axis mismatch")
+    valid_rows = np.flatnonzero(model_valid_rows)
+    if not valid_rows.size:
+        raise ValueError(f"{detector}: no model-valid Amber measurements")
+
+    # Eric's reader maps pixel coordinates to superpixels before evaluating the
+    # response. Keep one representative pixel coordinate for each used cell.
+    all_superpixels = np.asarray(model.superpixel(sca, x_pixel, y_pixel), dtype=int)
+    unique_superpixels, first_row = np.unique(all_superpixels, return_index=True)
+    superpixel_for_row = np.searchsorted(unique_superpixels, all_superpixels)
+    used_superpixels = np.unique(all_superpixels[valid_rows])
+    reflectance = np.asarray(
+        model.reflectance(
+            sca,
+            x_pixel[first_row],
+            y_pixel[first_row],
+            wavelengths_nm,
+        )
+    )
+    if reflectance.shape != (unique_superpixels.size, wavelengths_nm.size):
+        raise ValueError(f"{detector}: Eric reader returned an unexpected reflectance shape")
+    _n, _kappa, fresnel = core.optics_at(
+        model.wavelength_nm,
+        model._n,
+        model._kappa,
+        model._b,
+        wavelengths_nm,
+    )
+    no_ice_transmission = np.asarray(
+        core.no_ice_transmission(reflectance, fresnel), dtype=float
+    )
+    if (
+        not np.isfinite(no_ice_transmission).all()
+        or np.any(no_ice_transmission <= 0.0)
+    ):
+        raise ValueError(f"{detector}: invalid Eric-reader no-ice transmission")
+
+    # response() vectorizes over positions and times as a Cartesian product.
+    # Group by one exact time at a time to evaluate only the position/time pairs
+    # actually present, reusing each returned spectrum across filters and stars.
+    valid_hours = relative_hours[valid_rows]
+    unique_hours, time_for_valid_row = np.unique(valid_hours, return_inverse=True)
+    response_by_valid_row = np.empty(
+        (valid_rows.size, wavelengths_nm.size), dtype=float
+    )
+    response_pair_count = 0
+    for time_index, hour in enumerate(unique_hours):
+        valid_indices_at_time = np.flatnonzero(time_for_valid_row == time_index)
+        rows_at_time = valid_rows[valid_indices_at_time]
+        row_superpixels = all_superpixels[rows_at_time]
+        spatial_cells, first_at_time, cell_for_row = np.unique(
+            row_superpixels, return_index=True, return_inverse=True
+        )
+        representative_rows = rows_at_time[first_at_time]
+        spectra = np.asarray(
+            model.response(
+                sca,
+                x_pixel[representative_rows],
+                y_pixel[representative_rows],
+                np.asarray([hour]),
+                wavelengths_nm,
+                gray=True,
+            ),
+            dtype=float,
+        )
+        expected_shape = (spatial_cells.size, 1, wavelengths_nm.size)
+        if spectra.shape != expected_shape:
+            raise ValueError(
+                f"{detector}: Eric reader returned response shape {spectra.shape}; "
+                f"expected {expected_shape}"
+            )
+        response_by_valid_row[valid_indices_at_time] = spectra[cell_for_row, 0, :]
+        response_pair_count += int(spatial_cells.size)
+        interval = max(1, unique_hours.size // 8)
+        if (time_index + 1) % interval == 0 or time_index + 1 == unique_hours.size:
+            print(
+                f"{detector}: Eric response cache {time_index + 1}/{unique_hours.size} "
+                f"times ({response_pair_count} unique position/time pairs)",
+                flush=True,
+            )
+
+    # This is the same integral implemented by Eric's unchanged
+    # IceResponseModel.band_response(no_ice_weight=True):
+    # sum(P * photon_SED * area * quadrature * S0) / sum(photon_SED * area * quadrature * S0).
+    spectral_weights_by_row = (
+        photon_shapes[source_index[valid_rows]]
+        * area_by_filter[filter_index[valid_rows]]
+        * weights[None, :]
+    )
+    no_ice_by_row = no_ice_transmission[superpixel_for_row[valid_rows]]
+    integration_weights = spectral_weights_by_row * no_ice_by_row
+    denominators = integration_weights.sum(axis=1)
+    numerators = np.einsum(
+        "rl,rl->r", response_by_valid_row, integration_weights, optimize=True
+    )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        integrated_responses = numerators / denominators
+    if (
+        not np.isfinite(integrated_responses).all()
+        or np.any(integrated_responses <= 0.0)
+        or not np.isfinite(denominators).all()
+        or np.any(denominators <= 0.0)
+    ):
+        raise ValueError(f"{detector}: invalid Eric-reader band integrals")
+
+    response = np.full(shape, np.nan, dtype=float)
+    response[source_index[valid_rows], filter_index[valid_rows], pass_index[valid_rows]] = (
+        integrated_responses
+    )
+
+    # Exercise Eric's public integration API on deterministic measurements
+    # spanning the cohort and fail if the cached/vectorized result diverges.
+    check_count = min(16, valid_rows.size)
+    check_positions = np.unique(
+        np.linspace(0, valid_rows.size - 1, check_count, dtype=int)
+    )
+    max_relative_error = 0.0
+    for valid_position in check_positions:
+        row = valid_rows[valid_position]
+        source = source_index[row]
+        fi = filter_index[row]
+        api_result = np.asarray(
+            model.band_response(
+                sca,
+                np.asarray([x_pixel[row]]),
+                np.asarray([y_pixel[row]]),
+                np.asarray([relative_hours[row]]),
+                wavelengths_nm,
+                photon_shapes[source] * area_by_filter[fi] * weights,
+                gray=True,
+                no_ice_weight=True,
+            ),
+            dtype=float,
+        )
+        api_value = float(api_result.reshape(-1)[0])
+        cached_value = float(
+            response[source, fi, pass_index[row]]
+        )
+        np.testing.assert_allclose(
+            cached_value,
+            api_value,
+            rtol=2e-12,
+            atol=2e-12,
+            err_msg=f"{detector}: cached Eric-reader integral differs from band_response",
+        )
+        max_relative_error = max(
+            max_relative_error,
+            abs(cached_value - api_value) / max(abs(api_value), 1e-300),
+        )
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_response = np.log(response)
+    predicted_delta_mag = -(
+        log_response - log_response[:, :, :1]
+    ) / workflow.LOG_FLUX_PER_MAG
+    model_valid_cells = np.isfinite(response)
+    return predicted_delta_mag, model_valid_cells, {
+        "evaluation_method": (
+            "unchanged Eric IceResponseModel.response and reflectance, with the same "
+            "band_response no_ice_weight=True weighted integral"
+        ),
+        "unique_reader_response_time_calls": int(unique_hours.size),
+        "unique_position_time_spectra": int(response_pair_count),
+        "band_response_validation_calls": int(check_positions.size),
+        "band_response_validation_max_relative_error": float(max_relative_error),
+        "model_valid_measurements": int(model_valid_rows.sum()),
+        "distinct_superpixels_used": int(used_superpixels.size),
+    }
+
+
 def summarize_metrics(detector, magnitude, valid, model_valid, variants):
     comparison = valid & valid[:, :, :1]
     comparison[:, :, 0] = False
@@ -496,7 +713,8 @@ def plot_comparison(cells: pd.DataFrame, output_dir: Path, detectors, output_suf
                 0.5,
                 0.025,
                 "Points are detector medians; bars are star 16th–84th percentiles; green band is ±0.5%. "
-                "Identical unchanged-reader band-response calculation for both H5s; no extra spectral weights. " + roll_note,
+                "Identical unchanged-reader response and band integral for both H5s; public band_response is checked. "
+                "No extra spectral weights. " + roll_note,
                 ha="center",
                 fontsize=9,
             )
@@ -611,8 +829,9 @@ def main(argv=None):
                 integration_checks[variant] = check
                 print(
                     f"{detector} {variant}: {check['model_valid_measurements']} model-valid "
-                    f"measurements; band_response check rel.err "
-                    f"{check['checked_band_response_relative_error']:.3g}",
+                    f"measurements; cached {check['unique_position_time_spectra']} Eric "
+                    f"position/time spectra; max public band_response check rel.err="
+                    f"{check['band_response_validation_max_relative_error']:.3g}",
                     flush=True,
                 )
 
@@ -672,7 +891,7 @@ def main(argv=None):
                 "our_joint_modulated_release": joint_modulated.version,
                 "amber_roll_offsets_applied": True,
                 "joint_fit_reference_included": True,
-                "integration_checks_json": json.dumps(integration_checks, sort_keys=True),
+                "reader_evaluation_json": json.dumps(integration_checks, sort_keys=True),
             }
             all_plot_cells.extend(rows)
             all_roll_plot_cells.extend(roll_rows)
@@ -838,9 +1057,19 @@ def main(argv=None):
             "saved joint-fit Amber roll offsets identically to all variants"
         ),
         "joint_photometry_normalization": (
-            "Exactly the same unchanged IceResponseModel.band_response call for both H5s: "
-            "gray=True, no_ice_weight=True, photon SED * detector effective area * quadrature weights. "
-            "No added H5 groups or model-specific weighting are used."
+            "Use the unchanged Eric reader's response and reflectance methods, caching spectra by "
+            "unique position/time. Apply the exact IceResponseModel.band_response no_ice_weight=True "
+            "integral with gray=True and photon SED * detector effective area * quadrature weights; "
+            "validate distributed measurements against the public band_response API. Both H5s use "
+            "the same reader calls, flags, and integral; no added H5 groups or model-specific "
+            "weighting are used."
+        ),
+        "reader_evaluation_method": (
+            "The unmodified Eric reader is imported from the supplied source archive. Each H5 is "
+            "loaded as IceResponseModel; its response spectrum is evaluated once per unique "
+            "position/time pair and its reflectance once per unique superpixel. The cached weighted "
+            "integral is checked against public band_response on 16 distributed measurements per "
+            "detector/model (or all measurements when fewer than 16 are valid)."
         ),
         "in_sample_control": (
             "the saved joint CAR190/Amber fit prediction is included as a reference; its Amber roll "
