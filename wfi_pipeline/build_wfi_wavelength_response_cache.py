@@ -46,7 +46,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    jax, _, _, _ = production.require_numpyro()
+    jax, _ = production.require_jax()
     jax.config.update("jax_enable_x64", True)
     entries = dict(tile_directory_entries(args.fit_root))
     tile_ids = sorted(entries) if args.tile_id is None else sorted(set(args.tile_id))

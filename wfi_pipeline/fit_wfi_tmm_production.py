@@ -292,16 +292,25 @@ def validate_ice_n_porosity_parameters(parameters):
     return tuple(float(value) for value in values)
 
 
-def require_numpyro():
-    """Load the JAX/NumPyro pieces used for EMCEE likelihoods and MAP."""
+def require_jax():
+    """Load JAX for deterministic optical-model calculations."""
     try:
         import jax
         import jax.numpy as jnp
+    except ModuleNotFoundError as error:
+        raise ModuleNotFoundError("This operation requires jax") from error
+    return jax, jnp
+
+
+def require_numpyro():
+    """Load JAX/NumPyro pieces used for probabilistic fits and MAP."""
+    jax, jnp = require_jax()
+    try:
         import numpyro
         import numpyro.distributions as dist
     except ModuleNotFoundError as error:
         raise ModuleNotFoundError(
-            "The production TMM fit requires jax and numpyro"
+            "The production TMM fit requires numpyro in addition to jax"
         ) from error
     return jax, jnp, numpyro, dist
 

@@ -787,16 +787,36 @@ class PipelineRun:
             raise RuntimeError(f"{detector}: six-LED cache is incomplete: {cache_root}")
         return cache_root
 
-    def _build_spectral_cache(self, detector, fit_root):
+    def _spectral_cache_fit_root(self, fit_root, six_led_cache_root):
+        """Return the TMM optical-fit tree used for spectral response grids."""
+        if self.profile.build_six_led_cache_from_current_tmm:
+            return Path(fit_root) / "fits"
+
+        from run_wfi_relative_response_production import cache_source_paths
+
+        source_caches = sorted(
+            Path(six_led_cache_root).glob("tile_*/relative_response.npz")
+        )
+        if not source_caches:
+            raise FileNotFoundError(
+                f"No six-LED source caches found under {six_led_cache_root}"
+            )
+        source_fit, _ = cache_source_paths(source_caches[0])
+        return source_fit.parent.parent
+
+    def _build_spectral_cache(self, detector, fit_root, six_led_cache_root):
         cache_root = detector_spectral_cache_root(
             self.output_path, self.profile.name, detector
         )
         if self._cache_complete(cache_root, "spectral_response.npz"):
             return cache_root
+        spectral_fit_root = self._spectral_cache_fit_root(
+            fit_root, six_led_cache_root
+        )
         command = [
             sys.executable,
             str(ROOT / "wfi_pipeline" / "build_wfi_wavelength_response_cache.py"),
-            "--fit-root", str(fit_root / "fits"),
+            "--fit-root", str(spectral_fit_root),
             "--output-root", str(cache_root),
             "--detector", detector,
             "--skip-existing",
@@ -1129,7 +1149,9 @@ class PipelineRun:
                         six_led_roots[detector], "relative_response.npz"
                     ):
                         raise FileNotFoundError(six_led_roots[detector])
-                self._build_spectral_cache(detector, fit_roots[detector])
+                self._build_spectral_cache(
+                    detector, fit_roots[detector], six_led_roots[detector]
+                )
                 self._run_tmm_plots(statistics_dir, detector, fit_roots[detector])
 
             base_bundle = self._build_base_bundle()

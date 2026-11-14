@@ -363,7 +363,7 @@ def build_response_lookup(
     compiled_predictor=None,
 ):
     """Evaluate six fixed-optics response curves relative to zero thickness."""
-    jax, jnp, _, _ = production.require_numpyro()
+    jax, jnp = production.require_jax()
     grid_nm = np.asarray(grid_nm, dtype=float).reshape(-1)
     if grid_nm.size < 2 or np.any(~np.isfinite(grid_nm)) or np.any(np.diff(grid_nm) <= 0.0):
         raise ValueError("Response grid must contain increasing finite values")
@@ -1806,7 +1806,7 @@ def build_spectral_response_lookup(
     wavelength and ice thickness.  The clean spectrum is retained so a later
     consumer can apply arbitrary filter, SED, and detector-QE weights.
     """
-    jax, jnp, _, _ = production.require_numpyro()
+    jax, jnp = production.require_jax()
     jax.config.update("jax_enable_x64", True)
     wavelengths = np.asarray(wavelengths_nm, dtype=float).reshape(-1)
     thickness = np.asarray(ice_thickness_nm, dtype=float).reshape(-1)

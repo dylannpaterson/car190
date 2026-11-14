@@ -77,6 +77,36 @@ class WfiPipelineTests(unittest.TestCase):
                 output / "production" / "wfi03" / "full_tmm",
             )
 
+    def test_cached_route_spectral_grid_uses_original_tmm_optical_fits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_fit_root = root / "pipeline" / "production" / "wfi01" / "relative_response"
+            cache_root = root / "20261109" / "pinned_cache" / "wfi01_400nm"
+            cache_file = cache_root / "tile_000" / "relative_response.npz"
+            cache_file.parent.mkdir(parents=True)
+            cache_file.touch()
+            source_fit = (
+                root / "20261109" / "production" / "wfi01" / "fits"
+                / "tile_000" / "posterior_samples.npz"
+            )
+            fake_run = SimpleNamespace(profile=profile_for(RELATIVE_RESPONSE))
+            with patch(
+                "run_wfi_relative_response_production.cache_source_paths",
+                return_value=(source_fit, root / "source_statistics.csv"),
+            ):
+                spectral_fit_root = pipeline.PipelineRun._spectral_cache_fit_root(
+                    fake_run, output_fit_root, cache_root
+                )
+            self.assertEqual(spectral_fit_root, source_fit.parent.parent)
+
+            full_tmm_run = SimpleNamespace(profile=profile_for(FULL_TMM))
+            self.assertEqual(
+                pipeline.PipelineRun._spectral_cache_fit_root(
+                    full_tmm_run, output_fit_root, cache_root
+                ),
+                output_fit_root / "fits",
+            )
+
     def test_output_layout_puts_logs_at_run_root(self):
         paths = output_paths(Path("/data/20261113/run"), RELATIVE_RESPONSE)
         self.assertEqual(paths["logs"], Path("/data/20261113/run/logs"))
