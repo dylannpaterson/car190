@@ -249,6 +249,66 @@ def load_bundle(path):
             if np.asarray(bundle[name]).shape != days.shape:
                 raise ValueError(f"Bundle {name} has an inconsistent shape")
         bundle["trajectory_included"] = True
+        reset_event_fields = (
+            "reset_event_days",
+            "reset_event_names",
+            "reset_event_tile_log_offsets",
+            "reset_event_tile_throughput_factors",
+        )
+        reset_event_present = [name in bundle for name in reset_event_fields]
+        if any(reset_event_present) and not all(reset_event_present):
+            missing = [
+                name
+                for name, present in zip(reset_event_fields, reset_event_present, strict=True)
+                if not present
+            ]
+            raise ValueError(f"Bundle has incomplete reset-event fields: {missing}")
+        if all(reset_event_present):
+            reset_days = np.asarray(bundle["reset_event_days"], dtype=float).reshape(-1)
+            reset_names = np.asarray(bundle["reset_event_names"]).astype(str).reshape(-1)
+            reset_offsets = np.asarray(
+                bundle["reset_event_tile_log_offsets"], dtype=float
+            )
+            reset_factors = np.asarray(
+                bundle["reset_event_tile_throughput_factors"], dtype=float
+            )
+            if (
+                reset_days.size == 0
+                or reset_names.shape != reset_days.shape
+                or np.any(~np.isfinite(reset_days))
+                or np.any(np.diff(reset_days) <= 0.0)
+            ):
+                raise ValueError("Bundle reset-event days/names are invalid")
+            if reset_offsets.shape != (tile_count, reset_days.size) or reset_factors.shape != reset_offsets.shape:
+                raise ValueError("Bundle reset-event tile arrays have inconsistent shapes")
+            if not np.allclose(reset_factors, np.exp(reset_offsets), rtol=1.0e-6, atol=1.0e-7):
+                raise ValueError("Bundle reset-event throughput factors do not match log offsets")
+            if "ice_reset_day" in bundle and not np.isclose(
+                float(np.asarray(bundle["ice_reset_day"]).reshape(-1)[0]),
+                reset_days[0], rtol=0.0, atol=1.0e-12,
+            ):
+                raise ValueError("Bundle first reset event differs from ice_reset_day")
+            if "post_reset_tile_log_offset" in bundle and not np.allclose(
+                np.asarray(bundle["post_reset_tile_log_offset"], dtype=float),
+                reset_offsets[:, 0],
+                rtol=0.0,
+                atol=1.0e-7,
+            ):
+                raise ValueError("Bundle first reset-event offsets differ from legacy fields")
+            if "post_third_decon_tile_log_offset" in bundle:
+                if reset_names.size < 2 or reset_names[1] != "third_decon" or not np.allclose(
+                    np.asarray(bundle["post_third_decon_tile_log_offset"], dtype=float),
+                    reset_offsets[:, 1],
+                    rtol=0.0,
+                    atol=1.0e-7,
+                ):
+                    raise ValueError("Bundle third-decon offsets differ from reset-event fields")
+            bundle["reset_events_included"] = True
+            bundle["reset_event_days"] = reset_days
+            bundle["reset_event_names"] = reset_names
+            bundle["reset_event_tile_log_offsets"] = reset_offsets
+        else:
+            bundle["reset_events_included"] = False
         grey_present = [name for name in grey_fields if name in bundle]
         if grey_present and len(grey_present) != len(grey_fields):
             missing = [name for name in grey_fields if name not in bundle]
@@ -345,6 +405,13 @@ def bundle_summary(bundle):
     else:
         summary["trajectory_included"] = False
         summary["grey_throughput_included"] = False
+    if bundle.get("reset_events_included", False):
+        summary["reset_events"] = [
+            {"name": str(name), "day": float(day)}
+            for name, day in zip(
+                bundle["reset_event_names"], bundle["reset_event_days"], strict=True
+            )
+        ]
     if bundle.get("grey_throughput_included", False):
         summary["grey_throughput_included"] = True
         summary["ice_reset_day"] = float(
@@ -440,6 +507,12 @@ def tile_trajectory(bundle, tile_id, detector=None):
             record["third_decon_day"] = float(
                 np.asarray(bundle["third_decon_day"], dtype=float).reshape(-1)[0]
             )
+    if bundle.get("reset_events_included", False):
+        record["reset_event_days"] = np.asarray(bundle["reset_event_days"], dtype=float)
+        record["reset_event_names"] = np.asarray(bundle["reset_event_names"]).astype(str)
+        record["reset_event_log_offsets"] = np.asarray(
+            bundle["reset_event_tile_log_offsets"][index], dtype=float
+        )
     return record
 
 

@@ -413,9 +413,12 @@ def main(argv=None):
     if bundle_utc.size != bundle_days.size:
         raise ValueError("The bundle observation-time labels do not match its time grid")
     reset_days = np.asarray(
-        [float(bundle["ice_reset_day"]), float(bundle["third_decon_day"])],
+        bundle.get(
+            "reset_event_days",
+            [float(bundle["ice_reset_day"]), float(bundle["third_decon_day"])],
+        ),
         dtype=float,
-    )
+    ).reshape(-1)
     episode = np.searchsorted(reset_days, bundle_days, side="right").astype(np.int8)
     deposition_fit = deposition_factorizations_on_blocks(
         bundle_days,

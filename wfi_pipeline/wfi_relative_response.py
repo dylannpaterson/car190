@@ -100,15 +100,14 @@ def portable_path_string(value, repository_root=None):
 
 
 def variable_sites(values):
-    """Return the ice-only sites present in a one- or two-reset fit."""
-    names = VARIABLE_SITES + tuple(
+    """Return the ice-only sites present in a reset-configured fit."""
+    reset_sites = tuple(
         name
-        for name in (
-            "third_decon_initial_thickness_log_nm",
-            "post_third_decon_tile_log_offset",
-        )
-        if name in values
+        for name in values
+        if name.startswith(("reset_", "third_decon_", "post_reset_", "post_third_decon_"))
+        and name not in VARIABLE_SITES
     )
+    names = VARIABLE_SITES + reset_sites
     if "led_log_offsets" in values:
         names += ("led_log_offsets",)
     return names
@@ -218,6 +217,7 @@ def load_warm_values(
     trajectory_rate_initialization_nm_day=PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY,
     fit_led_log_offsets=False,
     third_decon_initial_thickness_start_nm=None,
+    reset_event_initial_thickness_starts_nm=None,
 ):
     """Load source optical values and current-data ice initial values.
 
@@ -237,17 +237,17 @@ def load_warm_values(
         or trajectory_rate_initialization_nm_day <= 0.0
     ):
         raise ValueError("Trajectory-rate initialization must be positive and finite")
+    thickness_names, offset_names = production.reset_site_names(data)
     with np.load(Path(reference_fit), allow_pickle=False) as source:
-        for name in (
+        source_names = (
             "ar_tile_raw",
             "initial_thickness_log_nm",
-            "reset_initial_thickness_log_nm",
-            "post_reset_tile_log_offset",
-            "third_decon_initial_thickness_log_nm",
-            "post_third_decon_tile_log_offset",
             "absolute_hgcdte_n_log_scale",
             "absolute_hgcdte_k_log_scale",
-        ):
+            *thickness_names[1:],
+            *offset_names,
+        )
+        for name in source_names:
             if name in source:
                 values[name] = _strip_leading_axes(source[name], np.asarray(values[name]).shape)
         if "incidence_angle_deg" in values:
@@ -259,6 +259,7 @@ def load_warm_values(
     # Keep the source-statistics argument for cache provenance validation, but
     # never use its old trajectory to constrain the current data.
     del reference_statistics
+    starts = dict(reset_event_initial_thickness_starts_nm or {})
     if third_decon_initial_thickness_start_nm is not None:
         third_decon_initial_thickness_start_nm = float(
             third_decon_initial_thickness_start_nm
@@ -274,6 +275,25 @@ def load_warm_values(
             raise ValueError(
                 "Third-decon initial thickness start requires a third-decon fit"
             )
+        starts["third_decon"] = third_decon_initial_thickness_start_nm
+    thickness_names, _ = production.reset_site_names(data)
+    event_names = production._reset_event_names(data, len(thickness_names) - 1)
+    for index, (event_name, site_name) in enumerate(
+        zip(event_names, thickness_names[1:], strict=True)
+    ):
+        if event_name not in starts:
+            continue
+        start_nm = float(starts[event_name])
+        if not np.isfinite(start_nm) or start_nm <= 0.0:
+            raise ValueError(f"Reset event {event_name} thickness start must be positive")
+        values[site_name] = np.full_like(
+            np.asarray(values[site_name], dtype=float), np.log(start_nm)
+        )
+    if (
+        third_decon_initial_thickness_start_nm is not None
+        and "third_decon_initial_thickness_log_nm" in values
+        and "third_decon" not in event_names
+    ):
         values["third_decon_initial_thickness_log_nm"] = np.full_like(
             np.asarray(values["third_decon_initial_thickness_log_nm"], dtype=float),
             np.log(third_decon_initial_thickness_start_nm),

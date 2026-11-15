@@ -279,7 +279,9 @@ def _load_joint_ice_history(modulation_root, detector, modulation_item=None):
         parameters = np.asarray(archive["ice_parameters"], dtype=float)
     if baseline.shape != thickness.shape or baseline.shape != (256, times.size):
         raise ValueError(f"Invalid joint ice trajectory dimensions in {joint_path}")
-    trajectory = PerTileRateModulation(times, baseline, RESETS, spacing_days=2.0)
+    summary = dict(item["joint_ice_summary"])
+    reset_days = np.asarray(summary.get("reset_days", RESETS), dtype=float).reshape(-1)
+    trajectory = PerTileRateModulation(times, baseline, reset_days, spacing_days=2.0)
     if parameters.shape != (256, trajectory.parameter_count):
         raise ValueError(f"Invalid joint ice parameter dimensions in {joint_path}")
     np.testing.assert_allclose(trajectory.evaluate(parameters), thickness, rtol=0, atol=2e-8)
@@ -290,8 +292,7 @@ def _load_joint_ice_history(modulation_root, detector, modulation_item=None):
         if np.any(slopes < -1e-7):
             raise ValueError(f"Joint fitted ice trajectory decreases in a growth stage: {joint_path}")
         rates[:, indices] = np.concatenate([slopes, slopes[:, -1:]], axis=1)
-    summary = dict(item["joint_ice_summary"])
-    summary.setdefault("reset_days", RESETS.tolist())
+    summary.setdefault("reset_days", reset_days.tolist())
     summary.setdefault("ice_parameters_per_tile", int(parameters.shape[1]))
     summary.setdefault("total_ice_parameters", int(parameters.size))
     summary.setdefault("rate_control_spacing_days", 2.0)
@@ -724,6 +725,9 @@ def build_bundle(args):
     third_decon_included = None
     post_third_decon_offsets = np.empty(tile_count, dtype=np.float64)
     third_decon_offsets_present = False
+    reset_event_days = None
+    reset_event_names = None
+    reset_event_offsets = None
 
     fit_root = Path(args.fit_root)
     detector_fit_roots = {
@@ -752,6 +756,9 @@ def build_bundle(args):
         start_times = np.asarray(trajectory["start_times"]).astype(str)
         reset_day = float(trajectory["reset_day"])
         local_third_day = trajectory["third_day"]
+        local_reset_days = np.asarray(trajectory["reset_days"], dtype=float)
+        local_reset_names = np.asarray(trajectory["reset_names"]).astype(str)
+        local_reset_offsets = np.asarray(trajectory["reset_offsets"], dtype=float)
         joint_history = joint_ice_histories.get(detector) if joint_fit_kind else None
         joint_tile_ice = joint_tile_rates = None
         if joint_fit_kind:
@@ -770,6 +777,11 @@ def build_bundle(args):
             ice_reset_day = reset_day
             third_decon_day = local_third_day
             third_decon_included = local_third_day is not None
+            reset_event_days = local_reset_days.copy()
+            reset_event_names = local_reset_names.copy()
+            reset_event_offsets = np.empty(
+                (tile_count, reset_event_days.size), dtype=np.float64
+            )
             latest_fit_settings = {
                 name: np.asarray(fit[name]).reshape(-1)[0].item()
                 for name in (
@@ -797,6 +809,10 @@ def build_bundle(args):
                 float(local_third_day), float(third_decon_day), rtol=0.0, atol=1.0e-12
             ):
                 raise ValueError(f"Third-decon day differs in {fit_path}")
+            if not np.array_equal(local_reset_names, reset_event_names) or not np.allclose(
+                local_reset_days, reset_event_days, rtol=0.0, atol=1.0e-12
+            ):
+                raise ValueError(f"Reset-event metadata differs in {fit_path}")
             for name, reference in observation_fields.items():
                 _same_values(reference, fit[name], name, fit_path)
 
@@ -831,16 +847,16 @@ def build_bundle(args):
         tile_rates = np.asarray(trajectory["rates"], dtype=float)
         if joint_fit_kind:
             expected_resets = np.asarray(joint_history["summary"]["reset_days"], dtype=float)
-            if (expected_resets.size != 2
-                    or not np.isclose(reset_day, expected_resets[0], rtol=0.0, atol=1.0e-10)
-                    or local_third_day is None
-                    or not np.isclose(float(local_third_day), expected_resets[1], rtol=0.0, atol=1.0e-10)):
+            if not np.allclose(
+                expected_resets, local_reset_days, rtol=0.0, atol=1.0e-10
+            ):
                 raise ValueError(f"Joint ice reset boundaries differ from source fit {fit_path}")
             tile_thickness, tile_rates = joint_tile_ice, joint_tile_rates
         if not np.isfinite(tile_thickness).all() or not np.isfinite(tile_rates).all():
             raise ValueError(f"Nonfinite ice trajectory in {fit_path}")
         tile_ice_thickness[tile_index] = np.asarray(tile_thickness, dtype=np.float32)
         tile_rate[tile_index] = np.asarray(tile_rates, dtype=np.float32)
+        reset_event_offsets[tile_index] = local_reset_offsets
         post_reset_offsets[tile_index] = float(trajectory["grey_offset"])
         if third_decon_included:
             if trajectory["third_offset"] is None:
@@ -921,6 +937,12 @@ def build_bundle(args):
             "post_reset_tile_log_offset": post_reset_offsets,
             "post_reset_tile_throughput_factor": np.exp(post_reset_offsets).astype(np.float32),
             "ice_reset_day": np.asarray(ice_reset_day, dtype=np.float64),
+            "reset_event_days": np.asarray(reset_event_days, dtype=np.float64),
+            "reset_event_names": string_array(reset_event_names),
+            "reset_event_tile_log_offsets": reset_event_offsets.astype(np.float32),
+            "reset_event_tile_throughput_factors": np.exp(
+                reset_event_offsets
+            ).astype(np.float32),
             "fit_paths": string_array(fit_paths),
             "optical_cache_paths": string_array(optical_cache_paths),
             "optical_fit_paths": string_array(optical_fit_paths),

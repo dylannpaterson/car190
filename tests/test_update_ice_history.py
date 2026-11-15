@@ -1,8 +1,12 @@
+import h5py
 import numpy as np
 
 from wfi_pipeline.update_ice_history import (
     build_tile_led_lookup,
+    find_bundle_root,
+    h5_fit_batch_size,
     lookup_tile_history,
+    rate_spline_knot_days,
 )
 
 
@@ -127,3 +131,39 @@ def test_h5_lookup_recovers_full_thickness_history_from_six_led_statistics():
     )
     assert records[-1]["repeat"] == 2
     assert np.isfinite(rates).all()
+
+
+def test_48h_rate_knots_keep_resets_and_batch_size_adapts_to_cadence():
+    resets = np.asarray([12.907397928240743, 38.79784510416666])
+    thinned = {
+        "days": np.linspace(0.0, 60.0, 815),
+        "node_days": np.linspace(0.1, 59.9, 136),
+        "reset_days": resets,
+        "counts": np.ones((1, 815)),
+    }
+    unthinned = {
+        **thinned,
+        "node_days": np.linspace(0.01, 59.99, 2600),
+        "counts": np.ones((1, 16000)),
+    }
+
+    knots = rate_spline_knot_days(thinned, spacing_days=2.0)
+    np.testing.assert_array_equal(knots[np.isin(knots, resets)], resets)
+    assert np.max(np.diff(knots)) <= 2.0 + 1.0e-12
+    assert h5_fit_batch_size(thinned, knots) == 256
+    assert h5_fit_batch_size(unthinned, knots) < 256
+
+
+def test_bundle_root_uses_h5_provenance_when_h5_was_copied(tmp_path):
+    original_bundle_root = tmp_path / "run" / "production" / "wavelength_response_bundle"
+    original_bundle_root.mkdir(parents=True)
+    (original_bundle_root / "wfi_all_2nm_rank16.npz").touch()
+    modulated = original_bundle_root / "wfi_all_2nm_rank16_modulated.npz"
+    modulated.touch()
+    copied_h5 = tmp_path / "modeling" / "joint_modulated_v2.h5"
+    copied_h5.parent.mkdir()
+    with h5py.File(copied_h5, "w") as h5:
+        instrument = h5.create_group("instrument")
+        instrument.attrs["fitted_gray_source_bundle"] = str(modulated)
+
+    assert find_bundle_root(copied_h5) == original_bundle_root

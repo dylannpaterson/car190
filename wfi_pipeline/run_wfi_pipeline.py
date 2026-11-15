@@ -57,6 +57,7 @@ from wfi_pipeline_defaults import (
     pinned_relative_response_cache,
     profile_for,
 )
+from reset_events import DEFAULT_RESET_CONFIG, load_reset_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -165,6 +166,47 @@ class PipelineRun:
         self.input_path = Path(input_path).expanduser().resolve()
         self.output_path = Path(output_path).expanduser().resolve()
         self.profile = profile_for(route)
+        self.reset_config = load_reset_config(DEFAULT_RESET_CONFIG)
+        self.reset_events = tuple(self.reset_config["events"])
+        self.third_decon_day = (
+            float(self.reset_events[1]["day"])
+            if len(self.reset_events) > 1
+            else None
+        )
+        self.reset_warmup_events = tuple(
+            event for event in self.reset_events if event.get("relative_response_warmup")
+        )
+        self.reset_warmup_start_nm = (
+            float(self.reset_warmup_events[0]["relative_response_warmup"]["start_nm"])
+            if self.reset_warmup_events
+            else None
+        )
+        self.reset_warmup_log_sigma = (
+            float(self.reset_warmup_events[0]["relative_response_warmup"]["log_sigma"])
+            if self.reset_warmup_events
+            else None
+        )
+        self.reset_warmup_stages = (
+            "third-decon"
+            if self.reset_warmup_events
+            and self.reset_warmup_events[0]["name"] == "third_decon"
+            else (
+                f"reset-event:{self.reset_warmup_events[0]['name']}"
+                if self.reset_warmup_events
+                else None
+            )
+        )
+        warmup_labels = [
+            f"{event['name']}_start{event['relative_response_warmup']['start_nm']:g}"
+            for event in self.reset_warmup_events
+        ]
+        if len(warmup_labels) == 1 and self.reset_warmup_events[0]["name"] == "third_decon":
+            warmup_labels[0] = f"start{self.reset_warmup_start_nm:g}"
+        self.warmup_output_name = (
+            "relative_response_constant_rate_warmup_" + "_".join(warmup_labels)
+            if warmup_labels
+            else "relative_response_constant_rate_warmup"
+        )
         self.paths = output_paths(self.output_path, route)
         self.manifest_path = self.paths["manifest"]
         self.manifest = None
@@ -260,7 +302,12 @@ class PipelineRun:
             "tile_size_pixels": profile.tile_size_pixels,
             "thinning_spacing_hours": THINNING_SPACING_HOURS,
             "sed_weighting": PRODUCTION_SED_WEIGHTING,
-            "third_decon_day": profile.third_decon_day,
+            "third_decon_day": self.third_decon_day,
+            "reset_configuration": {
+                "path": str(self.reset_config["path"]),
+                "sha256": self.reset_config["sha256"],
+                "events": [dict(event) for event in self.reset_events],
+            },
             "trajectory_rate_prior_mean_nm_day": PRODUCTION_RATE_PRIOR_MEAN_NM_DAY,
             "workers": profile.workers,
             "six_led_cache_policy": (
@@ -268,9 +315,9 @@ class PipelineRun:
                 if profile.use_pinned_six_led_cache
                 else "build_from_current_full_tmm_fit"
             ),
-            "relative_warmup_third_decon_start_nm": profile.warmup_third_decon_start_nm,
-            "relative_warmup_prior_log_sigma": profile.warmup_prior_log_sigma,
-            "relative_warmup_prior_stages": profile.warmup_prior_stages,
+            "relative_warmup_third_decon_start_nm": self.reset_warmup_start_nm,
+            "relative_warmup_prior_log_sigma": self.reset_warmup_log_sigma,
+            "relative_warmup_prior_stages": self.reset_warmup_stages,
             "fit_led_log_offsets": profile.fit_led_log_offsets,
             "led_log_offset_prior_sigma_log": profile.led_log_offset_prior_sigma_log,
             "relative_batch_size": profile.relative_batch_size,
@@ -444,11 +491,12 @@ class PipelineRun:
                 and mode.get("fit_led_log_offsets") is True
                 and float(mode.get("led_log_offset_prior_sigma_log", -1.0))
                 == self.profile.led_log_offset_prior_sigma_log
-                and mode.get("third_decon_day") == self.profile.third_decon_day
+                and mode.get("third_decon_day") == self.third_decon_day
                 and mode.get("thickness_prior_log_sigma")
-                == self.profile.warmup_prior_log_sigma
+                == self.reset_warmup_log_sigma
                 and mode.get("thickness_prior_stages")
-                == self.profile.warmup_prior_stages
+                == self.reset_warmup_stages
+                and mode.get("reset_config_sha256") == self.reset_config["sha256"]
                 and mode.get("batch_size") == self.profile.relative_batch_size
                 and mode.get("joint_batch") is False
                 and float(mode.get("trajectory_entropy_weight", -1.0)) == 0.0
@@ -470,9 +518,20 @@ class PipelineRun:
         if (
             warmup_mode.get("detector") != detector
             or warmup_mode.get("tile_size") != TILE_SIZE_PIXELS
-            or warmup_mode.get("third_decon_day") != self.profile.third_decon_day
+            or warmup_mode.get("third_decon_day") != self.third_decon_day
             or warmup_mode.get("third_decon_initial_thickness_start_nm")
-            != self.profile.warmup_third_decon_start_nm
+            != (
+                self.reset_warmup_start_nm
+                if self.reset_warmup_events
+                and self.reset_warmup_events[0]["name"] == "third_decon"
+                else None
+            )
+            or warmup_mode.get("reset_event_initial_thickness_starts_nm")
+            != {
+                event["name"]: float(event["relative_response_warmup"]["start_nm"])
+                for event in self.reset_warmup_events
+            }
+            or warmup_mode.get("reset_config_sha256") != self.reset_config["sha256"]
             or warmup_mode.get("fit_led_log_offsets") is not True
             or float(warmup_mode.get("led_log_offset_prior_sigma_log", -1.0))
             != self.profile.led_log_offset_prior_sigma_log
@@ -499,14 +558,19 @@ class PipelineRun:
                     tile_fit,
                     tile_stats,
                     cache_path,
-                    third_decon_day=self.profile.third_decon_day,
+                    third_decon_day=self.third_decon_day,
                     fit_led_log_offsets=self.profile.fit_led_log_offsets,
                     led_log_offset_prior_sigma_log=(
                         self.profile.led_log_offset_prior_sigma_log
                     ),
                     warmup_prior_root=warmup_root,
-                    thickness_prior_log_sigma=self.profile.warmup_prior_log_sigma,
-                    thickness_prior_stages=self.profile.warmup_prior_stages,
+                    thickness_prior_log_sigma=self.reset_warmup_log_sigma,
+                    thickness_prior_stages=self.reset_warmup_stages,
+                    reset_events=self.reset_events,
+                    reset_event_initial_thickness_starts_nm={
+                        event["name"]: event["relative_response_warmup"]["start_nm"]
+                        for event in self.reset_warmup_events
+                    },
                 )
             ):
                 return None
@@ -586,7 +650,7 @@ class PipelineRun:
             source_warmup = prior["source_warmup_root"]
             target_warmup = (
                 self.paths["production"] / detector.lower()
-                / "relative_response_constant_rate_warmup_start40"
+                / self.warmup_output_name
             )
             target_warmup.parent.mkdir(parents=True, exist_ok=True)
             if not target_warmup.exists():
@@ -663,7 +727,7 @@ class PipelineRun:
                 "--detector", detector,
                 "--tile-size", str(TILE_SIZE_PIXELS),
                 "--output-root", str(fit_root),
-                "--third-decon-day", str(profile.third_decon_day),
+                "--reset-config", str(self.reset_config["path"]),
                 "--workers", str(profile.workers),
             ]
             status = fit_root / "production_status.json"
@@ -680,7 +744,7 @@ class PipelineRun:
                 raise FileNotFoundError(f"Pinned six-LED response cache is missing: {cache_root}")
             warmup_root = (
                 self.paths["production"] / detector.lower()
-                / "relative_response_constant_rate_warmup_start40"
+                / self.warmup_output_name
             )
             warmup_outputs = [
                 warmup_root / "relative_response_constant_rate_warmup_mode.json",
@@ -694,9 +758,7 @@ class PipelineRun:
                 "--tile-size", str(TILE_SIZE_PIXELS),
                 "--response-cache-root", str(cache_root),
                 "--output-root", str(warmup_root),
-                "--third-decon-day", str(profile.third_decon_day),
-                "--third-decon-initial-thickness-start-nm",
-                str(profile.warmup_third_decon_start_nm),
+                "--reset-config", str(self.reset_config["path"]),
                 "--fit-led-log-offsets",
                 "--led-log-offset-prior-sigma-log",
                 str(profile.led_log_offset_prior_sigma_log),
@@ -721,10 +783,10 @@ class PipelineRun:
                 "--tile-size", str(TILE_SIZE_PIXELS),
                 "--output-root", str(fit_root),
                 "--response-cache-root", str(cache_root),
-                "--third-decon-day", str(profile.third_decon_day),
+                "--reset-config", str(self.reset_config["path"]),
                 "--warmup-prior-root", str(warmup_root),
-                "--thickness-prior-log-sigma", str(profile.warmup_prior_log_sigma),
-                "--thickness-prior-stages", str(profile.warmup_prior_stages),
+                "--thickness-prior-log-sigma", str(self.reset_warmup_log_sigma),
+                "--thickness-prior-stages", str(self.reset_warmup_stages),
                 "--fit-led-log-offsets",
                 "--led-log-offset-prior-sigma-log",
                 str(profile.led_log_offset_prior_sigma_log),
@@ -920,6 +982,7 @@ class PipelineRun:
                 str(ROOT / "wfi_pipeline" / "run_joint_car190_amber_inverse_wavelength_maxent.py"),
                 "--detector", detector,
                 "--statistics-dir", str(statistics_dir),
+                "--reset-config", str(self.reset_config["path"]),
                 "--production-root", str(self.paths["production"]),
                 "--joint-input-root", str(fit_root),
                 "--optical-cache-root", str(optical_root),

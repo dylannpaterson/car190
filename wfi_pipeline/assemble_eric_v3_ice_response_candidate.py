@@ -240,23 +240,29 @@ def build(args):
     with np.load(source_bundle_path, allow_pickle=False) as source_bundle:
         bundle_detectors = np.asarray(source_bundle["detectors"]).astype(str)
         bundle_tile_ids = np.asarray(source_bundle["tile_ids"], dtype=int)
-        post_reset_offsets = np.asarray(
-            source_bundle["post_reset_tile_log_offset"], dtype=float
-        )
-        if "post_third_decon_tile_log_offset" not in source_bundle:
-            raise ValueError("The source bundle has no fitted third-decon gray offsets")
-        post_third_offsets = np.asarray(
-            source_bundle["post_third_decon_tile_log_offset"], dtype=float
-        )
-    if not (
-        bundle_detectors.shape
-        == bundle_tile_ids.shape
-        == post_reset_offsets.shape
-        == post_third_offsets.shape
+        if "reset_event_tile_log_offsets" in source_bundle:
+            event_offsets = np.asarray(
+                source_bundle["reset_event_tile_log_offsets"], dtype=float
+            )
+            reset_event_names = np.asarray(
+                source_bundle.get("reset_event_names", [] )
+            ).astype(str).reshape(-1)
+        else:
+            event_offsets = np.column_stack(
+                (
+                    np.asarray(source_bundle["post_reset_tile_log_offset"], dtype=float),
+                    np.asarray(source_bundle["post_third_decon_tile_log_offset"], dtype=float),
+                )
+            )
+            reset_event_names = np.asarray(["program1063_reset", "third_decon"])
+    if (
+        bundle_detectors.shape != bundle_tile_ids.shape
+        or event_offsets.ndim != 2
+        or event_offsets.shape[0] != bundle_tile_ids.size
     ):
         raise ValueError("Source-bundle gray arrays do not share the tile axis")
-    if reset_days.shape != (2,) or np.any(np.diff(reset_days) <= 0.0):
-        raise ValueError(f"Expected two ordered fitted gray resets, received {reset_days}")
+    if reset_days.shape != (event_offsets.shape[1],) or np.any(np.diff(reset_days) <= 0.0):
+        raise ValueError(f"Fitted reset boundaries and gray offsets differ: {reset_days}")
     bundle_gray_index = {}
     for index, (detector, tile_id) in enumerate(
         zip(bundle_detectors, bundle_tile_ids, strict=True)
@@ -314,11 +320,24 @@ def build(args):
             dtype=np.int64,
             count=fine_count,
         )
-        first_log_gray = post_reset_offsets[gray_indices]
-        second_log_gray = post_third_offsets[gray_indices]
-        fitted_gray = np.column_stack(
-            (np.expm1(first_log_gray), np.exp(second_log_gray) - np.exp(first_log_gray))
-        ).astype(np.float64)
+        selected_offsets = event_offsets[gray_indices]
+        if reset_event_names.size == 2 and reset_event_names[1] == "third_decon":
+            # Preserve the validated two-reset gray convention. New event lists
+            # use incremental offsets, converted to cumulative episode factors.
+            first_log_gray = selected_offsets[:, 0]
+            third_log_gray = selected_offsets[:, 1]
+            fitted_gray = np.column_stack(
+                (
+                    np.expm1(first_log_gray),
+                    np.exp(third_log_gray) - np.exp(first_log_gray),
+                )
+            ).astype(np.float64)
+        else:
+            cumulative_log_gray = np.cumsum(selected_offsets, axis=1)
+            previous_gray = np.column_stack(
+                (np.zeros(fine_count), np.exp(cumulative_log_gray[:, :-1]))
+            )
+            fitted_gray = (np.exp(cumulative_log_gray) - previous_gray).astype(np.float64)
         if not np.isfinite(fitted_gray).all():
             raise ValueError("Nonfinite fitted gray factors while expanding to Eric superpixels")
         gray_time_shift_hours = (utc_mjd(base_t0) - utc_mjd(reference_utc)) * 24.0
@@ -344,13 +363,26 @@ def build(args):
         # the original calibration-step UTC boundaries; the current fit's gray
         # reset boundaries are already relative to the new model origin.
         if "gray_period_hours" in instrument:
-            instrument["gray_period_hours"][...] = reset_days * 24.0
+            gray_period = instrument["gray_period_hours"]
+            values = reset_days * 24.0
+            if gray_period.shape != values.shape:
+                dtype = gray_period.dtype
+                del instrument["gray_period_hours"]
+                instrument.create_dataset("gray_period_hours", data=values, dtype=dtype)
+            else:
+                gray_period[...] = values
         if "step_boundary_hours" in instrument:
             instrument["step_boundary_hours"][...] = (
                 np.asarray(instrument["step_boundary_hours"], dtype=float)
                 + gray_time_shift_hours
             )
-        instrument["gray"][...] = fitted_gray
+        gray_dataset = instrument["gray"]
+        if gray_dataset.shape != fitted_gray.shape:
+            dtype = gray_dataset.dtype
+            del instrument["gray"]
+            instrument.create_dataset("gray", data=fitted_gray.astype(dtype), dtype=dtype)
+        else:
+            gray_dataset[...] = fitted_gray
         instrument.attrs["fitted_gray_source_bundle"] = str(source_bundle_path.resolve())
         instrument.attrs["time_origin_shift_hours_for_joint_prototype"] = float(
             gray_time_shift_hours

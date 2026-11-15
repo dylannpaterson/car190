@@ -175,19 +175,47 @@ def load_fit_trajectory(path):
     ).reshape(-1)
     if thickness.shape != days.shape or rates.shape != days.shape:
         raise ValueError(f"Fit trajectory shape mismatch in {path}")
-    grey_offset = float(np.asarray(fit["post_reset_tile_log_offset"]).reshape(-1)[0])
-    reset_day = float(np.asarray(fit["ice_reset_day"]).reshape(-1)[0])
-    third_offset = None
-    third_day = None
-    if "post_third_decon_tile_log_offset" in fit or "third_decon_day" in fit:
-        if "post_third_decon_tile_log_offset" not in fit or "third_decon_day" not in fit:
-            raise ValueError(f"Incomplete third-decon fields in {path}")
-        third_offset = float(
-            np.asarray(fit["post_third_decon_tile_log_offset"]).reshape(-1)[0]
-        )
-        third_day = float(np.asarray(fit["third_decon_day"]).reshape(-1)[0])
-        if not np.isfinite(third_day) or third_day <= reset_day:
-            raise ValueError(f"Invalid third-decon day in {path}")
+    if "reset_event_days" in fit:
+        reset_days = np.asarray(fit["reset_event_days"], dtype=float).reshape(-1)
+        reset_names = np.asarray(fit["reset_event_names"]).astype(str).reshape(-1)
+        reset_offsets = np.asarray(
+            fit["reset_event_tile_log_offsets"], dtype=float
+        ).reshape(-1)
+    else:
+        reset_days = np.asarray([fit["ice_reset_day"]], dtype=float).reshape(-1)
+        reset_names = np.asarray(["program1063_reset"], dtype=str)
+        reset_offsets = np.asarray(
+            [fit["post_reset_tile_log_offset"]], dtype=float
+        ).reshape(-1)
+        if "third_decon_day" in fit:
+            reset_days = np.r_[
+                reset_days, float(np.asarray(fit["third_decon_day"]).item())
+            ]
+            reset_names = np.r_[reset_names, "third_decon"]
+            reset_offsets = np.r_[
+                reset_offsets,
+                float(np.asarray(fit["post_third_decon_tile_log_offset"]).reshape(-1)[0]),
+            ]
+    if (
+        reset_days.size == 0
+        or reset_names.size != reset_days.size
+        or reset_offsets.size != reset_days.size
+        or np.any(~np.isfinite(reset_days))
+        or np.any(np.diff(reset_days) <= 0.0)
+    ):
+        raise ValueError(f"Invalid reset-event metadata in {path}")
+    grey_offset = float(reset_offsets[0])
+    reset_day = float(reset_days[0])
+    third_offset = (
+        float(reset_offsets[1])
+        if reset_names.size > 1 and reset_names[1] == "third_decon"
+        else None
+    )
+    third_day = (
+        float(reset_days[1])
+        if reset_names.size > 1 and reset_names[1] == "third_decon"
+        else None
+    )
     return {
         "fit": fit,
         "days": days,
@@ -198,6 +226,9 @@ def load_fit_trajectory(path):
         "reset_day": reset_day,
         "third_offset": third_offset,
         "third_day": third_day,
+        "reset_days": reset_days,
+        "reset_names": reset_names,
+        "reset_offsets": reset_offsets,
     }
 
 
@@ -219,6 +250,8 @@ def main():
     ice_reset_day = None
     third_decon_day = None
     third_decon_included = False
+    reset_event_days = None
+    reset_event_names = None
     observation_fields = {}
     fit_roots = {}
     for detector, cache_root in cache_roots:
@@ -260,6 +293,9 @@ def main():
                 reset_day = trajectory["reset_day"]
                 tile_third_offset = trajectory["third_offset"]
                 fit_third_day = trajectory["third_day"]
+                fit_reset_days = trajectory["reset_days"]
+                fit_reset_names = trajectory["reset_names"]
+                fit_reset_offsets = trajectory["reset_offsets"]
                 fit_detector = str(np.asarray(fit["sca_names"]).reshape(-1)[0]).upper()
                 fit_tile_id = int(np.asarray(fit["tile_ids"]).reshape(-1)[0])
                 if (fit_detector, fit_tile_id) != (detector, tile_id):
@@ -270,6 +306,8 @@ def main():
                     ice_reset_day = reset_day
                     third_decon_day = fit_third_day
                     third_decon_included = fit_third_day is not None
+                    reset_event_days = fit_reset_days.copy()
+                    reset_event_names = fit_reset_names.copy()
                     for name in (
                         "observation_led",
                         "observation_repeat",
@@ -287,6 +325,10 @@ def main():
                     fit_third_day, third_decon_day, rtol=0.0, atol=1.0e-12
                 ):
                     raise ValueError(f"Third-decon day differs in {fit_path}")
+                if not np.array_equal(fit_reset_names, reset_event_names) or not np.allclose(
+                    fit_reset_days, reset_event_days, rtol=0.0, atol=1.0e-12
+                ):
+                    raise ValueError(f"Reset-event metadata differs in {fit_path}")
                 if not np.array_equal(start_times, observation_start_time):
                     raise ValueError(f"Observation start times differ in {fit_path}")
                 for name, reference in observation_fields.items():
@@ -338,6 +380,7 @@ def main():
                         "tile_ice_thickness": tile_ice.astype(np.float32),
                         "tile_instantaneous_rate_nm_day": tile_rate.astype(np.float32),
                         "post_reset_tile_log_offset": np.float32(grey_offset),
+                        "reset_event_log_offsets": fit_reset_offsets.astype(np.float32),
                         "fit_path": str(Path(fit_path).resolve()),
                         "statistics_path": str(
                             np.asarray(fit["statistics_path"]).reshape(-1)[0]
@@ -443,6 +486,10 @@ def main():
                 },
             }
         )
+        metadata["reset_events"] = [
+            {"name": str(name), "day": float(day)}
+            for name, day in zip(reset_event_names, reset_event_days, strict=True)
+        ]
         if third_decon_included:
             metadata.update(
                 {
@@ -490,6 +537,18 @@ def main():
                 )
             ).astype(np.float32),
             "ice_reset_day": np.asarray(ice_reset_day, dtype=np.float64),
+            "reset_event_days": np.asarray(reset_event_days, dtype=np.float64),
+            "reset_event_names": string_array(reset_event_names),
+            "reset_event_tile_log_offsets": np.asarray(
+                [record["reset_event_log_offsets"] for record in records],
+                dtype=np.float32,
+            ),
+            "reset_event_tile_throughput_factors": np.exp(
+                np.asarray(
+                    [record["reset_event_log_offsets"] for record in records],
+                    dtype=np.float64,
+                )
+            ).astype(np.float32),
             "fit_paths": string_array([record["fit_path"] for record in records]),
             "statistics_paths": string_array(
                 [record["statistics_path"] for record in records]

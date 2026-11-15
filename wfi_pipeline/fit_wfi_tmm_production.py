@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from assess_rcs_spectral_identifiability import load_qe, load_sed
+from reset_events import resolve_reset_events
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -183,15 +184,21 @@ def reset_days_for_data(data):
 def reset_initial_thickness_site_names(prior, reset_count=1):
     """Return the initial-thickness site followed by one site per reset."""
     reset_count = int(reset_count)
-    if reset_count not in (1, 2):
-        raise ValueError("Production supports the existing reset and one optional third decon")
+    if reset_count < 1:
+        raise ValueError("At least one reset event is required")
     prior, _, names = _initial_thickness_settings(
         prior, INITIAL_THICKNESS_HALF_NORMAL_SIGMA_NM
     )
     suffix = "_log_nm" if prior == INITIAL_THICKNESS_PRIOR_LOGNORMAL else "_nm"
     reset_names = [names[1]]
-    if reset_count > 1:
-        reset_names.append(f"third_decon_initial_thickness{suffix}")
+    reset_names.extend(
+        (
+            "third_decon_initial_thickness" + suffix
+            if index == 1
+            else f"reset_event_{index + 1}_initial_thickness{suffix}"
+        )
+        for index in range(1, reset_count)
+    )
     return (names[0], *reset_names)
 
 
@@ -202,16 +209,52 @@ def reset_offset_site_names(reset_count=1):
         raise ValueError("At least one reset site is required")
     return (
         "post_reset_tile_log_offset",
-        *("post_third_decon_tile_log_offset" for _ in range(reset_count - 1)),
+        *(
+            "post_third_decon_tile_log_offset"
+            if index == 1
+            else f"post_reset_event_{index + 1}_tile_log_offset"
+            for index in range(1, reset_count)
+        ),
     )
+
+
+def _reset_event_names(data, reset_count):
+    names = tuple(str(value) for value in data.get("reset_event_names", ()))
+    if not names:
+        names = ("program1063_reset",) + tuple(
+            "third_decon" if index == 1 else f"reset_event_{index + 1}"
+            for index in range(1, reset_count)
+        )
+    if len(names) != reset_count:
+        raise ValueError("Reset event names do not match the configured reset days")
+    return names
+
+
+def _reset_site_names_for_events(prior, event_names):
+    prior, _, names = _initial_thickness_settings(
+        prior, INITIAL_THICKNESS_HALF_NORMAL_SIGMA_NM
+    )
+    suffix = "_log_nm" if prior == INITIAL_THICKNESS_PRIOR_LOGNORMAL else "_nm"
+    thickness_names = [names[0]]
+    offset_names = []
+    for index, event_name in enumerate(event_names):
+        if index == 0:
+            token = "reset"
+        elif index == 1 and event_name == "third_decon":
+            token = "third_decon"
+        else:
+            token = f"reset_event_{index + 1}"
+        thickness_names.append(f"{token}_initial_thickness{suffix}")
+        offset_names.append(f"post_{token}_tile_log_offset")
+    return tuple(thickness_names), tuple(offset_names)
 
 
 def reset_site_names(data, initial_thickness_prior=INITIAL_THICKNESS_PRIOR_LOGNORMAL):
     """Return trajectory and grey site names for the reset boundaries in data."""
     reset_count = reset_days_for_data(data).size
-    return (
-        reset_initial_thickness_site_names(initial_thickness_prior, reset_count),
-        reset_offset_site_names(reset_count),
+    return _reset_site_names_for_events(
+        initial_thickness_prior,
+        _reset_event_names(data, reset_count),
     )
 
 
@@ -225,6 +268,7 @@ class ProductionConfig:
     tile_statistics: Path
     output_dir: Path
     third_decon_day: float | None = None
+    reset_events: tuple | None = None
     map_init_from: Path | None = None
     map_initial_values: dict | None = None
     smoothness_weight: float | None = None
@@ -718,7 +762,7 @@ def detector_name_from_statistics_path(path):
     return Path(path).name.split("_tile_log_statistics_", 1)[0].upper()
 
 
-def load_tile_statistics(path, third_decon_day=None):
+def load_tile_statistics(path, third_decon_day=None, reset_events=None):
     """Load corrected tile sufficient statistics without applying corrections."""
     path = Path(path)
     if path.is_dir():
@@ -790,13 +834,29 @@ def load_tile_statistics(path, third_decon_day=None):
         else float(PRODUCTION_RESET_DAY)
     )
     reset_days = np.asarray([reset_day], dtype=float)
-    if third_decon_day is not None:
+    resolved_events = None
+    if reset_events is not None:
+        if third_decon_day is not None:
+            raise ValueError("Use reset_events or third_decon_day, not both")
+        resolved_events = resolve_reset_events(
+            {"events": tuple(reset_events)}, reset_day
+        )
+        reset_days = np.asarray(
+            [event["day"] for event in resolved_events], dtype=float
+        )
+    elif third_decon_day is not None:
         third_decon_day = float(third_decon_day)
         if not np.isfinite(third_decon_day):
             raise ValueError("third_decon_day must be finite")
         if third_decon_day <= reset_day:
             raise ValueError("third_decon_day must be after the physical reset day")
         reset_days = np.asarray([reset_day, third_decon_day], dtype=float)
+        resolved_events = (
+            {"name": "program1063_reset", "day": reset_day},
+            {"name": "third_decon", "day": third_decon_day},
+        )
+    if resolved_events is None:
+        resolved_events = ({"name": "program1063_reset", "day": reset_day},)
     result = {
         "tile_ids": tile_ids,
         "metadata": metadata,
@@ -815,13 +875,15 @@ def load_tile_statistics(path, third_decon_day=None):
         "node_days": node_days,
         "reset_day": reset_day,
         "reset_days": reset_days,
+        "reset_event_names": tuple(event["name"] for event in resolved_events),
+        "reset_events": tuple(resolved_events),
         "sca_names": np.asarray([detector_name_from_statistics_path(path)]),
         "sca_index": np.asarray([0], dtype=int),
         "n_scas": 1,
         "n_tiles": 1,
     }
-    if third_decon_day is not None:
-        result["third_decon_day"] = third_decon_day
+    if reset_days.size > 1 and resolved_events[1]["name"] == "third_decon":
+        result["third_decon_day"] = float(reset_days[1])
     return result
 
 
@@ -2851,7 +2913,15 @@ def map_parameter_scale_values(
     }
     return {
         name: np.broadcast_to(
-            np.asarray(scales[name], dtype=float),
+            np.asarray(
+                scales.get(
+                    name,
+                    thickness_prior_sigmas.get(name, INITIAL_THICKNESS_LOG_SIGMA)
+                    if "initial_thickness" in name
+                    else POST_RESET_TILE_LOG_OFFSET_PRIOR_SIGMA,
+                ),
+                dtype=float,
+            ),
             np.asarray(value).shape,
         ).copy()
         for name, value in initial_values.items()
@@ -2867,7 +2937,7 @@ def map_parameter_bounds(initial_values, jax, fixed_parameter_values=None):
         shape = np.asarray(value).shape
         lower[name] = np.full(shape, -np.inf)
         upper[name] = np.full(shape, np.inf)
-        if name in ("initial_thickness_nm", "reset_initial_thickness_nm"):
+        if name.endswith("_thickness_nm"):
             lower[name] = np.zeros(shape)
         elif name == "ice_k_constant":
             lower[name] = np.zeros(shape)
@@ -3198,6 +3268,7 @@ def fit_map_state(config):
     data = load_tile_statistics(
         config.tile_statistics,
         third_decon_day=config.third_decon_day,
+        reset_events=config.reset_events,
     )
     context = load_response_context(
         data["sca_names"],
@@ -3524,10 +3595,46 @@ def write_outputs(
         "map_count_weighted_rms_log": np.asarray(count_weighted_rms_log),
     }
     reset_days = reset_days_for_data(data)
+    thickness_site_names, offset_site_names = reset_site_names(data)
+    reset_events = tuple(data.get("reset_events", ()))
+    if not reset_events:
+        reset_events = tuple(
+            {"name": name, "day": float(day)}
+            for name, day in zip(
+                _reset_event_names(data, reset_days.size), reset_days, strict=True
+            )
+        )
+    metadata["reset_event_days"] = np.asarray(reset_days, dtype=np.float64)
+    metadata["reset_event_names"] = np.asarray(
+        [event["name"] for event in reset_events], dtype="U64"
+    )
+    metadata["reset_event_thickness_site_names"] = np.asarray(
+        thickness_site_names[1:], dtype="U96"
+    )
+    metadata["reset_event_offset_site_names"] = np.asarray(
+        offset_site_names, dtype="U96"
+    )
+    metadata["reset_event_initial_thickness_log_nm"] = np.stack(
+        [samples[name] for name in thickness_site_names[1:]], axis=1
+    )
+    metadata["reset_event_tile_log_offsets"] = np.stack(
+        [samples[name] for name in offset_site_names], axis=1
+    )
+    metadata["reset_event_thickness_prior_median_nm"] = np.asarray(
+        [event.get("thickness_prior", {}).get("median_nm", INITIAL_THICKNESS_LOG_MEDIAN_NM)
+         for event in reset_events],
+        dtype=np.float64,
+    )
+    metadata["reset_event_thickness_prior_log_sigma"] = np.asarray(
+        [event.get("thickness_prior", {}).get("log_sigma", INITIAL_THICKNESS_LOG_SIGMA)
+         for event in reset_events],
+        dtype=np.float64,
+    )
     if reset_days.size > 1:
         metadata["ice_reset_days"] = np.asarray(reset_days, dtype=float)
-        metadata["third_decon_day"] = np.asarray(float(reset_days[1]))
-        metadata["fit_post_third_decon_tile_log_offset"] = np.asarray(1)
+        if data["reset_event_names"][1] == "third_decon":
+            metadata["third_decon_day"] = np.asarray(float(reset_days[1]))
+            metadata["fit_post_third_decon_tile_log_offset"] = np.asarray(1)
     for name, value in (model_metadata or {}).items():
         if value is not None:
             metadata[str(name)] = np.asarray(value)

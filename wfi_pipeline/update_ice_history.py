@@ -40,6 +40,7 @@ from wfi_pipeline_defaults import (
     output_paths,
     pinned_relative_response_cache,
 )
+from reset_events import DEFAULT_RESET_CONFIG, load_reset_config
 from wfi_production_layout import (
     complete_tile_ids,
     corrected_statistics_path,
@@ -56,6 +57,7 @@ DEFAULT_HISTORY_BRANCH_SIGMA_NM = 1.0
 H5_UPDATE_BATCH_SIZE = 256
 H5_UPDATE_MAX_ITERATIONS = 160
 H5_RATE_KNOT_SPACING_HOURS = 48.0
+H5_UPDATE_JACOBIAN_BUDGET_BYTES = 128 * 1024 * 1024
 
 
 def sha256_file(path):
@@ -89,20 +91,83 @@ def h5_optical_fingerprint(model):
     return digest.hexdigest()
 
 
-def find_bundle_root(base_h5, explicit=None):
+def _bundle_source_paths_from_h5(base_h5):
+    """Read bundle provenance from an Eric-readable H5, when present."""
+    paths = []
+    with h5py.File(base_h5, "r") as h5:
+        groups = [h5]
+        if "instrument" in h5:
+            groups.append(h5["instrument"])
+        for group in groups:
+            for name in ("fitted_gray_source_bundle", "source_bundle"):
+                value = group.attrs.get(name)
+                if value is None:
+                    continue
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8")
+                candidate = Path(str(value)).expanduser()
+                if not candidate.is_absolute():
+                    candidate = Path(base_h5).resolve().parent / candidate
+                paths.append(candidate.resolve())
+    return paths
+
+
+def find_bundle_root(base_h5, explicit=None, search_roots=()):
+    """Locate portable bundle scaffolds from H5 provenance or run roots.
+
+    A user may copy the H5 independently of its pipeline run. In that case,
+    the packaged H5's fitted-gray provenance points back to the original
+    modulated bundle and is more authoritative than sibling-file assumptions.
+    """
+    expected = "wfi_all_2nm_rank16_modulated.npz"
+
+    def has_scaffolds(root):
+        root = Path(root)
+        return all(
+            (root / name).is_file()
+            for name in ("wfi_all_2nm_rank16.npz", expected)
+        )
+
     if explicit is not None:
         root = Path(explicit).resolve()
-        if not (root / "wfi_all_2nm_rank16_modulated.npz").is_file():
-            raise FileNotFoundError(
-                root / "wfi_all_2nm_rank16_modulated.npz"
-            )
+        if not has_scaffolds(root):
+            raise FileNotFoundError(f"Missing standard output bundle scaffolds in {root}")
         return root
+
+    candidates = []
+    for source_bundle in _bundle_source_paths_from_h5(base_h5):
+        candidates.append(source_bundle.parent)
     for parent in Path(base_h5).resolve().parents:
-        if (parent / "wfi_all_2nm_rank16_modulated.npz").is_file():
-            return parent
+        candidates.extend(
+            (
+                parent,
+                parent / "production" / "wavelength_response_bundle",
+            )
+        )
+    for root in search_roots:
+        root = Path(root).expanduser().resolve()
+        candidates.extend(
+            (
+                root,
+                root / "production" / "wavelength_response_bundle",
+                root / "wavelength_response_bundle",
+            )
+        )
+        candidates.extend(
+            root.glob("production/pipeline_runs/*/production/wavelength_response_bundle")
+        )
+    seen = set()
+    for candidate in candidates:
+        candidate = Path(candidate).resolve()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if has_scaffolds(candidate):
+            return candidate
     raise FileNotFoundError(
-        "Could not find wfi_all_2nm_rank16_modulated.npz beside the base H5; "
-        "pass --bundle-root"
+        "Could not locate both standard wavelength bundle scaffolds from the "
+        "base H5 provenance, statistics path, or output path. Preserve the "
+        "source pipeline bundle directory referenced by the base H5."
     )
 
 
@@ -293,13 +358,32 @@ def _fit_seed(archive):
     led = np.asarray(archive.get("led_log_offsets", np.zeros((1, 6))), dtype=float).reshape(-1)
     if led.size != 6:
         raise ValueError("Base fit LED-offset vector must have six entries")
-    reset = float(np.asarray(archive.get("post_reset_tile_log_offset", 0.0)).reshape(-1)[0])
-    third = float(np.asarray(archive.get("post_third_decon_tile_log_offset", 0.0)).reshape(-1)[0])
+    if "reset_event_tile_log_offsets" in archive:
+        reset_offsets = np.asarray(
+            archive["reset_event_tile_log_offsets"], dtype=float
+        ).reshape(-1)
+    else:
+        reset_offsets = [
+            float(
+                np.asarray(
+                    archive.get("post_reset_tile_log_offset", 0.0), dtype=float
+                ).reshape(-1)[0]
+            )
+        ]
+        if "post_third_decon_tile_log_offset" in archive:
+            reset_offsets.append(
+                float(
+                    np.asarray(
+                        archive["post_third_decon_tile_log_offset"], dtype=float
+                    ).reshape(-1)[0]
+                )
+            )
+        reset_offsets = np.asarray(reset_offsets, dtype=float)
     days = np.asarray(archive["observation_days"], dtype=float).reshape(-1)
     thickness = np.asarray(archive["tile_ice_thickness"], dtype=float).reshape(-1)
     if days.size != thickness.size or days.size == 0:
         raise ValueError("Base fit history has an invalid observation axis")
-    return led, reset, third, days, thickness
+    return led, reset_offsets, days, thickness
 
 
 def _initial_thickness_prior(base_archive, prior_name):
@@ -361,7 +445,7 @@ def lookup_tile_history(
     curves = np.asarray(lookup_log_response, dtype=float)
     if curves.shape != (6, grid.size):
         raise ValueError("H5 LED lookup has an invalid shape")
-    led_offsets, reset_offset, third_offset, base_days, base_ice = _fit_seed(base_archive)
+    led_offsets, base_reset_offsets, base_days, base_ice = _fit_seed(base_archive)
     reset_days = production.reset_days_for_data(data)
     days = np.asarray(data["days"], dtype=float)
     repeat_values = np.asarray(data["repeat_values"], dtype=int)
@@ -403,9 +487,15 @@ def lookup_tile_history(
             continue
         episode = int(np.searchsorted(reset_days, node_day, side="right"))
         target = sums[rows] / counts[rows]
-        target = target + reset_offset * (days[rows] >= data["reset_day"])
-        if data.get("third_decon_day") is not None:
-            target = target + third_offset * (days[rows] >= float(data["third_decon_day"]))
+        _, offset_names = production.reset_site_names(data)
+        if base_reset_offsets.size != len(offset_names):
+            raise ValueError(
+                "Base-fit reset offsets do not match the configured reset events"
+            )
+        for reset_index, _name in enumerate(offset_names):
+            target = target + base_reset_offsets[reset_index] * (
+                days[rows] >= reset_days[reset_index]
+            )
         led_index = row_led[rows]
         prediction = (
             curves[led_index]
@@ -423,15 +513,36 @@ def lookup_tile_history(
         )
 
         if previous_episode is None or episode != previous_episode:
+            thickness_names, _ = production.reset_site_names(data)
+            start_name = thickness_names[episode]
             if episode == 0:
-                start_name = "initial_thickness_log_nm"
-            elif episode == 1:
-                start_name = "reset_initial_thickness_log_nm"
+                prior_center_log, prior_sigma = _initial_thickness_prior(
+                    base_archive, start_name
+                )
             else:
-                start_name = "third_decon_initial_thickness_log_nm"
-            prior_center_log, prior_sigma = _initial_thickness_prior(
-                base_archive, start_name
-            )
+                events = data.get("reset_events")
+                if not events:
+                    prior_center_log, prior_sigma = _initial_thickness_prior(
+                        base_archive, start_name
+                    )
+                else:
+                    event = events[episode - 1]
+                    h5_prior = event.get("h5_prior", {})
+                    if h5_prior.get("center") == "base_h5":
+                        center = seed_at_nodes[node_index]
+                    else:
+                        center = event.get("thickness_prior", {}).get(
+                            "median_nm", production.INITIAL_THICKNESS_LOG_MEDIAN_NM
+                        )
+                    prior_center_log = float(np.log(max(float(center), 1.0e-3)))
+                    prior_sigma = float(
+                        h5_prior.get(
+                            "log_sigma",
+                            event.get("thickness_prior", {}).get(
+                                "log_sigma", production.INITIAL_THICKNESS_LOG_SIGMA
+                            ),
+                        )
+                    )
             prior_cost = 0.5 * (
                 (np.log(np.maximum(grid, 1.0e-6)) - prior_center_log) / prior_sigma
             ) ** 2
@@ -517,10 +628,13 @@ def lookup_tile_history(
                 0.0,
             )
     rates = _piecewise_interp(node_days, node_rates, days, reset_days)
+    offset_names = production.reset_site_names(data)[1]
     return history, rates, node_history, update_records, {
         "led_log_offsets": led_offsets,
-        "post_reset_tile_log_offset": reset_offset,
-        "post_third_decon_tile_log_offset": third_offset,
+        **{
+            name: float(base_reset_offsets[index])
+            for index, name in enumerate(offset_names)
+        },
     }
 
 
@@ -1176,6 +1290,33 @@ def rate_spline_knot_days(data, spacing_days=2.0):
     return np.unique(np.r_[left, regular, resets, right])
 
 
+def h5_fit_batch_size(data, rate_control_days):
+    """Bound the batched Jacobian footprint for both thinned and full cadence."""
+    thickness_count = production.reset_days_for_data(data).size + 1
+    offset_count = production.reset_days_for_data(data).size
+    parameter_count = (
+        int(np.asarray(rate_control_days).size)
+        + thickness_count
+        + offset_count
+        + 6
+    )
+    residual_count = (
+        int(np.asarray(data["counts"]).shape[-1])
+        + int(np.asarray(data["node_days"]).size)
+        + thickness_count
+        + offset_count
+        + 6
+    )
+    bytes_per_tile = max(1, residual_count * parameter_count * np.dtype(np.float64).itemsize)
+    return max(
+        1,
+        min(
+            H5_UPDATE_BATCH_SIZE,
+            H5_UPDATE_JACOBIAN_BUDGET_BYTES // bytes_per_tile,
+        ),
+    )
+
+
 def lookup_cache_path(output_root, h5_sha256, detector, tile_id):
     return (
         Path(output_root)
@@ -1397,20 +1538,19 @@ def update_bundle_trajectories(source_path, output_path, trajectories, metadata_
         (tile_ids.size, len(trajectories[DETECTORS[0]][0]["days"])), dtype=np.float32
     )
     rates = np.empty_like(thickness)
-    reset_offsets = np.empty(tile_ids.size, dtype=np.float64)
-    third_offsets = np.empty(tile_ids.size, dtype=np.float64)
-    third_offsets_present = True
+    reference = trajectories[DETECTORS[0]][0]
+    reset_days = np.asarray(reference["reset_event_days"], dtype=np.float64)
+    reset_names = tuple(reference["reset_event_names"])
+    reset_offsets = np.empty((tile_ids.size, reset_days.size), dtype=np.float64)
     for index, (detector, tile_id) in enumerate(zip(detectors, tile_ids, strict=True)):
         record = trajectories[detector][int(tile_id)]
+        if tuple(record["reset_event_names"]) != reset_names or not np.array_equal(
+            np.asarray(record["reset_event_days"], dtype=float), reset_days
+        ):
+            raise ValueError(f"Reset-event layout differs for {detector} tile {tile_id}")
         thickness[index] = record["history"]
         rates[index] = record["rates"]
-        reset_offsets[index] = record["post_reset_tile_log_offset"]
-        if record["post_third_decon_tile_log_offset"] is None:
-            third_offsets_present = False
-            third_offsets[index] = 0.0
-        else:
-            third_offsets[index] = record["post_third_decon_tile_log_offset"]
-    reference = trajectories[DETECTORS[0]][0]
+        reset_offsets[index] = np.asarray(record["reset_event_log_offsets"], dtype=float)
     arrays["observation_days"] = np.asarray(reference["days"], dtype=np.float64)
     arrays["observation_start_time"] = np.asarray(reference["exposure_times"]).astype(str)
     arrays["observation_led"] = np.asarray(reference["led"], dtype=np.int16)
@@ -1419,14 +1559,31 @@ def update_bundle_trajectories(source_path, output_path, trajectories, metadata_
     arrays["groups"] = np.asarray(reference["groups"], dtype=np.int32)
     arrays["tile_ice_thickness"] = thickness
     arrays["tile_instantaneous_rate_nm_day"] = rates
-    arrays["post_reset_tile_log_offset"] = reset_offsets
-    arrays["post_reset_tile_throughput_factor"] = np.exp(reset_offsets).astype(
+    arrays["reset_event_days"] = reset_days
+    arrays["reset_event_names"] = np.asarray(reset_names, dtype="U64")
+    arrays["reset_event_tile_log_offsets"] = reset_offsets.astype(np.float32)
+    arrays["reset_event_tile_throughput_factors"] = np.exp(reset_offsets).astype(
         np.float32
     )
-    if third_offsets_present:
-        arrays["post_third_decon_tile_log_offset"] = third_offsets
+    arrays["ice_reset_day"] = np.asarray(reset_days[0], dtype=np.float64)
+    for name in (
+        "third_decon_day",
+        "post_third_decon_tile_log_offset",
+        "post_third_decon_tile_throughput_factor",
+    ):
+        arrays.pop(name, None)
+    if reset_days.size:
+        arrays["post_reset_tile_log_offset"] = reset_offsets[:, 0].astype(np.float32)
+        arrays["post_reset_tile_throughput_factor"] = np.exp(
+            reset_offsets[:, 0]
+        ).astype(np.float32)
+    if reset_days.size > 1 and reset_names[1] == "third_decon":
+        arrays["third_decon_day"] = np.asarray(reset_days[1], dtype=np.float64)
+        arrays["post_third_decon_tile_log_offset"] = reset_offsets[:, 1].astype(
+            np.float32
+        )
         arrays["post_third_decon_tile_throughput_factor"] = np.exp(
-            third_offsets
+            reset_offsets[:, 1]
         ).astype(np.float32)
     metadata = dict(bundle["metadata"])
     metadata["ice_history_update"] = metadata_update
@@ -1475,12 +1632,18 @@ def make_history_products(base_model, base_h5, output_root, modulated_bundle_pat
     statistics_reference_mjd = float(np.median(parsed_mjd - bundle_days))
     history_days = parsed_mjd - new_reference_mjd
     history_hours = history_days * 24.0
-    reset_days = [float(np.asarray(bundle["ice_reset_day"]).reshape(-1)[0])]
-    if "third_decon_day" in bundle:
-        reset_days.append(float(np.asarray(bundle["third_decon_day"]).reshape(-1)[0]))
+    reset_days = np.asarray(
+        bundle.get(
+            "reset_event_days",
+            [float(np.asarray(bundle["ice_reset_day"]).reshape(-1)[0])]
+            + ([float(np.asarray(bundle["third_decon_day"]).reshape(-1)[0])]
+               if "third_decon_day" in bundle else []),
+        ),
+        dtype=float,
+    ).reshape(-1)
     gray_hours = (
         statistics_reference_mjd
-        + np.asarray(reset_days, dtype=float)
+        + reset_days
         - new_reference_mjd
     ) * 24.0
     time_shift_hours = (
@@ -1626,8 +1789,33 @@ def update_reader_h5(base_h5, output_h5, base_model, bundle, factorization, time
             rank1["metrics"], sort_keys=True
         )
 
-        gray = h5["instrument/gray_period_hours"]
-        gray[...] = np.asarray(gray_hours, dtype=float)
+        instrument = h5["instrument"]
+        gray_hours = np.asarray(gray_hours, dtype=float).reshape(-1)
+        if "reset_event_tile_log_offsets" in bundle:
+            tile_event_offsets = np.asarray(
+                bundle["reset_event_tile_log_offsets"], dtype=float
+            )
+            if tile_event_offsets.shape != (tile_ids.size, gray_hours.size):
+                raise ValueError("Bundle reset-event offsets do not match H5 gray periods")
+            event_names = np.asarray(bundle.get("reset_event_names", [])).astype(str)
+            if event_names.size == 2 and event_names[1] == "third_decon":
+                tile_gray = np.column_stack(
+                    (
+                        np.expm1(tile_event_offsets[:, 0]),
+                        np.exp(tile_event_offsets[:, 1]) - np.exp(tile_event_offsets[:, 0]),
+                    )
+                )
+            else:
+                cumulative_log = np.cumsum(tile_event_offsets, axis=1)
+                previous_factor = np.column_stack(
+                    (np.ones(tile_ids.size), np.exp(cumulative_log[:, :-1]))
+                )
+                tile_gray = np.exp(cumulative_log) - previous_factor
+            fine_gray = tile_gray[fine_tile_index]
+        else:
+            fine_gray = np.asarray(instrument["gray"], dtype=float)
+        _write_dataset(instrument, "gray", fine_gray.astype(np.asarray(instrument["gray"]).dtype))
+        _write_dataset(instrument, "gray_period_hours", gray_hours)
         if "step_boundary_hours" in h5["instrument"]:
             h5["instrument/step_boundary_hours"][...] = (
                 np.asarray(h5["instrument/step_boundary_hours"], dtype=float)
@@ -1643,13 +1831,15 @@ def update_reader_h5(base_h5, output_h5, base_model, bundle, factorization, time
                         index_fn(factorization["time_hours"][episodes == episode])
                         for episode in range(gray_hours.size + 1)
                     ], dtype=float)
-                    time_group[f"episode_{prefix}_hours"][...] = values
+                    _write_dataset(time_group, f"episode_{prefix}_hours", values)
                 if f"episode_{prefix}_utc" in time_group:
                     values = []
                     for episode in range(gray_hours.size + 1):
                         selected = np.flatnonzero(episodes == episode)
                         values.append(utc[selected[0] if prefix == "first" else selected[-1]])
-                    time_group[f"episode_{prefix}_utc"][...] = np.asarray(values, dtype="S32")
+                    _write_dataset(
+                        time_group, f"episode_{prefix}_utc", np.asarray(values, dtype="S32")
+                    )
         h5.attrs["ice_history_update_utc"] = datetime.now(timezone.utc).isoformat()
         h5.attrs["ice_history_update_rank1_projection"] = True
     os.replace(temporary, output_h5)
@@ -1836,6 +2026,7 @@ def _run_focal_plane_and_ice_trend_plots(
     detector_fit_roots,
     reset_day,
     third_decon_day,
+    reset_days=None,
 ):
     """Generate the full-SCA mosaics and combined ice-history diagnostics."""
     repository_root = Path(__file__).resolve().parents[1]
@@ -1905,8 +2096,12 @@ def _run_focal_plane_and_ice_trend_plots(
             "--detector-output-root", str(detector_root),
             "--reset-day", str(float(reset_day)),
         ]
-        if third_decon_day is not None:
-            trajectory_base.extend(("--break-day", str(float(third_decon_day))))
+        if reset_days is None:
+            reset_days = [reset_day]
+            if third_decon_day is not None:
+                reset_days.append(third_decon_day)
+        for reset_boundary in np.asarray(reset_days, dtype=float).reshape(-1)[1:]:
+            trajectory_base.extend(("--break-day", str(float(reset_boundary))))
 
         commands = (
             focal_command,
@@ -1977,7 +2172,9 @@ def _legacy_main_streaming(argv=None):
     base_h5 = args.base_h5
     statistics_dir = args.statistics_dir
     output_root = args.output_path
-    bundle_root = find_bundle_root(base_h5)
+    bundle_root = find_bundle_root(
+        base_h5, search_roots=(args.input_path, output_root)
+    )
     base_run_root = find_base_run_root(base_h5, bundle_root, args.base_run_root)
     base_h5_sha256 = sha256_file(base_h5)
     base_bundle_path = bundle_root / "wfi_all_2nm_rank16.npz"
@@ -2362,7 +2559,9 @@ def _legacy_main(argv=None):
     base_h5 = args.base_h5
     statistics_dir = args.statistics_dir
     output_root = args.output_path
-    bundle_root = find_bundle_root(base_h5)
+    bundle_root = find_bundle_root(
+        base_h5, search_roots=(args.input_path, output_root)
+    )
     base_run_root = find_base_run_root(
         base_h5, bundle_root, explicit=args.base_run_root
     )
@@ -2657,6 +2856,10 @@ def parse_args(argv=None):
         help="Existing base Eric-readable response H5; independent of the new statistics.",
     )
     parser.add_argument("--output-path", type=Path, required=True)
+    parser.add_argument(
+        "--reset-config", type=Path, default=DEFAULT_RESET_CONFIG,
+        help="Shared YAML reset/decon events and prior settings.",
+    )
     args = parser.parse_args(argv)
     args.input_path = args.input_path.expanduser().resolve()
     args.base_h5 = args.base_h5.expanduser().resolve()
@@ -2671,6 +2874,8 @@ def parse_args(argv=None):
 def main_streaming(argv=None):
     """Fit independent tile histories from the supplied H5 and statistics only."""
     args = parse_args(argv)
+    reset_config = load_reset_config(args.reset_config)
+    reset_events = tuple(reset_config["events"])
     base_h5 = args.base_h5
     statistics_dir = resolve_statistics_input(args.input_path)
     output_root = args.output_path.resolve()
@@ -2683,7 +2888,9 @@ def main_streaming(argv=None):
 
     # These bundles are output scaffolds for preserving the standard portable
     # spectral products. The fit itself reads its optical state only from H5.
-    bundle_root = find_bundle_root(base_h5)
+    bundle_root = find_bundle_root(
+        base_h5, search_roots=(args.input_path, output_root)
+    )
     base_bundle_path = bundle_root / "wfi_all_2nm_rank16.npz"
     modulated_bundle_path = bundle_root / "wfi_all_2nm_rank16_modulated.npz"
     if not base_bundle_path.is_file() or not modulated_bundle_path.is_file():
@@ -2723,7 +2930,7 @@ def main_streaming(argv=None):
         detector_data[detector] = {}
         for tile_id, tile_stats_path in detector_tile_paths[detector].items():
             data = production.load_tile_statistics(
-                tile_stats_path, third_decon_day=THIRD_DECON_DAY
+                tile_stats_path, reset_events=reset_events
             )
             data["statistics_path"] = str(tile_stats_path)
             detector_data[detector][int(tile_id)] = data
@@ -2732,10 +2939,12 @@ def main_streaming(argv=None):
     rate_control_days = rate_spline_knot_days(
         reference_data, spacing_days=rate_knot_spacing_hours / 24.0
     )
+    batch_size = h5_fit_batch_size(reference_data, rate_control_days)
     for detector in detectors:
         for tile_id, data in detector_data[detector].items():
             for name in (
-                "days", "led", "repeat", "program", "groups", "exposure_times"
+                "days", "led", "repeat", "program", "groups", "exposure_times",
+                "reset_days", "reset_event_names",
             ):
                 if not np.array_equal(reference_data[name], data[name]):
                     raise ValueError(
@@ -2797,25 +3006,28 @@ def main_streaming(argv=None):
                     prior_sigmas = {}
                     reset_days = production.reset_days_for_data(data)
                     for stage, name in enumerate(thickness_names):
-                        if name == "third_decon_initial_thickness_log_nm":
-                            starts = np.flatnonzero(
-                                np.asarray(data["node_days"], dtype=float)
-                                >= float(data["third_decon_day"])
-                            )
-                            center = (
-                                float(h5_thickness_seed[int(starts[0])])
-                                if starts.size
-                                else production.INITIAL_THICKNESS_LOG_MEDIAN_NM
-                            )
-                            prior_centers[name] = np.log(max(center, 1.0e-3))
-                            # The H5's per-tile decon state replaces the external
-                            # warmup center; retain the validated tight log prior.
-                            prior_sigmas[name] = 0.1
-                        else:
+                        if stage == 0:
                             prior_centers[name] = np.log(
                                 production.INITIAL_THICKNESS_LOG_MEDIAN_NM
                             )
                             prior_sigmas[name] = production.INITIAL_THICKNESS_LOG_SIGMA
+                            continue
+                        event = data["reset_events"][stage - 1]
+                        h5_prior = event["h5_prior"]
+                        if h5_prior["center"] == "base_h5":
+                            starts = np.flatnonzero(
+                                np.asarray(data["node_days"], dtype=float)
+                                >= float(reset_days[stage - 1])
+                            )
+                            center = (
+                                float(h5_thickness_seed[int(starts[0])])
+                                if starts.size
+                                else float(event["thickness_prior"]["median_nm"])
+                            )
+                        else:
+                            center = float(event["thickness_prior"]["median_nm"])
+                        prior_centers[name] = np.log(max(center, 1.0e-3))
+                        prior_sigmas[name] = float(h5_prior["log_sigma"])
                     prior_centers_list.append(prior_centers)
                     prior_sigmas_list.append(prior_sigmas)
                     lookup_started = time.perf_counter()
@@ -2898,14 +3110,13 @@ def main_streaming(argv=None):
                         node_history = np.asarray(state["node_ice"], dtype=float).reshape(-1)
                         node_rates = np.asarray(state["node_rates"], dtype=float).reshape(-1)
                         led_offsets = np.asarray(values["led_log_offsets"], dtype=float).reshape(-1)
+                        _, offset_names = production.reset_site_names(data)
                         reset_offsets = np.asarray(
-                            values["post_reset_tile_log_offset"], dtype=float
-                        ).reshape(-1)
-                        third_offsets = (
-                            np.asarray(values["post_third_decon_tile_log_offset"], dtype=float)
-                            .reshape(-1)
-                            if "post_third_decon_tile_log_offset" in values
-                            else None
+                            [
+                                np.asarray(values[name], dtype=float).reshape(-1)[0]
+                                for name in offset_names
+                            ],
+                            dtype=float,
                         )
                         trajectories[detector][int(tile_id)] = {
                             "history": history,
@@ -2916,9 +3127,15 @@ def main_streaming(argv=None):
                             "repeat": np.asarray(data["repeat"], dtype=int),
                             "program": np.asarray(data["program"], dtype=int),
                             "groups": np.asarray(data["groups"], dtype=int),
+                            "reset_event_days": production.reset_days_for_data(data),
+                            "reset_event_names": tuple(data["reset_event_names"]),
+                            "reset_event_log_offsets": reset_offsets,
                             "post_reset_tile_log_offset": float(reset_offsets[0]),
                             "post_third_decon_tile_log_offset": (
-                                None if third_offsets is None else float(third_offsets[0])
+                                float(reset_offsets[1])
+                                if len(reset_offsets) > 1
+                                and data["reset_event_names"][1] == "third_decon"
+                                else None
                             ),
                         }
                         for repeat, day, thickness_nm, rate_nm_day in zip(
@@ -2980,6 +3197,7 @@ def main_streaming(argv=None):
         },
         reset_day=reference_data["reset_day"],
         third_decon_day=reference_data.get("third_decon_day"),
+        reset_days=production.reset_days_for_data(reference_data),
     )
     global_plot_seconds = time.perf_counter() - global_plot_started
 
@@ -2993,11 +3211,17 @@ def main_streaming(argv=None):
         "optimizer": "batched damped Gauss-Newton, block-independent per tile",
         "optimizer_iterations": optimizer_iterations,
         "optimizer_batch_size": batch_size,
+        "optimizer_jacobian_memory_budget_bytes": H5_UPDATE_JACOBIAN_BUDGET_BYTES,
         "rate_spline_knot_spacing_hours": float(rate_knot_spacing_hours),
         "rate_spline_knot_count": int(rate_control_days.size),
         "rate_prior_mean_nm_day": DEFAULT_RATE_MEAN_NM_DAY,
         "rate_prior_sigma_log": DEFAULT_RATE_SIGMA_LOG,
         "led_offsets": "fit from corrected statistics with log sigma 0.01",
+        "reset_configuration": {
+            "path": str(reset_config["path"]),
+            "sha256": reset_config["sha256"],
+            "events": [dict(event) for event in reset_events],
+        },
     }
     output_bundle_root = paths["bundle_root"]
     output_base_bundle = update_bundle_trajectories(
@@ -3046,6 +3270,7 @@ def main_streaming(argv=None):
         "optimizer": "batched damped Gauss-Newton with independent tile blocks",
         "optimizer_iterations": int(optimizer_iterations),
         "optimizer_batch_size": int(batch_size),
+        "optimizer_jacobian_memory_budget_bytes": H5_UPDATE_JACOBIAN_BUDGET_BYTES,
         "rate_spline_knot_spacing_hours": float(rate_knot_spacing_hours),
         "rate_spline_knot_count": int(rate_control_days.size),
         "h5_lookup_seconds": float(lookup_seconds),

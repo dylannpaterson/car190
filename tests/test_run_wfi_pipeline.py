@@ -26,6 +26,7 @@ from wfi_pipeline_defaults import (
     pinned_relative_response_cache,
     profile_for,
 )
+from reset_events import load_reset_config
 
 
 class WfiPipelineTests(unittest.TestCase):
@@ -48,6 +49,32 @@ class WfiPipelineTests(unittest.TestCase):
         self.assertFalse(relative.build_six_led_cache_from_current_tmm)
         self.assertFalse(full_tmm.use_pinned_six_led_cache)
         self.assertTrue(full_tmm.build_six_led_cache_from_current_tmm)
+
+    def test_pipeline_records_and_passes_the_shared_reset_config(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = pipeline.PipelineRun(
+                root / "corrected_statistics_4h_thinned",
+                root / "production_run",
+                FULL_TMM,
+            )
+            reset_config = load_reset_config()
+            settings = run._settings_record()
+            self.assertEqual(
+                settings["reset_configuration"]["sha256"], reset_config["sha256"]
+            )
+            self.assertEqual(
+                [event["name"] for event in settings["reset_configuration"]["events"]],
+                [event["name"] for event in reset_config["events"]],
+            )
+            with (
+                patch.object(run, "_run_command") as run_command,
+                patch.object(run, "_tile_archives", return_value=True),
+            ):
+                run._fit_detector(root / "corrected_statistics_4h_thinned", "WFI01")
+            command = run_command.call_args.args[1]
+            config_index = command.index("--reset-config")
+            self.assertEqual(command[config_index + 1], str(reset_config["path"]))
 
     def test_central_full_tmm_defaults_match_fit_runners(self):
         self.assertEqual(FULL_TMM_EMCEE_WALKERS, emcee_warmup.EMCEE_WALKERS)

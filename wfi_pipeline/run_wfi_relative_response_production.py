@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 import fit_wfi_relative_response as relative_fit
+from reset_events import DEFAULT_RESET_CONFIG, load_reset_config
 from wfi_relative_response import (
     CACHE_VERSION,
     PRODUCTION_ENTROPY_WEIGHT,
@@ -118,6 +119,8 @@ def cached_fit_matches(
     warmup_prior_root=None,
     thickness_prior_log_sigma=None,
     thickness_prior_stages=None,
+    reset_events=None,
+    reset_event_initial_thickness_starts_nm=None,
 ):
     import numpy as np
     from wfi_relative_response import resolve_portable_path
@@ -177,6 +180,22 @@ def cached_fit_matches(
                 archived_prior_stages = str(
                     np.asarray(fit["thickness_prior_stages"]).reshape(-1)[0]
                 )
+            archived_reset_days = np.asarray(
+                fit.get("reset_event_days", [fit.get("ice_reset_day", np.nan)]),
+                dtype=float,
+            ).reshape(-1)
+            archived_reset_names = np.asarray(
+                fit.get("reset_event_names", ["program1063_reset"])
+            ).astype(str).reshape(-1)
+            archived_reset_starts = np.asarray(
+                fit.get("reset_event_initial_thickness_start_nm", []), dtype=float
+            ).reshape(-1)
+            archived_reset_prior_medians = np.asarray(
+                fit.get("reset_event_thickness_prior_median_nm", []), dtype=float
+            ).reshape(-1)
+            archived_reset_prior_sigmas = np.asarray(
+                fit.get("reset_event_thickness_prior_log_sigma", []), dtype=float
+            ).reshape(-1)
         if warmup_prior_root is None:
             prior_matches = (
                 archived_warmup_root is None
@@ -195,6 +214,65 @@ def cached_fit_matches(
                 )
                 and archived_prior_stages == str(thickness_prior_stages)
             )
+        reset_layout_matches = True
+        if reset_events is not None:
+            expected_data = relative_fit.production.load_tile_statistics(
+                statistics_path, reset_events=reset_events
+            )
+            reset_layout_matches = (
+                np.array_equal(
+                    archived_reset_names,
+                    np.asarray(expected_data["reset_event_names"]).astype(str),
+                )
+                and np.allclose(
+                    archived_reset_days,
+                    np.asarray(expected_data["reset_days"], dtype=float),
+                    rtol=0.0,
+                    atol=1.0e-12,
+                )
+            )
+            expected_medians = np.asarray(
+                [
+                    event.get("thickness_prior", {}).get(
+                        "median_nm", relative_fit.production.INITIAL_THICKNESS_LOG_MEDIAN_NM
+                    )
+                    for event in reset_events
+                ],
+                dtype=float,
+            )
+            expected_sigmas = np.asarray(
+                [
+                    event.get("thickness_prior", {}).get(
+                        "log_sigma", relative_fit.production.INITIAL_THICKNESS_LOG_SIGMA
+                    )
+                    for event in reset_events
+                ],
+                dtype=float,
+            )
+            reset_layout_matches = reset_layout_matches and np.allclose(
+                archived_reset_prior_medians,
+                expected_medians,
+                rtol=0.0,
+                atol=1.0e-12,
+            ) and np.allclose(
+                archived_reset_prior_sigmas,
+                expected_sigmas,
+                rtol=0.0,
+                atol=1.0e-12,
+            )
+            expected_starts = reset_event_initial_thickness_starts_nm or {}
+            if expected_starts:
+                expected_values = np.asarray(
+                    [expected_starts.get(name, np.nan) for name in expected_data["reset_event_names"]],
+                    dtype=float,
+                )
+                reset_layout_matches = reset_layout_matches and np.allclose(
+                    archived_reset_starts,
+                    expected_values,
+                    rtol=0.0,
+                    atol=1.0e-12,
+                    equal_nan=True,
+                )
         return (
             fit_mode == expected_fit_mode
             and archived_statistics == relative_fit.statistics_fingerprint(statistics_path)
@@ -208,15 +286,18 @@ def cached_fit_matches(
                 atol=1.0e-12,
             )
             and (
-                (third_decon_day is None and archived_third is None)
+                reset_events is not None
                 or (
-                    third_decon_day is not None
-                    and archived_third is not None
-                    and np.isclose(
-                        float(third_decon_day),
-                        archived_third,
-                        rtol=0.0,
-                        atol=1.0e-12,
+                    (third_decon_day is None and archived_third is None)
+                    or (
+                        third_decon_day is not None
+                        and archived_third is not None
+                        and np.isclose(
+                            float(third_decon_day),
+                            archived_third,
+                            rtol=0.0,
+                            atol=1.0e-12,
+                        )
                     )
                 )
             )
@@ -233,6 +314,7 @@ def cached_fit_matches(
                 )
             )
             and prior_matches
+            and reset_layout_matches
             and (Path(output_dir) / "tile_rate_posterior.csv").is_file()
         )
     except (KeyError, OSError, ValueError):
@@ -253,6 +335,8 @@ def fit_tile(
     warmup_prior_root=None,
     thickness_prior_log_sigma=None,
     thickness_prior_stages=None,
+    reset_events=None,
+    reset_event_initial_thickness_starts_nm=None,
 ):
     output_dir = Path(output_dir)
     (
@@ -277,6 +361,10 @@ def fit_tile(
         warmup_prior_root=warmup_prior_root,
         thickness_prior_log_sigma=thickness_prior_log_sigma,
         thickness_prior_stages=thickness_prior_stages,
+        reset_events=reset_events,
+        reset_event_initial_thickness_starts_nm=(
+            reset_event_initial_thickness_starts_nm
+        ),
     ):
         print(f"Skipping tile {tile_id}: cached fit already exists", flush=True)
         return output_dir
@@ -297,6 +385,10 @@ def fit_tile(
         warmup_prior_root=warmup_prior_root,
         thickness_prior_log_sigma=thickness_prior_log_sigma,
         thickness_prior_stages=thickness_prior_stages,
+        reset_events=reset_events,
+        reset_event_initial_thickness_starts_nm=(
+            reset_event_initial_thickness_starts_nm
+        ),
     )
     return output_dir
 
@@ -790,6 +882,7 @@ def parse_args(argv=None):
         ),
     )
     parser.add_argument("--third-decon-day", type=float, default=None)
+    parser.add_argument("--reset-config", type=Path, default=DEFAULT_RESET_CONFIG)
     parser.add_argument(
         "--third-decon-initial-thickness-start-nm",
         type=float,
@@ -811,7 +904,6 @@ def parse_args(argv=None):
     parser.add_argument("--thickness-prior-log-sigma", type=float, default=None)
     parser.add_argument(
         "--thickness-prior-stages",
-        choices=("all", "third-decon"),
         default=None,
     )
     return parser.parse_args(argv)
@@ -836,12 +928,49 @@ def run_detector(
     warmup_prior_root=None,
     thickness_prior_log_sigma=None,
     thickness_prior_stages=None,
+    reset_events=None,
+    reset_config_sha256=None,
 ):
     detector = normalize_detector(detector)
     statistics_dir = Path(statistics_dir)
     statistics = corrected_statistics_path(statistics_dir, detector, tile_size)
     if not statistics.is_file():
         raise FileNotFoundError(statistics)
+    reset_events = None if reset_events is None else tuple(reset_events)
+    reset_event_starts = {}
+    if reset_events is not None:
+        if len(reset_events) > 1:
+            configured_day = float(reset_events[1]["day"])
+            if third_decon_day is not None and not np.isclose(
+                float(third_decon_day), configured_day, rtol=0.0, atol=1.0e-12
+            ):
+                raise ValueError(
+                    "third_decon_day conflicts with the shared reset configuration"
+                )
+            third_decon_day = configured_day
+        warmup_events = [
+            event for event in reset_events if event.get("relative_response_warmup")
+        ]
+        reset_event_starts = {
+            event["name"]: float(event["relative_response_warmup"]["start_nm"])
+            for event in warmup_events
+        }
+        if third_decon_initial_thickness_start_nm is not None:
+            reset_event_starts["third_decon"] = float(
+                third_decon_initial_thickness_start_nm
+            )
+        if warmup_prior_root is not None and warmup_events:
+            if thickness_prior_log_sigma is None:
+                thickness_prior_log_sigma = float(
+                    warmup_events[0]["relative_response_warmup"]["log_sigma"]
+                )
+            if thickness_prior_stages is None:
+                event = warmup_events[0]
+                thickness_prior_stages = (
+                    "third-decon"
+                    if event["name"] == "third_decon"
+                    else f"reset-event:{event['name']}"
+                )
     if third_decon_day is not None:
         third_decon_day = float(third_decon_day)
         if not np.isfinite(third_decon_day):
@@ -880,6 +1009,10 @@ def run_detector(
                 "batch_size=1, joint_batch=False"
             )
         warmup_prior_root = Path(warmup_prior_root)
+    if reset_events is not None and (batch_size != 1 or joint_batch):
+        raise ValueError(
+            "Shared reset-event configurations require independent batch_size=1 fits"
+        )
     output_root = (
         detector_output_root(statistics_dir, detector, tile_size)
         / "relative_response"
@@ -943,6 +1076,10 @@ def run_detector(
                 warmup_prior_root,
                 thickness_prior_log_sigma,
                 thickness_prior_stages,
+            ) + (
+                (reset_events, reset_event_starts)
+                if reset_events is not None
+                else ()
             )
         )
     active_workers = min(workers, len(jobs)) if jobs else 1
@@ -1038,6 +1175,17 @@ def run_detector(
         ),
         "thickness_prior_log_sigma": thickness_prior_log_sigma,
         "thickness_prior_stages": thickness_prior_stages,
+        "reset_config_sha256": reset_config_sha256,
+        "reset_event_names": (
+            None
+            if reset_events is None
+            else [event["name"] for event in reset_events]
+        ),
+        "reset_event_days": (
+            None
+            if reset_events is None
+            else [event.get("day") for event in reset_events]
+        ),
     }
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "relative_response_mode.json").write_text(
@@ -1049,6 +1197,12 @@ def run_detector(
 
 def main(argv=None):
     args = parse_args(argv)
+    reset_config = load_reset_config(args.reset_config)
+    reset_events = list(reset_config["events"])
+    if args.third_decon_day is not None:
+        if len(reset_events) < 2:
+            raise ValueError("--third-decon-day requires a second reset event")
+        reset_events[1]["day"] = float(args.third_decon_day)
     run_detector(
         args.detector,
         args.statistics_dir,
@@ -1068,6 +1222,8 @@ def main(argv=None):
         warmup_prior_root=args.warmup_prior_root,
         thickness_prior_log_sigma=args.thickness_prior_log_sigma,
         thickness_prior_stages=args.thickness_prior_stages,
+        reset_events=tuple(reset_events),
+        reset_config_sha256=reset_config["sha256"],
     )
 
 

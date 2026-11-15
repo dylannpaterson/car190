@@ -101,6 +101,7 @@ experiment and is not supported by the current cache path.
 
 ```bash
 python -m pip install -r requirements-wfi01-ice.txt
+python -m pip install 'PyYAML>=6.0'
 python -m pip install /path/to/roman-mast-tools-master
 python -c 'import roman_telem; print(roman_telem.__file__)'
 ```
@@ -389,6 +390,17 @@ input, route, settings profile, or pipeline version is rejected for that output
 path. See `docs/WFI_FULL_PIPELINE_REFACTOR_PLAN.md` for the output layout and
 regression contract.
 
+Reset and decon boundaries are read from `wfi_pipeline/reset_events.yaml` by
+both production routes, the joint ice-history fit, bundle/H5 packaging, the H5
+history updater, and production trajectory plots. The first event uses the
+Program 1063 day recorded in each statistics file; later events specify their
+day relative to the same reference. Add an event entry with a unique `name`,
+`day`, and `thickness_prior` (`median_nm` and `log_sigma`). Optional
+`relative_response_warmup` and `h5_prior` blocks configure the scalar-rate
+warmup and H5-anchored thickness prior. Event days must be strictly increasing.
+Fit archives and bundles retain generic reset-event arrays; the existing
+`third_decon_*` fields remain compatibility aliases for the validated default.
+
 The deliverable H5 is `production/wavelength_response_bundle/final/joint_modulated_v2.h5`.
 The reflectance-mode, history-reference, and prototype H5s are build-stage
 intermediates under `production/wavelength_response_bundle/intermediates/h5/`.
@@ -414,11 +426,16 @@ python update_ice_history.py \
 `--input-path` resolves the 18 corrected-statistics files. `--base-h5` is an
 already-existing H5 from the previous validated run; it is independent of the
 new statistics and does not need to be produced in the new dated directory.
+The input may be either `corrected_statistics/` or
+`corrected_statistics_4h_thinned/`; the updater uses the supplied cadence as-is
+and does not thin it. Its independent tile batch size is reduced automatically
+for longer observation axes.
 The fit uses that H5 as its only optical model input; no per-tile fit archive
-or fixed-response cache is read. Standard wavelength bundles beside the base
-H5 are preserved as spectral-output scaffolds. LED offsets are fitted from the
-corrected statistics. Batch size, 48-hour spline spacing, and iteration limits
-use internal defaults. It writes the usual base/modulated bundle and
+or fixed-response cache is read. Standard wavelength bundles are located from
+the base H5's recorded source-bundle provenance, so the H5 can be copied to a
+separate directory while its original bundle directory remains available. LED
+offsets are fitted from the corrected statistics. Batch size, 48-hour spline
+spacing, and iteration limits use internal defaults. It writes the usual base/modulated bundle and
 `final/joint_modulated_v2.h5` filenames.
 The complete independent tile histories are retained at every data epoch in
 `production/wavelength_response_bundle/intermediates/h5/joint_ice_history_reference.h5`;

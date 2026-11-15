@@ -24,7 +24,7 @@ from wfi_production_plot_annotations import (
     load_time_annotations,
     event_legend_handles,
     non_annotation_legend_handles,
-    split_time_series_at_reset,
+    split_time_series_at_resets,
 )
 from wfi_production_layout import (
     DEFAULT_TILE_SIZE,
@@ -92,6 +92,8 @@ def load_detector_data(detector, output_root, fit_dirs):
     node_multipliers = []
     map_histories = []
     node_count = None
+    reset_days = None
+    reset_event_names = None
 
     for tile_id, fit_dir in enumerate(fit_dirs):
         with np.load(fit_dir / "posterior_samples.npz", allow_pickle=False) as samples:
@@ -101,14 +103,31 @@ def load_detector_data(detector, output_root, fit_dirs):
             tile_days = np.asarray(samples["observation_days"], dtype=float).reshape(-1)
             tile_leds = np.asarray(samples["observation_led"], dtype=int).reshape(-1)
             tile_repeats = np.asarray(samples["observation_repeat"], dtype=int).reshape(-1)
+            if "reset_event_days" in samples:
+                tile_reset_days = np.asarray(samples["reset_event_days"], dtype=float).reshape(-1)
+                tile_reset_names = np.asarray(samples["reset_event_names"]).astype(str).reshape(-1)
+            else:
+                tile_reset_days = np.asarray(
+                    samples.get("ice_reset_days", [samples.get("ice_reset_day", DEFAULT_RESET_DAY)]),
+                    dtype=float,
+                ).reshape(-1)
+                tile_reset_names = np.asarray(
+                    ["program1063_reset"] + ["third_decon"] * max(0, tile_reset_days.size - 1)
+                ).astype(str)
             if days is None:
                 days, leds, repeats = tile_days, tile_leds, tile_repeats
+                reset_days, reset_event_names = tile_reset_days, tile_reset_names
             elif not (
                 np.array_equal(days, tile_days)
                 and np.array_equal(leds, tile_leds)
                 and np.array_equal(repeats, tile_repeats)
             ):
                 raise ValueError(f"Observation metadata differs in {fit_dir}")
+            elif not (
+                np.array_equal(reset_days, tile_reset_days)
+                and np.array_equal(reset_event_names, tile_reset_names)
+            ):
+                raise ValueError(f"Reset-event metadata differs in {fit_dir}")
 
             def one_tile_series(name):
                 value = np.asarray(samples[name], dtype=float)
@@ -181,6 +200,8 @@ def load_detector_data(detector, output_root, fit_dirs):
         "node_thickness": np.asarray(node_thickness, dtype=float),
         "node_multipliers": np.asarray(node_multipliers, dtype=float),
         "map_histories": map_histories,
+        "reset_days": np.asarray(reset_days, dtype=float),
+        "reset_event_names": np.asarray(reset_event_names).astype(str),
         "ar_rows": ar_rows,
         "prediction_rows": prediction_rows,
     }
@@ -203,25 +224,29 @@ def production_plot_data(data):
     }
 
 
-def save_independent_trajectory_plot(path, data, reset_day, time_annotations=None):
+def save_independent_trajectory_plot(
+    path, data, reset_day=None, time_annotations=None, reset_days=None
+):
     days = data["days"]
     order = np.argsort(days, kind="stable")
     sorted_days = days[order]
     sorted_thickness = data["thickness"][:, order]
     sorted_rates = data["rates"][:, order]
-    plot_days, sorted_thickness, sorted_rates = split_time_series_at_reset(
+    if reset_days is None:
+        reset_days = (reset_day,) if reset_day is not None else ()
+    plot_days, sorted_thickness, sorted_rates = split_time_series_at_resets(
         sorted_days,
         sorted_thickness,
         sorted_rates,
-        reset_day=reset_day,
+        reset_days=reset_days,
     )
     mean_thickness = np.mean(data["thickness"][:, order], axis=0)
     mean_rates = np.mean(data["rates"][:, order], axis=0)
-    _, mean_thickness, mean_rates = split_time_series_at_reset(
+    _, mean_thickness, mean_rates = split_time_series_at_resets(
         sorted_days,
         mean_thickness,
         mean_rates,
-        reset_day=reset_day,
+        reset_days=reset_days,
     )
     figure, axes = plt.subplots(2, 1, figsize=(11, 9), sharex=True)
     tile_count = data["thickness"].shape[0]
@@ -259,14 +284,21 @@ def save_independent_trajectory_plot(path, data, reset_day, time_annotations=Non
     for index, axis in enumerate(axes):
         if time_annotations is not None:
             annotate_time_axis(axis, time_annotations)
-        axis.axvline(
-            reset_day,
-            color="0.35",
-            linestyle=":",
-            linewidth=0.9,
-            alpha=0.8,
-            label="Decon2",
-        )
+        for reset_index, reset_boundary in enumerate(reset_days):
+            axis.axvline(
+                reset_boundary,
+                color="0.35",
+                linestyle=":",
+                linewidth=0.9,
+                alpha=0.8,
+                label=(
+                    "Decon2"
+                    if reset_index == 0
+                    else "Third decon"
+                    if reset_index == 1
+                    else f"Reset {reset_index + 1}"
+                ),
+            )
         axis.set_xlabel("Days since first exposure" if index == len(axes) - 1 else "")
         axis.grid(alpha=0.2)
         handles, labels = non_annotation_legend_handles(axis, time_annotations)
@@ -381,6 +413,7 @@ def save_detector_plots(
     output_root=None,
     statistics_path=None,
     tile_size=DEFAULT_TILE_SIZE,
+    reset_days=None,
 ):
     output_root = (
         detector_root(detector, root, tile_size)
@@ -394,6 +427,11 @@ def save_detector_plots(
         statistics_path = Path(statistics_path)
     time_annotations = load_time_annotations(statistics_path)
     data = load_detector_data(detector, output_root, fit_dirs)
+    if reset_days is None:
+        reset_days = data["reset_days"]
+    reset_days = np.asarray(reset_days, dtype=float).reshape(-1)
+    if reset_days.size:
+        reset_day = float(reset_days[0])
     plot_data = production_plot_data(data)
     prediction_quantiles = np.stack(
         (data["modeled"], data["modeled"], data["modeled"])
@@ -402,8 +440,9 @@ def save_detector_plots(
     save_independent_trajectory_plot(
         output_root / "numpyro_ice_trajectory.png",
         data,
-        reset_day=reset_day,
+        reset_day=(float(reset_days[0]) if len(reset_days) else reset_day),
         time_annotations=time_annotations,
+        reset_days=reset_days,
     )
     save_rate_histogram(
         output_root / "numpyro_rate_histogram_pre_post_reset.png",

@@ -87,8 +87,13 @@ def resolve_warmup_prior_settings(
         raise ValueError("Thickness prior log sigma must be positive and finite")
     if thickness_prior_stages is None:
         thickness_prior_stages = DEFAULT_WARMUP_THICKNESS_PRIOR_STAGES
-    if thickness_prior_stages not in ("all", "third-decon"):
-        raise ValueError("Thickness prior stages must be 'all' or 'third-decon'")
+    if thickness_prior_stages not in ("all", "third-decon") and not str(
+        thickness_prior_stages
+    ).startswith("reset-event:"):
+        raise ValueError(
+            "Thickness prior stages must be 'all', 'third-decon', or "
+            "'reset-event:<event-name>'"
+        )
     return (
         resolve_portable_path(warmup_prior_root),
         thickness_prior_log_sigma,
@@ -120,8 +125,13 @@ def warmup_thickness_prior(
     prior_stages,
 ):
     """Load a per-tile thickness prior center from a constant-rate warmup."""
-    if prior_stages not in ("all", "third-decon"):
-        raise ValueError("prior_stages must be 'all' or 'third-decon'")
+    if prior_stages not in ("all", "third-decon") and not str(
+        prior_stages
+    ).startswith("reset-event:"):
+        raise ValueError(
+            "prior_stages must be 'all', 'third-decon', or "
+            "'reset-event:<event-name>'"
+        )
     if not np.isfinite(prior_sigma_log) or prior_sigma_log <= 0.0:
         raise ValueError("prior_sigma_log must be positive and finite")
     archive_path = (
@@ -136,12 +146,39 @@ def warmup_thickness_prior(
     centers = {}
     sigmas = {}
     with np.load(archive_path, allow_pickle=False) as archive:
-        for name in thickness_names:
-            if prior_stages == "third-decon" and name != "third_decon_initial_thickness_log_nm":
-                centers[name] = np.asarray(
-                    np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM)
+        event_names = data["reset_event_names"]
+        for index, name in enumerate(thickness_names):
+            if index == 0:
+                event_name = None
+                event = None
+            else:
+                event_name = event_names[index - 1]
+                configured_events = data.get("reset_events", ())
+                event = (
+                    configured_events[index - 1]
+                    if len(configured_events) >= index
+                    else None
                 )
-                sigmas[name] = production.INITIAL_THICKNESS_LOG_SIGMA
+            use_warmup = prior_stages == "all"
+            if prior_stages == "third-decon":
+                use_warmup = event_name == "third_decon"
+            elif str(prior_stages).startswith("reset-event:"):
+                use_warmup = event_name == str(prior_stages).split(":", 1)[1]
+            if not use_warmup:
+                prior = {} if event is None else event.get("thickness_prior", {})
+                centers[name] = np.asarray(
+                    np.log(
+                        float(
+                            prior.get(
+                                "median_nm",
+                                production.INITIAL_THICKNESS_LOG_MEDIAN_NM,
+                            )
+                        )
+                    )
+                )
+                sigmas[name] = float(
+                    prior.get("log_sigma", production.INITIAL_THICKNESS_LOG_SIGMA)
+                )
                 continue
             if name not in archive:
                 raise ValueError(f"Warmup archive lacks {name}: {archive_path}")
@@ -170,10 +207,11 @@ def write_outputs(
     spline_knot_days=None,
     spline_knot_boundaries=None,
     spline_knot_segment_sizes=None,
+    reset_event_initial_thickness_starts_nm=None,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
     observed = np.asarray(data["sums"], dtype=float) / np.asarray(data["counts"], dtype=float)
-    _, offset_names = production.reset_site_names(data)
+    thickness_names, offset_names = production.reset_site_names(data)
     reset_days = production.reset_days_for_data(data)
     reset_masks = np.asarray(data["days"], dtype=float)[None, :] >= reset_days[:, None]
     reset_offsets = np.stack(
@@ -329,19 +367,67 @@ def write_outputs(
         archive_values.update(
             {
                 "ice_reset_days": np.asarray(reset_days, dtype=float),
-                "third_decon_day": np.asarray(float(reset_days[1])),
-                "third_decon_initial_thickness_log_nm": np.asarray(
-                    values["third_decon_initial_thickness_log_nm"]
-                ),
-                "post_third_decon_tile_log_offset": np.asarray(
-                    values["post_third_decon_tile_log_offset"]
-                ),
             }
         )
-        if third_decon_initial_thickness_start_nm is not None:
+        if data["reset_event_names"][1] == "third_decon":
+            archive_values.update(
+                {
+                    "third_decon_day": np.asarray(float(reset_days[1])),
+                    "third_decon_initial_thickness_log_nm": np.asarray(
+                        values["third_decon_initial_thickness_log_nm"]
+                    ),
+                    "post_third_decon_tile_log_offset": np.asarray(
+                        values["post_third_decon_tile_log_offset"]
+                    ),
+                }
+            )
+        if (
+            third_decon_initial_thickness_start_nm is not None
+            and data["reset_event_names"][1] == "third_decon"
+        ):
             archive_values["third_decon_initial_thickness_start_nm"] = np.asarray(
                 float(third_decon_initial_thickness_start_nm)
             )
+    archive_values["reset_event_days"] = np.asarray(reset_days, dtype=np.float64)
+    archive_values["reset_event_names"] = np.asarray(
+        data["reset_event_names"], dtype="U64"
+    )
+    archive_values["reset_event_thickness_site_names"] = np.asarray(
+        thickness_names[1:], dtype="U96"
+    )
+    archive_values["reset_event_offset_site_names"] = np.asarray(
+        offset_names, dtype="U96"
+    )
+    archive_values["reset_event_initial_thickness_log_nm"] = np.stack(
+        [np.asarray(values[name], dtype=float) for name in thickness_names[1:]], axis=0
+    )
+    archive_values["reset_event_tile_log_offsets"] = np.stack(
+        [np.asarray(values[name], dtype=float) for name in offset_names], axis=0
+    )
+    reset_event_starts = reset_event_initial_thickness_starts_nm or {}
+    archive_values["reset_event_initial_thickness_start_nm"] = np.asarray(
+        [reset_event_starts.get(name, np.nan) for name in data["reset_event_names"]],
+        dtype=np.float64,
+    )
+    configured_events = data.get("reset_events", ())
+    archive_values["reset_event_thickness_prior_median_nm"] = np.asarray(
+        [
+            event.get("thickness_prior", {}).get(
+                "median_nm", production.INITIAL_THICKNESS_LOG_MEDIAN_NM
+            )
+            for event in configured_events
+        ],
+        dtype=np.float64,
+    )
+    archive_values["reset_event_thickness_prior_log_sigma"] = np.asarray(
+        [
+            event.get("thickness_prior", {}).get(
+                "log_sigma", production.INITIAL_THICKNESS_LOG_SIGMA
+            )
+            for event in configured_events
+        ],
+        dtype=np.float64,
+    )
     np.savez_compressed(output_dir / "posterior_samples.npz", **archive_values)
 
     ar_fields = ["detector", "tile_id", "tile_row", "tile_col"]
@@ -510,6 +596,8 @@ def fit_one(
     warmup_prior_root=None,
     thickness_prior_log_sigma=None,
     thickness_prior_stages=None,
+    reset_events=None,
+    reset_event_initial_thickness_starts_nm=None,
 ):
     """Fit one tile from a cached response and a previous tile fit."""
     (
@@ -528,7 +616,8 @@ def fit_one(
     response_cache_path = Path(response_cache_path)
     data = production.load_tile_statistics(
         statistics_path,
-        third_decon_day=third_decon_day,
+        third_decon_day=(None if reset_events is not None else third_decon_day),
+        reset_events=reset_events,
     )
     data["statistics_path"] = str(statistics_path)
     context = production.load_response_context(data["sca_names"])
@@ -543,6 +632,9 @@ def fit_one(
         trajectory_rate_initialization_nm_day=trajectory_rate_initialization_nm_day,
         fit_led_log_offsets=fit_led_log_offsets,
         third_decon_initial_thickness_start_nm=third_decon_initial_thickness_start_nm,
+        reset_event_initial_thickness_starts_nm=(
+            reset_event_initial_thickness_starts_nm
+        ),
     )
     warmup_evaluator = build_ice_only_constant_rate_evaluator(
         data,
@@ -561,21 +653,48 @@ def fit_one(
         jnp,
         led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
     )
-    warmup_thickness_centers = None
-    warmup_thickness_sigmas = None
+    thickness_names, _ = production.reset_site_names(data)
+    warmup_thickness_centers = {
+        name: np.asarray(np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM))
+        for name in thickness_names
+    }
+    warmup_thickness_sigmas = {
+        name: production.INITIAL_THICKNESS_LOG_SIGMA for name in thickness_names
+    }
+    for event_index, name in enumerate(thickness_names[1:]):
+        configured_events = data.get("reset_events", ())
+        prior = (
+            configured_events[event_index].get("thickness_prior", {})
+            if len(configured_events) > event_index
+            else {}
+        )
+        warmup_thickness_centers[name] = np.asarray(
+            np.log(
+                float(
+                    prior.get(
+                        "median_nm", production.INITIAL_THICKNESS_LOG_MEDIAN_NM
+                    )
+                )
+            )
+        )
+        warmup_thickness_sigmas[name] = float(
+            prior.get("log_sigma", production.INITIAL_THICKNESS_LOG_SIGMA)
+        )
     if warmup_prior_root is not None:
         if thickness_prior_log_sigma is None or thickness_prior_stages is None:
             raise ValueError(
                 "warmup_prior_root requires thickness_prior_log_sigma and "
                 "thickness_prior_stages"
             )
-        warmup_thickness_centers, warmup_thickness_sigmas = warmup_thickness_prior(
+        configured_centers, configured_sigmas = warmup_thickness_prior(
             warmup_prior_root,
             int(np.asarray(data["tile_ids"]).reshape(-1)[0]),
             data,
             float(thickness_prior_log_sigma),
             thickness_prior_stages,
         )
+        warmup_thickness_centers.update(configured_centers)
+        warmup_thickness_sigmas.update(configured_sigmas)
     elif thickness_prior_log_sigma is not None or thickness_prior_stages is not None:
         raise ValueError(
             "thickness prior settings require warmup_prior_root"
@@ -587,14 +706,8 @@ def fit_one(
         jax,
         jnp,
         led_log_offset_prior_sigma_log=led_log_offset_prior_sigma_log,
-        **(
-            {
-                "thickness_prior_log_centers": warmup_thickness_centers,
-                "thickness_prior_log_sigma": warmup_thickness_sigmas,
-            }
-            if warmup_prior_root is not None
-            else {}
-        ),
+        thickness_prior_log_centers=warmup_thickness_centers,
+        thickness_prior_log_sigma=warmup_thickness_sigmas,
     )
     state = relative_state(data, values, cache, jax, jnp)
     write_outputs(
@@ -618,6 +731,9 @@ def fit_one(
         thickness_prior_log_sigma=thickness_prior_log_sigma,
         thickness_prior_stages=thickness_prior_stages,
         warmup_prior_root=warmup_prior_root,
+        reset_event_initial_thickness_starts_nm=(
+            reset_event_initial_thickness_starts_nm
+        ),
     )
     print(f"Wrote relative-response fit under {output_dir}", flush=True)
     print(

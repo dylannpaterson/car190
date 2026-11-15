@@ -1,0 +1,25 @@
+version: 1
+
+# The first event is located from program 1063 in each corrected statistics
+# file. Additional reset/decon events use elapsed days from the same reference.
+events:
+  - name: program1063_reset
+    day_source: program1063
+    thickness_prior:
+      median_nm: 10
+      log_sigma: 1.5
+    h5_prior:
+      center: configured_median
+      log_sigma: 1.5
+
+  - name: third_decon
+    day: 38.79784510416666
+    thickness_prior:
+      median_nm: 10
+      log_sigma: 1.5
+    relative_response_warmup:
+      start_nm: 40
+      log_sigma: 0.1
+    h5_prior:
+      center: base_h5
+      log_sigma: 0.1

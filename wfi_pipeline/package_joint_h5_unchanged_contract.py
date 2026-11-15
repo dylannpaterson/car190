@@ -56,9 +56,21 @@ def main():
         with np.load(fitted_gray_source_bundle, allow_pickle=False) as bundle:
             bundle_detectors = np.asarray(bundle['detectors']).astype(str)
             bundle_tile_ids = np.asarray(bundle['tile_ids'], dtype=int)
-            first_offsets = np.asarray(bundle['post_reset_tile_log_offset'], dtype=float)
-            third_offsets = np.asarray(bundle['post_third_decon_tile_log_offset'], dtype=float)
-        if not (bundle_detectors.shape == bundle_tile_ids.shape == first_offsets.shape == third_offsets.shape):
+            if 'reset_event_tile_log_offsets' in bundle:
+                event_offsets = np.asarray(bundle['reset_event_tile_log_offsets'], dtype=float)
+                event_names = np.asarray(bundle.get('reset_event_names', [])).astype(str).reshape(-1)
+            else:
+                event_offsets = np.column_stack((
+                    np.asarray(bundle['post_reset_tile_log_offset'], dtype=float),
+                    np.asarray(bundle['post_third_decon_tile_log_offset'], dtype=float),
+                ))
+                event_names = np.asarray(['program1063_reset', 'third_decon'])
+        if (
+            bundle_detectors.shape != bundle_tile_ids.shape
+            or event_offsets.ndim != 2
+            or event_offsets.shape[0] != bundle_tile_ids.size
+            or event_offsets.shape[1] != fitted_gray_reset_hours.size
+        ):
             raise ValueError('Fitted gray source arrays do not share their tile axis')
         for detector in comparison.DETECTORS:
             selected = bundle_detectors == detector
@@ -66,9 +78,7 @@ def main():
             if tile_ids.size != 256 or set(tile_ids.tolist()) != set(range(256)):
                 raise ValueError(f'{detector}: fitted gray source does not contain all 256 tiles')
             order = np.argsort(tile_ids)
-            fitted_gray_by_detector[detector] = np.column_stack(
-                (first_offsets[selected][order], third_offsets[selected][order])
-            )
+            fitted_gray_by_detector[detector] = event_offsets[selected][order]
         with h5py.File(args.output, 'w') as out:
             # Start with exactly the released contract. All replacements are
             # existing fields, not optional groups understood only by our code.
@@ -112,9 +122,20 @@ def main():
 
             # The replacement deposition and instrument arrays share the source
             # origin already. Shifting these a second time changes the model.
-            out['instrument/gray'][...] = source['instrument/gray'][()]
-            for key in ('gray_period_hours', 'step_boundary_hours'):
-                out[f'instrument/{key}'][...] = source[f'instrument/{key}'][()]
+            for key in ('gray', 'gray_period_hours', 'step_boundary_hours'):
+                source_values = source[f'instrument/{key}'][()]
+                output_dataset = out[f'instrument/{key}']
+                if output_dataset.shape != source_values.shape:
+                    dtype = output_dataset.dtype
+                    del out[f'instrument/{key}']
+                    out['instrument'].create_dataset(
+                        key,
+                        data=np.asarray(source_values, dtype=dtype),
+                        compression='gzip' if np.asarray(source_values).ndim else None,
+                        shuffle=bool(np.asarray(source_values).ndim),
+                    )
+                else:
+                    output_dataset[...] = source_values
 
             # Do not misrepresent Eric's unrelated fitted calibration values as
             # estimates for our model. These fields are stored, not applied by
@@ -133,8 +154,19 @@ def main():
                 indices = np.array([
                     np.flatnonzero(episodes == e)[0 if use_first else -1] for e in unique
                 ])
-                out[f'time/episode_{prefix}_hours'][...] = hours[indices]
-                out[f'time/episode_{prefix}_utc'][...] = utc[indices]
+                for suffix, values in (
+                    ('hours', hours[indices]),
+                    ('utc', utc[indices]),
+                ):
+                    dataset_path = f'time/episode_{prefix}_{suffix}'
+                    target = out[dataset_path]
+                    values = np.asarray(values, dtype=target.dtype)
+                    if target.shape != values.shape:
+                        dtype = target.dtype
+                        del out[dataset_path]
+                        out['time'].create_dataset(dataset_path.split('/')[-1], data=values, dtype=dtype)
+                    else:
+                        target[...] = values
 
             out.attrs['n_modes'] = out['reflectance/modes'].shape[0]
             out.attrs['release_version'] = 'joint_modulated_unchanged_reader'
@@ -180,7 +212,15 @@ def main():
             sca = int(detector[3:])
             actual_gray = np.asarray(model.gray(sca, x, y, stage_hours), dtype=float)
             log_offsets = fitted_gray_by_detector[detector]
-            expected_gray = np.exp(np.column_stack((np.zeros(256), log_offsets)))
+            if event_names.size == 2 and event_names[1] == 'third_decon':
+                expected_gray = np.exp(
+                    np.column_stack((np.zeros(256), log_offsets))
+                )
+            else:
+                cumulative_log_offsets = np.cumsum(log_offsets, axis=1)
+                expected_gray = np.exp(
+                    np.column_stack((np.zeros(256), cumulative_log_offsets))
+                )
             np.testing.assert_allclose(
                 actual_gray, expected_gray, rtol=2e-8, atol=2e-10,
                 err_msg=f'{detector}: unchanged-reader gray factors differ from current fitted tiles',

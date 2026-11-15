@@ -9,6 +9,7 @@ import numpy as np
 
 import run_wfi_production as runner
 import run_wfi_relative_response_production as relative_runner
+from reset_events import load_reset_config
 
 
 def _timeout_test_process(job, finished):
@@ -181,6 +182,7 @@ class ProductionRunnerTests(unittest.TestCase):
         )
         with patch.object(relative_runner, "run_detector") as run_detector:
             runner.run_cached_response(arguments, ["WFI01"])
+        reset_config = load_reset_config()
         run_detector.assert_called_once_with(
             "WFI01",
             Path("."),
@@ -192,6 +194,8 @@ class ProductionRunnerTests(unittest.TestCase):
             workers=2,
             batch_size=8,
             joint_batch=False,
+            reset_events=tuple(reset_config["events"]),
+            reset_config_sha256=reset_config["sha256"],
         )
 
     def test_response_cache_argument_requires_one_detector(self):

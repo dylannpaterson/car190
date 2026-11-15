@@ -9,6 +9,7 @@ from build_wfi_wavelength_response_bundle import (
 )
 from wfi_wavelength_response_bundle import (
     BUNDLE_VERSION,
+    bundle_summary,
     evaluate,
     load_bundle,
     nearest_tile,
@@ -94,8 +95,37 @@ def test_bundle_load_evaluate_and_nearest_tile(tmp_path):
         response_right=np.asarray(
             [[[1.0, 2.0, 3.0]], [[1.0, 2.0, 3.0]]]
         ),
+        observation_days=np.asarray([0.0, 1.5, 2.5]),
+        observation_start_time=np.asarray(["a", "b", "c"]),
+        observation_led=np.asarray([1, 2, 3]),
+        observation_repeat=np.asarray([0, 1, 2]),
+        observation_program=np.asarray([1039, 1063, 1063]),
+        groups=np.asarray([0, 1, 2]),
+        tile_ice_thickness=np.asarray([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]),
+        tile_instantaneous_rate_nm_day=np.ones((2, 3)),
+        post_reset_tile_log_offset=np.asarray([0.1, -0.2]),
+        post_reset_tile_throughput_factor=np.exp([0.1, -0.2]),
+        ice_reset_day=np.asarray(1.0),
+        third_decon_day=np.asarray(2.0),
+        post_third_decon_tile_log_offset=np.asarray([0.2, 0.3]),
+        post_third_decon_tile_throughput_factor=np.exp([0.2, 0.3]),
+        reset_event_days=np.asarray([1.0, 2.0, 2.5]),
+        reset_event_names=np.asarray(
+            ["program1063_reset", "third_decon", "fourth_decon"]
+        ),
+        reset_event_tile_log_offsets=np.asarray(
+            [[0.1, 0.2, 0.05], [-0.2, 0.3, 0.04]]
+        ),
+        reset_event_tile_throughput_factors=np.exp(
+            [[0.1, 0.2, 0.05], [-0.2, 0.3, 0.04]]
+        ),
     )
     bundle = load_bundle(path)
+    assert bundle["reset_events_included"] is True
+    assert bundle_summary(bundle)["reset_events"][-1] == {
+        "name": "fourth_decon",
+        "day": 2.5,
+    }
     clean, response = evaluate(
         bundle, 44, [1.0], [490.0, 510.0], detector="WFI01"
     )

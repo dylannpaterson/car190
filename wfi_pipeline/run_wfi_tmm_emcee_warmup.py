@@ -70,6 +70,7 @@ def run_emcee(
     warmup_steps=0,
     fixed_rate_nm_day=None,
     third_decon_day=None,
+    reset_events=None,
     fixed_incidence_angle_deg=None,
     fit_incidence_angle=True,
     trajectory_rate_prior_mean_nm_day=production.TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY,
@@ -167,7 +168,14 @@ def run_emcee(
         )
     else:
         site_order = LINEAR_RATE_SITE_ORDER
-    if third_decon_day is not None:
+    if reset_events is not None:
+        reset_layout = {
+            "reset_days": np.arange(len(reset_events), dtype=float),
+            "reset_event_names": tuple(event["name"] for event in reset_events),
+        }
+        thickness_names, offset_names = production.reset_site_names(reset_layout)
+        site_order = (*site_order, *thickness_names[1:], *offset_names)
+    elif third_decon_day is not None:
         site_order = (
             *site_order,
             "third_decon_initial_thickness_log_nm",
@@ -201,7 +209,8 @@ def run_emcee(
 
     data = production.load_tile_statistics(
         statistics_path,
-        third_decon_day=third_decon_day,
+        third_decon_day=(None if reset_events is not None else third_decon_day),
+        reset_events=reset_events,
     )
     context = production.load_response_context(data["sca_names"])
     data["qe_columns"] = context["qe_columns"]
@@ -360,7 +369,18 @@ def run_emcee(
     }
     jitter = np.concatenate(
         [
-            np.full(site_sizes[name], jitter_by_site[name], dtype=float)
+            np.full(
+                site_sizes[name],
+                jitter_by_site.get(
+                    name,
+                    0.35
+                    if "initial_thickness" in name
+                    else 0.08
+                    if name.startswith("post_reset_event_")
+                    else 0.25,
+                ),
+                dtype=float,
+            )
             for name in site_order
         ]
     )

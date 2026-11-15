@@ -16,6 +16,11 @@ import traceback
 import fit_wfi_tmm_production as production
 import numpy as np
 import run_wfi_tmm_emcee_warmup as emcee_warmup
+from reset_events import (
+    DEFAULT_RESET_CONFIG,
+    load_reset_config,
+    resolve_reset_events,
+)
 from wfi_production_layout import (
     DEFAULT_TILE_SIZE,
     complete_tile_ids,
@@ -92,8 +97,13 @@ def resolve_warmup_prior_settings(
         raise ValueError("Thickness prior log sigma must be positive and finite")
     if thickness_prior_stages is None:
         thickness_prior_stages = DEFAULT_WARMUP_THICKNESS_PRIOR_STAGES
-    if thickness_prior_stages not in ("all", "third-decon"):
-        raise ValueError("Thickness prior stages must be 'all' or 'third-decon'")
+    if thickness_prior_stages not in ("all", "third-decon") and not str(
+        thickness_prior_stages
+    ).startswith("reset-event:"):
+        raise ValueError(
+            "Thickness prior stages must be 'all', 'third-decon', or "
+            "'reset-event:<event-name>'"
+        )
     return Path(warmup_prior_root), thickness_prior_log_sigma, thickness_prior_stages
 
 
@@ -104,13 +114,15 @@ def load_warmup_thickness_prior(
     third_decon_day,
     thickness_prior_log_sigma,
     thickness_prior_stages,
+    reset_events=None,
 ):
     """Load per-tile log-thickness prior centers from a scalar-rate warmup."""
     if production.INITIAL_THICKNESS_PRIOR_LOGNORMAL != "lognormal":
         raise ValueError("Warmup-centered production priors require lognormal thickness")
     data = production.load_tile_statistics(
         statistics_path,
-        third_decon_day=third_decon_day,
+        third_decon_day=(None if reset_events is not None else third_decon_day),
+        reset_events=reset_events,
     )
     thickness_names, _ = production.reset_site_names(data)
     archive_path = (
@@ -124,15 +136,37 @@ def load_warmup_thickness_prior(
     centers = {}
     sigmas = {}
     with np.load(archive_path, allow_pickle=False) as archive:
-        for name in thickness_names:
-            if thickness_prior_stages == "third-decon" and (
-                name != "third_decon_initial_thickness_log_nm"
-            ):
+        reset_names = data["reset_event_names"]
+        for index, name in enumerate(thickness_names[1:]):
+            event_name = reset_names[index]
+            event = data["reset_events"][index]
+            use_warmup = thickness_prior_stages == "all"
+            if thickness_prior_stages == "third-decon":
+                use_warmup = event_name == "third_decon"
+            elif str(thickness_prior_stages).startswith("reset-event:"):
+                use_warmup = event_name == str(thickness_prior_stages).split(":", 1)[1]
+            if not use_warmup:
+                prior = event.get("thickness_prior", {})
                 centers[name] = np.asarray(
-                    np.log(PRODUCTION_INITIAL_THICKNESS_LOG_MEDIAN_NM)
+                    np.log(
+                        float(
+                            prior.get(
+                                "median_nm",
+                                production.INITIAL_THICKNESS_LOG_MEDIAN_NM,
+                            )
+                        )
+                    )
                 )
-                sigmas[name] = PRODUCTION_INITIAL_THICKNESS_LOG_SIGMA
+                sigmas[name] = float(
+                    prior.get("log_sigma", production.INITIAL_THICKNESS_LOG_SIGMA)
+                )
                 continue
+            if name not in archive:
+                raise ValueError(f"Warmup archive lacks {name}: {archive_path}")
+            centers[name] = np.asarray(archive[name], dtype=float).copy()
+            sigmas[name] = thickness_prior_log_sigma
+        if thickness_prior_stages == "all":
+            name = thickness_names[0]
             if name not in archive:
                 raise ValueError(f"Warmup archive lacks {name}: {archive_path}")
             centers[name] = np.asarray(archive[name], dtype=float).copy()
@@ -225,7 +259,9 @@ def statistics_reset_day(statistics_path):
     return min(reset_days) if reset_days else None
 
 
-def archive_matches_statistics(tile_fit_dir, statistics_path, third_decon_day=None):
+def archive_matches_statistics(
+    tile_fit_dir, statistics_path, third_decon_day=None, reset_events=None
+):
     posterior_path = tile_fit_dir / "posterior_samples.npz"
     if not posterior_path.is_file():
         return False
@@ -252,32 +288,86 @@ def archive_matches_statistics(tile_fit_dir, statistics_path, third_decon_day=No
                     rtol=0.0,
                     atol=1.0e-12,
                 )
-            third_field_names = (
-                "third_decon_day",
-                "third_decon_initial_thickness_log_nm",
-                "post_third_decon_tile_log_offset",
-            )
-            third_fields_present = [name in samples for name in third_field_names]
-            if any(third_fields_present) and not all(third_fields_present):
-                return False
-            archived_third_decon_day = None
-            if "third_decon_day" in samples:
-                value = float(np.asarray(samples["third_decon_day"]).item())
-                if np.isfinite(value):
-                    archived_third_decon_day = value
-                elif all(third_fields_present):
+            if reset_events is not None and expected_reset_day is not None:
+                expected_events = resolve_reset_events(
+                    {"events": tuple(reset_events)}, expected_reset_day
+                )
+                expected_days = np.asarray(
+                    [event["day"] for event in expected_events], dtype=float
+                )
+                if "reset_event_days" not in samples:
                     return False
-            if third_decon_day is None:
-                matches = matches and archived_third_decon_day is None
-            else:
-                matches = matches and archived_third_decon_day is not None
-                if archived_third_decon_day is not None:
-                    matches = matches and np.isclose(
-                        archived_third_decon_day,
-                        float(third_decon_day),
+                matches = matches and np.allclose(
+                    np.asarray(samples["reset_event_days"], dtype=float).reshape(-1),
+                    expected_days,
+                    rtol=0.0,
+                    atol=1.0e-12,
+                )
+                if "reset_event_names" not in samples:
+                    return False
+                matches = matches and np.array_equal(
+                    np.asarray(samples["reset_event_names"]).astype(str).reshape(-1),
+                    np.asarray([event["name"] for event in expected_events]).astype(str),
+                )
+                expected_medians = np.asarray(
+                    [
+                        event.get("thickness_prior", {}).get(
+                            "median_nm", production.INITIAL_THICKNESS_LOG_MEDIAN_NM
+                        )
+                        for event in expected_events
+                    ],
+                    dtype=float,
+                )
+                expected_sigmas = np.asarray(
+                    [
+                        event.get("thickness_prior", {}).get(
+                            "log_sigma", production.INITIAL_THICKNESS_LOG_SIGMA
+                        )
+                        for event in expected_events
+                    ],
+                    dtype=float,
+                )
+                matches = matches and "reset_event_thickness_prior_median_nm" in samples
+                matches = matches and "reset_event_thickness_prior_log_sigma" in samples
+                if matches:
+                    matches = np.allclose(
+                        np.asarray(samples["reset_event_thickness_prior_median_nm"], dtype=float).reshape(-1),
+                        expected_medians,
+                        rtol=0.0,
+                        atol=1.0e-12,
+                    ) and np.allclose(
+                        np.asarray(samples["reset_event_thickness_prior_log_sigma"], dtype=float).reshape(-1),
+                        expected_sigmas,
                         rtol=0.0,
                         atol=1.0e-12,
                     )
+            if reset_events is None:
+                third_field_names = (
+                    "third_decon_day",
+                    "third_decon_initial_thickness_log_nm",
+                    "post_third_decon_tile_log_offset",
+                )
+                third_fields_present = [name in samples for name in third_field_names]
+                if any(third_fields_present) and not all(third_fields_present):
+                    return False
+                archived_third_decon_day = None
+                if "third_decon_day" in samples:
+                    value = float(np.asarray(samples["third_decon_day"]).item())
+                    if np.isfinite(value):
+                        archived_third_decon_day = value
+                    elif all(third_fields_present):
+                        return False
+                if third_decon_day is None:
+                    matches = matches and archived_third_decon_day is None
+                else:
+                    matches = matches and archived_third_decon_day is not None
+                    if archived_third_decon_day is not None:
+                        matches = matches and np.isclose(
+                            archived_third_decon_day,
+                            float(third_decon_day),
+                            rtol=0.0,
+                            atol=1.0e-12,
+                        )
             return matches
     except (KeyError, OSError, ValueError):
         return False
@@ -443,6 +533,7 @@ def fit_tile(
     fixed_absolute_hgcdte_n_log_scale=None,
     thickness_penalty_enabled=PRODUCTION_THICKNESS_PENALTY_ENABLED,
     third_decon_day=None,
+    reset_events=None,
     warmup_prior_root=None,
     thickness_prior_log_sigma=None,
     thickness_prior_stages=None,
@@ -475,7 +566,10 @@ def fit_tile(
     if not force and (tile_fit_dir / "posterior_samples.npz").is_file():
         if (
             archive_matches_statistics(
-                tile_fit_dir, statistics_path, third_decon_day=third_decon_day
+                tile_fit_dir,
+                statistics_path,
+                third_decon_day=third_decon_day,
+                reset_events=reset_events,
             )
             and archive_matches_production_model(
                 tile_fit_dir,
@@ -498,7 +592,8 @@ def fit_tile(
     warmup_config = production.ProductionConfig(
         tile_statistics=statistics_path,
         output_dir=tile_fit_dir,
-        third_decon_day=third_decon_day,
+        third_decon_day=(None if reset_events is not None else third_decon_day),
+        reset_events=reset_events,
         map_init_from=emcee_output,
         smoothness_weight=0.0,
         rate_prior_log_mean=np.log(PRODUCTION_TRAJECTORY_RATE_PRIOR_MEAN_NM_DAY),
@@ -567,6 +662,34 @@ def fit_tile(
     final_initial_values["np_log_rate_nodes"] = rate_reference.copy()
     thickness_prior_centers = None
     thickness_prior_sigmas = None
+    if reset_events is not None:
+        thickness_names, _ = production.reset_site_names(
+            production.load_tile_statistics(
+                statistics_path, reset_events=reset_events
+            )
+        )
+        thickness_prior_centers = {
+            name: np.asarray(np.log(production.INITIAL_THICKNESS_LOG_MEDIAN_NM))
+            for name in thickness_names
+        }
+        thickness_prior_sigmas = {
+            name: production.INITIAL_THICKNESS_LOG_SIGMA
+            for name in thickness_names
+        }
+        for event_index, name in enumerate(thickness_names[1:]):
+            prior = reset_events[event_index].get("thickness_prior", {})
+            thickness_prior_centers[name] = np.asarray(
+                np.log(
+                    float(
+                        prior.get(
+                            "median_nm", production.INITIAL_THICKNESS_LOG_MEDIAN_NM
+                        )
+                    )
+                )
+            )
+            thickness_prior_sigmas[name] = float(
+                prior.get("log_sigma", production.INITIAL_THICKNESS_LOG_SIGMA)
+            )
     if warmup_prior_root is not None:
         thickness_prior_centers, thickness_prior_sigmas = load_warmup_thickness_prior(
             warmup_prior_root,
@@ -575,6 +698,7 @@ def fit_tile(
             third_decon_day,
             thickness_prior_log_sigma,
             thickness_prior_stages,
+            reset_events=reset_events,
         )
     final_model_metadata = {
         "production_model_version": production_model_version(
@@ -671,28 +795,45 @@ def fit_tile(
         ),
     }
     if warmup_prior_root is not None:
-        third_name = "third_decon_initial_thickness_log_nm"
+        thickness_names, _ = production.reset_site_names(warmup_data)
+        reset_prior_centers = {
+            warmup_data["reset_event_names"][index]: float(
+                np.asarray(thickness_prior_centers[name]).reshape(-1)[0]
+            )
+            for index, name in enumerate(thickness_names[1:])
+        }
+        reset_prior_sigmas = {
+            warmup_data["reset_event_names"][index]: float(
+                thickness_prior_sigmas[name]
+            )
+            for index, name in enumerate(thickness_names[1:])
+        }
         final_model_metadata.update(
             {
                 "warmup_prior_root": str(Path(warmup_prior_root).resolve()),
                 "thickness_prior_log_sigma": float(thickness_prior_log_sigma),
                 "thickness_prior_stages": str(thickness_prior_stages),
-                "third_decon_thickness_prior_center_log_nm": float(
-                    np.asarray(thickness_prior_centers[third_name]).reshape(-1)[0]
-                ),
-                "third_decon_thickness_prior_center_nm": float(
-                    np.exp(
-                        np.asarray(thickness_prior_centers[third_name])
-                        .reshape(-1)[0]
-                    )
-                ),
+                "reset_event_thickness_prior_center_log_nm": reset_prior_centers,
+                "reset_event_thickness_prior_center_nm": {
+                    name: float(np.exp(center))
+                    for name, center in reset_prior_centers.items()
+                },
+                "reset_event_thickness_prior_log_sigma": reset_prior_sigmas,
             }
         )
+        if "third_decon" in reset_prior_centers:
+            final_model_metadata["third_decon_thickness_prior_center_log_nm"] = (
+                reset_prior_centers["third_decon"]
+            )
+            final_model_metadata["third_decon_thickness_prior_center_nm"] = float(
+                np.exp(reset_prior_centers["third_decon"])
+            )
     production.fit_one(
         production.ProductionConfig(
             tile_statistics=statistics_path,
             output_dir=tile_fit_dir,
-            third_decon_day=third_decon_day,
+            third_decon_day=(None if reset_events is not None else third_decon_day),
+            reset_events=reset_events,
             map_initial_values=final_initial_values,
             thickness_prior_centers=thickness_prior_centers,
             thickness_prior_sigmas=thickness_prior_sigmas,
@@ -1209,6 +1350,12 @@ def parse_args(argv=None):
         ),
     )
     parser.add_argument(
+        "--reset-config",
+        type=Path,
+        default=DEFAULT_RESET_CONFIG,
+        help="Shared YAML configuration for reset/decon days and priors.",
+    )
+    parser.add_argument(
         "--warmup-prior-root",
         type=Path,
         default=None,
@@ -1281,8 +1428,16 @@ def run_cached_response(selected_args, detectors):
         batch_size=selected_args.batch_size,
         joint_batch=selected_args.joint_batch,
     )
+    reset_config = load_reset_config(selected_args.reset_config)
+    reset_events = list(reset_config["events"])
     if selected_args.third_decon_day is not None:
-        run_kwargs["third_decon_day"] = selected_args.third_decon_day
+        if len(reset_events) < 2:
+            raise ValueError(
+                "--third-decon-day requires a second event in the reset config"
+            )
+        reset_events[1]["day"] = float(selected_args.third_decon_day)
+    run_kwargs["reset_events"] = tuple(reset_events)
+    run_kwargs["reset_config_sha256"] = reset_config["sha256"]
     if selected_args.allow_external_cache_source:
         run_kwargs["allow_external_cache_source"] = True
     if selected_args.fit_led_log_offsets:
@@ -1328,6 +1483,7 @@ def run_detector(
     ),
     fixed_absolute_hgcdte_n_log_scale=None,
     third_decon_day=None,
+    reset_events=None,
     warmup_prior_root=None,
     thickness_prior_log_sigma=None,
     thickness_prior_stages=None,
@@ -1370,6 +1526,17 @@ def run_detector(
         or led_log_offset_prior_sigma_log <= 0.0
     ):
         raise ValueError("led_log_offset_prior_sigma_log must be positive and finite")
+    if reset_events is not None:
+        reset_events = tuple(reset_events)
+        if len(reset_events) > 1:
+            configured_day = float(reset_events[1]["day"])
+            if third_decon_day is not None and not np.isclose(
+                float(third_decon_day), configured_day, rtol=0.0, atol=1.0e-12
+            ):
+                raise ValueError(
+                    "third_decon_day conflicts with the shared reset configuration"
+                )
+            third_decon_day = configured_day
     if third_decon_day is not None:
         third_decon_day = float(third_decon_day)
         if not np.isfinite(third_decon_day):
@@ -1442,7 +1609,8 @@ def run_detector(
             ice_n_constant_reference=ice_n_constant_reference,
             fixed_ice_n_log_constant=PRODUCTION_FIXED_ICE_N_LOG_CONSTANT,
             fit_ar_k_constant=False,
-            third_decon_day=third_decon_day,
+            third_decon_day=(None if reset_events is not None else third_decon_day),
+            reset_events=reset_events,
         )
     else:
         emcee_output = Path(reuse_emcee_from)
@@ -1468,6 +1636,7 @@ def run_detector(
                 tile_fit_dir,
                 paths[tile_id],
                 third_decon_day=third_decon_day,
+                reset_events=reset_events,
             )
             and archive_matches_production_model(
                 tile_fit_dir,
@@ -1497,6 +1666,7 @@ def run_detector(
                 fixed_absolute_hgcdte_n_log_scale,
                 PRODUCTION_THICKNESS_PENALTY_ENABLED,
                 third_decon_day,
+                reset_events,
                 warmup_prior_root,
                 thickness_prior_log_sigma,
                 thickness_prior_stages,
@@ -1559,6 +1729,31 @@ def run_detector(
 
 def main():
     selected_args = parse_args()
+    reset_config = load_reset_config(selected_args.reset_config)
+    reset_events = list(reset_config["events"])
+    if selected_args.third_decon_day is not None:
+        if len(reset_events) < 2:
+            raise ValueError(
+                "--third-decon-day requires a second event in the reset config"
+            )
+        reset_events[1]["day"] = float(selected_args.third_decon_day)
+    configured_warmup_events = [
+        event for event in reset_events if event.get("relative_response_warmup")
+    ]
+    thickness_prior_stages = selected_args.thickness_prior_stages
+    thickness_prior_log_sigma = selected_args.thickness_prior_log_sigma
+    if selected_args.warmup_prior_root is not None and configured_warmup_events:
+        if thickness_prior_stages is None:
+            event = configured_warmup_events[0]
+            thickness_prior_stages = (
+                "third-decon"
+                if event["name"] == "third_decon"
+                else f"reset-event:{event['name']}"
+            )
+        if thickness_prior_log_sigma is None:
+            thickness_prior_log_sigma = float(
+                configured_warmup_events[0]["relative_response_warmup"]["log_sigma"]
+            )
     if selected_args.maxent_weight < 0.0:
         raise ValueError("--maxent-weight must be non-negative")
     if (
@@ -1615,10 +1810,13 @@ def main():
             fixed_absolute_hgcdte_n_log_scale=(
                 selected_args.fixed_absolute_hgcdte_n_log_scale
             ),
-            third_decon_day=selected_args.third_decon_day,
+            third_decon_day=(
+                float(reset_events[1]["day"]) if len(reset_events) > 1 else None
+            ),
+            reset_events=tuple(reset_events),
             warmup_prior_root=selected_args.warmup_prior_root,
-            thickness_prior_log_sigma=selected_args.thickness_prior_log_sigma,
-            thickness_prior_stages=selected_args.thickness_prior_stages,
+            thickness_prior_log_sigma=thickness_prior_log_sigma,
+            thickness_prior_stages=thickness_prior_stages,
             fit_led_log_offsets=selected_args.fit_led_log_offsets,
             led_log_offset_prior_sigma_log=(
                 selected_args.led_log_offset_prior_sigma_log

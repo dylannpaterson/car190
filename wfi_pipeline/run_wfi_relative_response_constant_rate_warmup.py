@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 import fit_wfi_relative_response as relative_fit
+from reset_events import DEFAULT_RESET_CONFIG, load_reset_config
 import wfi_relative_response as cached_response
 from run_wfi_relative_response_production import (
     cache_source_paths,
@@ -55,6 +56,8 @@ def write_warmup_outputs(
     diagnostics,
     cache_path,
     third_decon_initial_thickness_start_nm,
+    reset_event_initial_thickness_starts_nm=None,
+    reset_config_sha256=None,
 ):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -62,6 +65,8 @@ def write_warmup_outputs(
     detector = str(np.asarray(data["sca_names"]).reshape(-1)[0])
     metadata = data["metadata"][tile_id]
     reset_days = np.asarray(data["reset_days"], dtype=float)
+    thickness_names, offset_names = relative_fit.production.reset_site_names(data)
+    reset_event_starts = reset_event_initial_thickness_starts_nm or {}
     archive_values = {
         "map_only": np.asarray(1),
         "tile_ids": np.asarray(data["tile_ids"], dtype=int),
@@ -99,19 +104,43 @@ def write_warmup_outputs(
         "response_cache_version": np.asarray(CACHE_VERSION),
         "third_decon_day": np.asarray(reset_days[1]) if reset_days.size > 1 else np.asarray(np.nan),
         "third_decon_initial_thickness_start_nm": np.asarray(
-            third_decon_initial_thickness_start_nm
+            np.nan
+            if third_decon_initial_thickness_start_nm is None
+            else third_decon_initial_thickness_start_nm
         ),
         "converged": np.asarray(int(diagnostics["converged"])),
         "nfev": np.asarray(diagnostics["nfev"]),
     }
     if reset_days.size > 1:
         archive_values["ice_reset_days"] = reset_days
-        archive_values["post_third_decon_tile_log_offset"] = np.asarray(
-            values["post_third_decon_tile_log_offset"]
-        )
-        archive_values["third_decon_initial_thickness_log_nm"] = np.asarray(
-            values["third_decon_initial_thickness_log_nm"]
-        )
+        if data["reset_event_names"][1] == "third_decon":
+            archive_values["post_third_decon_tile_log_offset"] = np.asarray(
+                values["post_third_decon_tile_log_offset"]
+            )
+            archive_values["third_decon_initial_thickness_log_nm"] = np.asarray(
+                values["third_decon_initial_thickness_log_nm"]
+            )
+    archive_values.update(
+        {
+            "reset_event_days": reset_days,
+            "reset_event_names": np.asarray(data["reset_event_names"], dtype="U64"),
+            "reset_event_thickness_site_names": np.asarray(
+                thickness_names[1:], dtype="U96"
+            ),
+            "reset_event_offset_site_names": np.asarray(offset_names, dtype="U96"),
+            "reset_event_initial_thickness_log_nm": np.stack(
+                [np.asarray(values[name]) for name in thickness_names[1:]], axis=0
+            ),
+            "reset_event_tile_log_offsets": np.stack(
+                [np.asarray(values[name]) for name in offset_names], axis=0
+            ),
+            "reset_event_initial_thickness_start_nm": np.asarray(
+                [reset_event_starts.get(name, np.nan) for name in data["reset_event_names"]],
+                dtype=np.float64,
+            ),
+            "reset_config_sha256": np.asarray(reset_config_sha256 or ""),
+        }
+    )
     if "led_log_offsets" in values:
         archive_values["led_log_offsets"] = np.asarray(values["led_log_offsets"])
         archive_values["fit_led_log_offsets"] = np.asarray(1)
@@ -127,9 +156,15 @@ def write_warmup_outputs(
                 "response_cache": cached_response.portable_path_string(cache_path),
                 "constant_rate": True,
                 "constant_rate_nm_day": diagnostics["constant_rate_map_rate_nm_day"],
-                "third_decon_initial_thickness_start_nm": float(
-                    third_decon_initial_thickness_start_nm
+                "third_decon_initial_thickness_start_nm": (
+                    None
+                    if third_decon_initial_thickness_start_nm is None
+                    else float(third_decon_initial_thickness_start_nm)
                 ),
+                "reset_event_names": list(data["reset_event_names"]),
+                "reset_event_days": reset_days.tolist(),
+                "reset_event_initial_thickness_starts_nm": reset_event_starts,
+                "reset_config_sha256": reset_config_sha256,
                 "converged": bool(diagnostics["converged"]),
                 "nfev": int(diagnostics["nfev"]),
                 "runtime_seconds": diagnostics["total_seconds"],
@@ -183,11 +218,12 @@ def write_warmup_outputs(
     }
 
 
-def _load_tile_context(statistics_path, cache_path, third_decon_day):
+def _load_tile_context(statistics_path, cache_path, third_decon_day=None, reset_events=None):
     initial_fit, initial_statistics = cache_source_paths(cache_path)
     data = relative_fit.production.load_tile_statistics(
         statistics_path,
-        third_decon_day=third_decon_day,
+        third_decon_day=(None if reset_events is not None else third_decon_day),
+        reset_events=reset_events,
     )
     data["statistics_path"] = str(statistics_path)
     context = relative_fit.production.load_response_context(data["sca_names"])
@@ -216,13 +252,53 @@ def _fit_chunk(jobs):
             third_decon_initial_thickness_start_nm,
             fit_led_log_offsets,
             led_log_offset_prior_sigma_log,
+            reset_events,
+            reset_event_initial_thickness_starts_nm,
+            reset_config_sha256,
         ) = job
         output_dir = Path(output_dir)
         warmup_path = output_dir / "constant_rate_map.npz"
         if not force and warmup_path.is_file():
-            continue
+            expected_data = relative_fit.production.load_tile_statistics(
+                statistics_path,
+                third_decon_day=(None if reset_events is not None else third_decon_day),
+                reset_events=reset_events,
+            )
+            with np.load(warmup_path, allow_pickle=False) as existing:
+                same = (
+                    str(np.asarray(existing.get("reset_config_sha256", "")).reshape(-1)[0])
+                    == str(reset_config_sha256 or "")
+                    and np.array_equal(
+                        np.asarray(existing.get("reset_event_names", [] )).astype(str),
+                        np.asarray(expected_data["reset_event_names"]).astype(str),
+                    )
+                    and np.allclose(
+                        np.asarray(existing.get("reset_event_days", []), dtype=float),
+                        np.asarray(expected_data["reset_days"], dtype=float),
+                        rtol=0.0,
+                        atol=1.0e-12,
+                    )
+                    and np.allclose(
+                        np.asarray(
+                            existing.get("reset_event_initial_thickness_start_nm", []),
+                            dtype=float,
+                        ),
+                        np.asarray(
+                            [
+                                reset_event_initial_thickness_starts_nm.get(name, np.nan)
+                                for name in expected_data["reset_event_names"]
+                            ],
+                            dtype=float,
+                        ),
+                        rtol=0.0,
+                        atol=1.0e-12,
+                        equal_nan=True,
+                    )
+                )
+            if same:
+                continue
         data, cache, initial_fit, initial_statistics = _load_tile_context(
-            statistics_path, cache_path, third_decon_day
+            statistics_path, cache_path, third_decon_day, reset_events
         )
         values = relative_fit.load_warm_values(
             data,
@@ -231,6 +307,9 @@ def _fit_chunk(jobs):
             trajectory_rate_initialization_nm_day=rate_initialization_nm_day,
             fit_led_log_offsets=fit_led_log_offsets,
             third_decon_initial_thickness_start_nm=third_decon_initial_thickness_start_nm,
+            reset_event_initial_thickness_starts_nm=(
+                reset_event_initial_thickness_starts_nm
+            ),
         )
         loaded.append((job, data, cache, values))
     if not loaded:
@@ -267,6 +346,8 @@ def _fit_chunk(jobs):
                 diagnostics,
                 job[2],
                 job[7],
+                reset_event_initial_thickness_starts_nm=job[11],
+                reset_config_sha256=job[12],
             )
         )
     return results
@@ -285,24 +366,40 @@ def run_detector(
     third_decon_initial_thickness_start_nm=None,
     fit_led_log_offsets=False,
     led_log_offset_prior_sigma_log=relative_fit.production.LED_LOG_OFFSET_PRIOR_SIGMA_LOG,
+    reset_events=None,
+    reset_config_sha256=None,
 ):
     detector = normalize_detector(detector)
     statistics_dir = Path(statistics_dir)
     statistics = corrected_statistics_path(statistics_dir, detector, tile_size)
     if not statistics.is_file():
         raise FileNotFoundError(statistics)
-    if third_decon_day is None:
-        raise ValueError("third_decon_day is required for this warmup")
-    if third_decon_initial_thickness_start_nm is None:
-        raise ValueError("third_decon_initial_thickness_start_nm is required")
-    third_decon_initial_thickness_start_nm = float(
-        third_decon_initial_thickness_start_nm
-    )
-    if (
-        not np.isfinite(third_decon_initial_thickness_start_nm)
-        or third_decon_initial_thickness_start_nm <= 0.0
-    ):
-        raise ValueError("Third-decon initial thickness start must be positive and finite")
+    reset_events = None if reset_events is None else tuple(reset_events)
+    reset_event_starts = {}
+    if reset_events is not None:
+        if len(reset_events) < 2:
+            raise ValueError("Reset configuration must include a decon event for warmup")
+        configured_day = float(reset_events[1]["day"])
+        if third_decon_day is not None and not np.isclose(
+            float(third_decon_day), configured_day, rtol=0.0, atol=1.0e-12
+        ):
+            raise ValueError("third_decon_day conflicts with the reset configuration")
+        third_decon_day = configured_day
+        reset_event_starts = {
+            event["name"]: float(event["relative_response_warmup"]["start_nm"])
+            for event in reset_events
+            if event.get("relative_response_warmup")
+        }
+    if third_decon_initial_thickness_start_nm is not None:
+        reset_event_starts["third_decon"] = float(
+            third_decon_initial_thickness_start_nm
+        )
+    if third_decon_day is None or not reset_event_starts:
+        raise ValueError("Reset configuration must supply warmup event day and start")
+    for name, value in reset_event_starts.items():
+        if not np.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} initial thickness start must be positive and finite")
+    third_decon_initial_thickness_start_nm = reset_event_starts.get("third_decon")
     output_root = (
         detector_output_root(statistics_dir, detector, tile_size)
         / "relative_response_constant_rate_warmup"
@@ -343,6 +440,9 @@ def run_detector(
                 third_decon_initial_thickness_start_nm,
                 bool(fit_led_log_offsets),
                 float(led_log_offset_prior_sigma_log),
+                reset_events,
+                reset_event_starts,
+                reset_config_sha256,
             )
         )
     active_workers = min(int(workers), len(jobs)) if jobs else 1
@@ -376,6 +476,10 @@ def run_detector(
                 "fit_led_log_offsets": bool(fit_led_log_offsets),
                 "led_log_offset_prior_sigma_log": float(led_log_offset_prior_sigma_log),
                 "allow_external_cache_source": bool(allow_external_cache_source),
+                "reset_config_sha256": reset_config_sha256,
+                "reset_event_names": [event["name"] for event in reset_events or ()],
+                "reset_event_days": [event.get("day") for event in reset_events or ()],
+                "reset_event_initial_thickness_starts_nm": reset_event_starts,
             },
             indent=2,
             sort_keys=True,
@@ -397,9 +501,10 @@ def parse_args(argv=None):
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--workers", type=positive_integer, default=DEFAULT_WORKERS)
     parser.add_argument("--allow-external-cache-source", action="store_true")
-    parser.add_argument("--third-decon-day", type=float, required=True)
+    parser.add_argument("--third-decon-day", type=float, default=None)
+    parser.add_argument("--reset-config", type=Path, default=DEFAULT_RESET_CONFIG)
     parser.add_argument(
-        "--third-decon-initial-thickness-start-nm", type=float, required=True
+        "--third-decon-initial-thickness-start-nm", type=float, default=None
     )
     parser.add_argument("--fit-led-log-offsets", action="store_true")
     parser.add_argument(
@@ -412,6 +517,12 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    reset_config = load_reset_config(args.reset_config)
+    reset_events = list(reset_config["events"])
+    if args.third_decon_day is not None:
+        if len(reset_events) < 2:
+            raise ValueError("--third-decon-day requires a second reset event")
+        reset_events[1]["day"] = float(args.third_decon_day)
     run_detector(
         args.detector,
         args.statistics_dir,
@@ -425,6 +536,8 @@ def main(argv=None):
         third_decon_initial_thickness_start_nm=args.third_decon_initial_thickness_start_nm,
         fit_led_log_offsets=args.fit_led_log_offsets,
         led_log_offset_prior_sigma_log=args.led_log_offset_prior_sigma_log,
+        reset_events=tuple(reset_events),
+        reset_config_sha256=reset_config["sha256"],
     )
 
 

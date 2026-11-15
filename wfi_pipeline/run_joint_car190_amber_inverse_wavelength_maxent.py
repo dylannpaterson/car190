@@ -26,7 +26,6 @@ from experiment_joint_wfi01_inverse_wavelength_maxent import (
     ReciprocalWavelengthMaxEnt,
 )
 from experiment_joint_wfi01_weekly_ice import (
-    RESETS,
     led_loss,
     stellar_ice_gradient,
 )
@@ -192,9 +191,10 @@ def common_pass_mjd(frames, band, pass_name):
     return float(np.median(values))
 
 
-def tile_baseline_at_times(detector, history_root, times):
+def tile_baseline_at_times(detector, history_root, times, reset_days):
     baseline = np.empty((TILE_COUNT, len(times)), dtype=float)
-    target_segment = np.searchsorted(RESETS, times, side="right")
+    reset_days = np.asarray(reset_days, dtype=float).reshape(-1)
+    target_segment = np.searchsorted(reset_days, times, side="right")
     reset_reference = None
     for tile in range(TILE_COUNT):
         path = Path(history_root) / f"tile_{tile:03d}/posterior_samples.npz"
@@ -209,7 +209,7 @@ def tile_baseline_at_times(detector, history_root, times):
         elif not np.allclose(resets, reset_reference, rtol=0.0, atol=1e-8):
             raise ValueError(f"{detector} tile histories disagree on ice reset days")
         source_segment = np.searchsorted(resets, days, side="right")
-        for segment in range(len(RESETS) + 1):
+        for segment in range(len(reset_days) + 1):
             use_target = target_segment == segment
             use_source = source_segment == segment
             if not np.any(use_target):
@@ -222,8 +222,8 @@ def tile_baseline_at_times(detector, history_root, times):
             baseline[tile, use_target] = np.interp(
                 times[use_target], days[use_source], thickness[use_source]
             )
-    if reset_reference is None or not np.allclose(reset_reference, RESETS, rtol=0.0, atol=1e-8):
-        raise ValueError(f"{detector} production reset days do not match the fixed boundaries")
+    if reset_reference is None or not np.allclose(reset_reference, reset_days, rtol=0.0, atol=1e-8):
+        raise ValueError(f"{detector} production reset days differ from configured boundaries")
     return baseline
 
 
@@ -259,6 +259,7 @@ def main():
     parser.add_argument("--resume", action="store_true",
                         help="Continue the same joint optimization from its saved checkpoint")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--reset-config", type=Path, default=ROOT / "wfi_pipeline/reset_events.yaml")
     parser.add_argument("--reciprocal-maxent-weight", type=float, default=MAXENT_U_WEIGHT)
     parser.add_argument(
         "--response-convention", choices=("original", "eric-reader"), default="original",
@@ -293,6 +294,48 @@ def main():
         optical_cache_root = Path(args.optical_cache_root)
     history_root = relative_root / "fits"
     cache_root = optical_cache_root
+    reset_days = None
+    reset_event_names = None
+    for tile_id in range(TILE_COUNT):
+        fit_path = history_root / f"tile_{tile_id:03d}/posterior_samples.npz"
+        if not fit_path.is_file():
+            raise FileNotFoundError(fit_path)
+        with np.load(fit_path, allow_pickle=False) as fit_archive:
+            local_days = np.asarray(
+                fit_archive.get(
+                    "reset_event_days",
+                    fit_archive.get("ice_reset_days", fit_archive.get("ice_reset_day", [])),
+                ),
+                dtype=float,
+            ).reshape(-1)
+            local_names = np.asarray(
+                fit_archive.get(
+                    "reset_event_names",
+                    ["program1063_reset"]
+                    + (["third_decon"] if local_days.size > 1 else []),
+                )
+            ).astype(str).reshape(-1)
+        if reset_days is None:
+            reset_days = local_days
+            reset_event_names = local_names
+        elif not np.allclose(reset_days, local_days, rtol=0.0, atol=1.0e-10):
+            raise ValueError("Per-tile fit archives disagree on reset-event days")
+        elif not np.array_equal(reset_event_names, local_names):
+            raise ValueError("Per-tile fit archives disagree on reset-event names")
+    from reset_events import load_reset_config
+
+    reset_config = load_reset_config(args.reset_config)
+    configured_names = [event["name"] for event in reset_config["events"]]
+    if reset_days.size != len(configured_names) or not np.array_equal(
+        reset_event_names, np.asarray(configured_names).astype(str)
+    ):
+        raise ValueError("Fit reset-event count does not match the shared reset config")
+    for index, event in enumerate(reset_config["events"][1:], start=1):
+        if not np.isclose(reset_days[index], float(event["day"]), rtol=0.0, atol=1.0e-10):
+            raise ValueError(f"Fit reset boundary differs for event {event['name']}")
+    import experiment_joint_wfi01_weekly_ice as weekly_ice
+
+    weekly_ice.RESETS = reset_days.copy()
     detector_number = int(detector[3:])
     area_path = (
         ROOT / "external_reference_data/roman_effarea_v8_20240301"
@@ -343,8 +386,8 @@ def main():
     ])
     led_days = np.unique(np.concatenate([item[9] for tiles in led.bands for item in tiles]))
     times = np.unique(np.r_[led_days, star_days.ravel()])
-    baseline = tile_baseline_at_times(detector, history_root, times)
-    trajectory = PerTileRateModulation(times, baseline, RESETS, spacing_days=2.0)
+    baseline = tile_baseline_at_times(detector, history_root, times, reset_days)
+    trajectory = PerTileRateModulation(times, baseline, reset_days, spacing_days=2.0)
     star_indices = np.searchsorted(times, star_days)
     np.testing.assert_allclose(times[star_indices], star_days, rtol=0.0, atol=1e-10)
     led_indices = [[np.searchsorted(times, item[9]) for item in tiles] for tiles in led.bands]
@@ -359,16 +402,27 @@ def main():
         # Preserve the existing source model's fixed decon throughput terms,
         # not Eric's unrelated fitted gray levels. Roll/L-flat terms remain free
         # nuisance parameters in the stellar objective, as before.
-        grey_offsets = np.zeros((TILE_COUNT, 3), dtype=float)
+        grey_offsets = np.zeros((TILE_COUNT, reset_days.size + 1), dtype=float)
         for tile in range(TILE_COUNT):
             gray_source = history_root / f"tile_{tile:03d}/posterior_samples.npz"
             with np.load(gray_source, allow_pickle=False) as source:
-                np.testing.assert_allclose(source["ice_reset_days"], RESETS, atol=1e-8, rtol=0)
-                grey_offsets[tile, 1] = float(np.asarray(source["post_reset_tile_log_offset"]).reshape(-1)[0])
-                grey_offsets[tile, 2] = float(np.asarray(source["post_third_decon_tile_log_offset"]).reshape(-1)[0])
+                if "reset_event_tile_log_offsets" in source:
+                    tile_offsets = np.asarray(
+                        source["reset_event_tile_log_offsets"], dtype=float
+                    ).reshape(-1)
+                else:
+                    tile_offsets = np.asarray(
+                        [source["post_reset_tile_log_offset"]]
+                        + ([source["post_third_decon_tile_log_offset"]]
+                           if "post_third_decon_tile_log_offset" in source else []),
+                        dtype=float,
+                    ).reshape(-1)
+                if tile_offsets.size != reset_days.size:
+                    raise ValueError(f"{detector} tile {tile} has incomplete reset offsets")
+                grey_offsets[tile, 1:] = tile_offsets
 
         def gray_at_days(days):
-            return grey_offsets[:, np.searchsorted(RESETS, np.asarray(days), side="right")]
+            return grey_offsets[:, np.searchsorted(reset_days, np.asarray(days), side="right")]
 
         model.reader_gray_log_by_tile = gray_at_days(star_days)
 
@@ -403,7 +457,11 @@ def main():
             raise ValueError("Saved optimizer checkpoint dimensions do not match this fit")
 
     sigma = np.full(trajectory.parameter_count, 1.5)
-    sigma[trajectory.specs[2]["initial_index"]] = 0.1
+    for event_index, event in enumerate(reset_config["events"]):
+        prior = event.get("relative_response_warmup") or event.get("thickness_prior", {})
+        sigma[trajectory.specs[event_index + 1]["initial_index"]] = float(
+            prior.get("log_sigma", 1.5)
+        )
     shared_bounds = [(-3.0, 3.0)] * mode + [(-10.0, 10.0)] * mode
     shared_bounds += [(-25.0, 25.0)] * model.zero_point_count
     shared_bounds += [(np.log(1e-4), np.log(100.0))]
@@ -518,6 +576,9 @@ def main():
             "zero spectral modulation, zero roll offsets, and zero rate-control multipliers; no warm-up fit"
         ),
         "ice_history_fit_root": str(history_root),
+        "reset_days": reset_days.tolist(),
+        "reset_event_names": configured_names,
+        "reset_config_sha256": reset_config["sha256"],
         "optical_cache_root": str(cache_root),
         "relative_response_root": str(relative_root),
         "joint_input_root": str(relative_root),
