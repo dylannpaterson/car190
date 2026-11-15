@@ -168,7 +168,7 @@ class WfiPipelineTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[2], FULL_TMM)
             run.return_value.run.assert_called_once_with()
 
-    def test_initialize_records_input_hashes_and_rejects_outputs_outside_data_root(self):
+    def test_initialize_allows_output_outside_input_root_but_not_inside_statistics(self):
         with tempfile.TemporaryDirectory() as temporary:
             data_root = Path(temporary) / "20261113"
             statistics = self.make_statistics(data_root)
@@ -179,9 +179,16 @@ class WfiPipelineTests(unittest.TestCase):
             self.assertTrue((output / "pipeline_manifest.json").is_file())
             self.assertEqual(run.paths["logs"], output / "logs")
 
-            outside = Path(temporary) / "elsewhere"
-            with self.assertRaisesRegex(ValueError, "inside the input data folder"):
-                pipeline.PipelineRun(statistics, outside, RELATIVE_RESPONSE).initialize()
+            outside = Path(temporary) / "modeling" / "20261113"
+            separate_run = pipeline.PipelineRun(statistics, outside, RELATIVE_RESPONSE)
+            self.assertTrue(separate_run.initialize())
+            self.assertEqual(len(separate_run.manifest["input_fingerprints"]), 19)
+
+            inside_statistics = statistics / "production_run"
+            with self.assertRaisesRegex(ValueError, "inside the corrected-statistics directory"):
+                pipeline.PipelineRun(
+                    statistics, inside_statistics, RELATIVE_RESPONSE
+                ).initialize()
 
     def test_resume_rejects_changed_statistics(self):
         with tempfile.TemporaryDirectory() as temporary:

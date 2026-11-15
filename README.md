@@ -366,8 +366,15 @@ python run_wfi_full_tmm_pipeline.py \
 `corrected_statistics/` or `corrected_statistics_4h_thinned/`. Unthinned
 corrected statistics are thinned locally to four-hour cadence and 256-pixel
 tiles; the existing count corrections are not applied again. The output path
-must be a dedicated directory under the same dated data folder, outside the
-statistics directory.
+is a dedicated model-output directory and may be outside the input data root,
+for example when reductions and modeling outputs live in sibling folders. It
+cannot be inside the corrected-statistics directory.
+
+```bash
+python run_wfi_relative_response_pipeline.py \
+  --input-path ../CAR190_reduction/20261114/corrected_statistics \
+  --output-path 20261114/
+```
 
 For the cached relative-response route, transfer both the pinned 20261109
 six-LED response caches and their provenance source files: the corresponding

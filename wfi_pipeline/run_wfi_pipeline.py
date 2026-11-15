@@ -151,16 +151,6 @@ def _statistics_input_record(directory):
     return files
 
 
-def _data_root_for_input(input_path, statistics_dir):
-    source = Path(input_path).expanduser().resolve()
-    statistics_dir = Path(statistics_dir).expanduser().resolve()
-    if statistics_dir != source:
-        return source
-    if len(source.name) >= 8 and source.name[:8].isdigit():
-        return source
-    return source.parent
-
-
 class PipelineRun:
     def __init__(self, input_path, output_path, route):
         self.input_path = Path(input_path).expanduser().resolve()
@@ -220,16 +210,6 @@ class PipelineRun:
         self.statistics_dir, self.thinning_status = resolve_input_statistics(
             self.input_path
         )
-        data_root = _data_root_for_input(self.input_path, self.statistics_dir)
-        try:
-            relative_output = self.output_path.relative_to(data_root)
-        except ValueError as error:
-            raise ValueError(
-                f"Output path must be inside the input data folder {data_root}: "
-                f"{self.output_path}"
-            ) from error
-        if not relative_output.parts:
-            raise ValueError("Output path must be a dedicated directory below the data folder")
         try:
             self.output_path.relative_to(self.statistics_dir)
         except ValueError:
@@ -237,7 +217,7 @@ class PipelineRun:
         else:
             raise ValueError(
                 "Output path cannot be inside the corrected-statistics directory; "
-                "place it beside that directory under the dated data folder"
+                "choose a separate model-output directory"
             )
         self.input_fingerprints = _statistics_input_record(self.statistics_dir)
         self.output_path.mkdir(parents=True, exist_ok=True)
