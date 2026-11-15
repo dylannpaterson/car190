@@ -111,7 +111,7 @@ def test_bundle_load_evaluate_and_nearest_tile(tmp_path):
         post_third_decon_tile_throughput_factor=np.exp([0.2, 0.3]),
         reset_event_days=np.asarray([1.0, 2.0, 2.5]),
         reset_event_names=np.asarray(
-            ["program1063_reset", "third_decon", "fourth_decon"]
+            ["second_decon", "third_decon", "fourth_decon"]
         ),
         reset_event_tile_log_offsets=np.asarray(
             [[0.1, 0.2, 0.05], [-0.2, 0.3, 0.04]]

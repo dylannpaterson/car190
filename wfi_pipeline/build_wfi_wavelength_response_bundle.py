@@ -183,7 +183,7 @@ def load_fit_trajectory(path):
         ).reshape(-1)
     else:
         reset_days = np.asarray([fit["ice_reset_day"]], dtype=float).reshape(-1)
-        reset_names = np.asarray(["program1063_reset"], dtype=str)
+        reset_names = np.asarray(["second_decon"], dtype=str)
         reset_offsets = np.asarray(
             [fit["post_reset_tile_log_offset"]], dtype=float
         ).reshape(-1)

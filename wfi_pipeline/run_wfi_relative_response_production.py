@@ -185,7 +185,7 @@ def cached_fit_matches(
                 dtype=float,
             ).reshape(-1)
             archived_reset_names = np.asarray(
-                fit.get("reset_event_names", ["program1063_reset"])
+                fit.get("reset_event_names", ["second_decon"])
             ).astype(str).reshape(-1)
             archived_reset_starts = np.asarray(
                 fit.get("reset_event_initial_thickness_start_nm", []), dtype=float

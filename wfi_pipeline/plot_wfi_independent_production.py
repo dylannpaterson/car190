@@ -112,7 +112,7 @@ def load_detector_data(detector, output_root, fit_dirs):
                     dtype=float,
                 ).reshape(-1)
                 tile_reset_names = np.asarray(
-                    ["program1063_reset"] + ["third_decon"] * max(0, tile_reset_days.size - 1)
+                    ["second_decon"] + ["third_decon"] * max(0, tile_reset_days.size - 1)
                 ).astype(str)
             if days is None:
                 days, leds, repeats = tile_days, tile_leds, tile_repeats

@@ -221,7 +221,7 @@ def reset_offset_site_names(reset_count=1):
 def _reset_event_names(data, reset_count):
     names = tuple(str(value) for value in data.get("reset_event_names", ()))
     if not names:
-        names = ("program1063_reset",) + tuple(
+        names = ("second_decon",) + tuple(
             "third_decon" if index == 1 else f"reset_event_{index + 1}"
             for index in range(1, reset_count)
         )
@@ -852,11 +852,11 @@ def load_tile_statistics(path, third_decon_day=None, reset_events=None):
             raise ValueError("third_decon_day must be after the physical reset day")
         reset_days = np.asarray([reset_day, third_decon_day], dtype=float)
         resolved_events = (
-            {"name": "program1063_reset", "day": reset_day},
+            {"name": "second_decon", "day": reset_day},
             {"name": "third_decon", "day": third_decon_day},
         )
     if resolved_events is None:
-        resolved_events = ({"name": "program1063_reset", "day": reset_day},)
+        resolved_events = ({"name": "second_decon", "day": reset_day},)
     result = {
         "tile_ids": tile_ids,
         "metadata": metadata,

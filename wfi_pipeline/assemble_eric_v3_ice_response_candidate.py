@@ -254,7 +254,7 @@ def build(args):
                     np.asarray(source_bundle["post_third_decon_tile_log_offset"], dtype=float),
                 )
             )
-            reset_event_names = np.asarray(["program1063_reset", "third_decon"])
+            reset_event_names = np.asarray(["second_decon", "third_decon"])
     if (
         bundle_detectors.shape != bundle_tile_ids.shape
         or event_offsets.ndim != 2

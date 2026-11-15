@@ -311,7 +311,7 @@ def main():
             local_names = np.asarray(
                 fit_archive.get(
                     "reset_event_names",
-                    ["program1063_reset"]
+                    ["second_decon"]
                     + (["third_decon"] if local_days.size > 1 else []),
                 )
             ).astype(str).reshape(-1)

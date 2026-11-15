@@ -9,7 +9,7 @@ def test_repository_reset_config_preserves_validated_boundary_and_priors():
     config = load_reset_config()
 
     assert [event["name"] for event in config["events"]] == [
-        "program1063_reset",
+        "second_decon",
         "third_decon",
     ]
     assert config["events"][0]["day"] == pytest.approx(12.907397928240743)
@@ -28,7 +28,7 @@ def test_reset_site_names_support_three_configured_decons():
     data = {
         "reset_days": np.asarray([12.0, 38.0, 55.0]),
         "reset_event_names": (
-            "program1063_reset",
+            "second_decon",
             "third_decon",
             "fourth_decon",
         ),
@@ -73,7 +73,7 @@ def test_tile_statistics_loads_an_arbitrary_yaml_reset_list(tmp_path):
     config_path.write_text(
         "version: 1\n"
         "events:\n"
-        "  - name: program1063_reset\n"
+        "  - name: second_decon\n"
         "    day_source: program1063\n"
         "    thickness_prior: {median_nm: 10, log_sigma: 1.5}\n"
         "  - name: fourth_decon\n"
@@ -104,7 +104,7 @@ def test_tile_statistics_loads_an_arbitrary_yaml_reset_list(tmp_path):
 
     np.testing.assert_allclose(data["reset_days"], [12.0, 20.0, 30.0])
     assert data["reset_event_names"] == (
-        "program1063_reset",
+        "second_decon",
         "fourth_decon",
         "fifth_decon",
     )

@@ -2,7 +2,7 @@ version: 1
 
 # Event days are elapsed days from the pipeline's fixed reference epoch.
 events:
-  - name: program1063_reset
+  - name: second_decon
     day: 12.907397928240743
     thickness_prior:
       median_nm: 10
