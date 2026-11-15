@@ -405,22 +405,20 @@ fingerprint. No source per-tile fits, fixed-response cache, TMM fit, or
 CAR190/Amber joint fit is used by the ice estimator.
 
 ```bash
-detectors=(WFI01 WFI02 WFI03 WFI04 WFI05 WFI06 WFI07 WFI08 WFI09 WFI10 WFI11 WFI12 WFI13 WFI14 WFI15 WFI16 WFI17 WFI18)
-detector_args=()
-for detector in "${detectors[@]}"; do detector_args+=(--detector "$detector"); done
-
 python update_ice_history.py \
-  --base-h5 /path/to/latest/production/wavelength_response_bundle/final/joint_modulated_v2.h5 \
-  --statistics-dir /path/to/20261113/corrected_statistics_4h_thinned \
-  --output-path /path/to/20261113/production/pipeline_runs/relative_response_update \
-  "${detector_args[@]}"
+  --input-path /path/to/Nexus/20261113 \
+  --output-path /path/to/Nexus/20261113/production/pipeline_runs/relative_response_update
 ```
 
-The H5 is the sole optical/trajectory fit input. The sibling standard
-wavelength bundles are read only as spectral-output scaffolds, not as fit
-inputs. The updater fits LED offsets from the corrected statistics with the
-production prior. It writes the usual base/modulated bundle and
-`final/joint_modulated_v2.h5` filenames.
+`--input-path` accepts a Nexus dated run root, corrected-statistics directory,
+or H5 file. It resolves the 18 corrected-statistics files and searches the
+input tree for a base H5; if the tree has statistics only, it uses the pinned
+repository Eric base H5. The fit uses that H5 as its only optical model input;
+no per-tile fit archive or response cache is read. Standard wavelength bundles
+beside the selected H5 are preserved as spectral-output scaffolds. LED offsets
+are fitted from the corrected statistics. Batch size, 48-hour spline spacing,
+and iteration limits use internal defaults. It writes the usual base/modulated
+bundle and `final/joint_modulated_v2.h5` filenames.
 The complete independent tile histories are retained at every data epoch in
 `production/wavelength_response_bundle/intermediates/h5/joint_ice_history_reference.h5`;
 the Eric-reader H5 keeps the rank-one deposition projection for compatibility.

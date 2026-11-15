@@ -34,6 +34,7 @@ import wfi_wavelength_response_bundle as bundle_io
 from export_joint_ice_history_reference import deposition_factorizations_on_blocks
 from wfi_pipeline_defaults import (
     DETECTORS,
+    ERIC_V3_BASE_MODEL,
     RELATIVE_RESPONSE,
     THIRD_DECON_DAY,
     TILE_SIZE_PIXELS,
@@ -53,6 +54,9 @@ DEFAULT_RATE_MEAN_NM_DAY = 12.0
 DEFAULT_RATE_SIGMA_LOG = 1.5
 DEFAULT_LOOKUP_STEP_NM = 2.0
 DEFAULT_HISTORY_BRANCH_SIGMA_NM = 1.0
+H5_UPDATE_BATCH_SIZE = 256
+H5_UPDATE_MAX_ITERATIONS = 160
+H5_RATE_KNOT_SPACING_HOURS = 48.0
 
 
 def sha256_file(path):
@@ -2618,49 +2622,97 @@ def _legacy_main(argv=None):
     print(json.dumps({**report, "validation": str(validation_path)}, indent=2), flush=True)
 
 
+def resolve_updater_input(input_path):
+    """Resolve an H5/statistics input root without extra per-model arguments."""
+    source = Path(input_path).expanduser().resolve()
+    if not source.exists():
+        raise FileNotFoundError(source)
+    if source.is_file() and source.suffix.lower() in (".h5", ".hdf5"):
+        base_h5 = source
+        roots = (source.parent, *source.parents)
+    elif source.is_dir():
+        roots = (source, *source.parents)
+        base_h5 = None
+    else:
+        raise ValueError(f"Input path must be a dated run directory or an H5 file: {source}")
+
+    statistics_dir = None
+    for root in roots:
+        for candidate in (
+            root / "corrected_statistics_4h_thinned",
+            root / "corrected_statistics",
+            root,
+        ):
+            if candidate.is_dir() and all(
+                corrected_statistics_path(candidate, detector, TILE_SIZE_PIXELS).is_file()
+                for detector in DETECTORS
+            ):
+                statistics_dir = candidate.resolve()
+                break
+        if statistics_dir is not None:
+            break
+    if statistics_dir is None:
+        raise FileNotFoundError(
+            f"Input path {source} has no complete 18-detector corrected-statistics directory"
+        )
+
+    if base_h5 is None:
+        preferred = (
+            source / "production/wavelength_response_bundle/final/joint_modulated_v2.h5",
+            source / "production/wavelength_response_bundle/eric_v3_reference/ice_response_model_v3.h5",
+            source / "wavelength_response_bundle/final/joint_modulated_v2.h5",
+            source / "wavelength_response_bundle/eric_v3_reference/ice_response_model_v3.h5",
+        )
+        base_h5 = next((path for path in preferred if path.is_file()), None)
+        if base_h5 is None:
+            matches = sorted(
+                path
+                for pattern in ("joint_modulated_v2.h5", "ice_response_model_v3.h5")
+                for path in source.rglob(pattern)
+                if path.is_file()
+            )
+            if len(matches) == 1:
+                base_h5 = matches[0]
+            elif len(matches) > 1:
+                raise ValueError(
+                    f"Multiple base H5 models are under {source}; put the selected model at "
+                    "production/wavelength_response_bundle/final/joint_modulated_v2.h5"
+                )
+            elif ERIC_V3_BASE_MODEL.is_file():
+                base_h5 = ERIC_V3_BASE_MODEL
+        if base_h5 is None or not Path(base_h5).is_file():
+            raise FileNotFoundError(
+                f"No base response H5 was found under {source} or at {ERIC_V3_BASE_MODEL}"
+            )
+    return Path(base_h5).resolve(), statistics_dir
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-h5", type=Path, required=True)
-    parser.add_argument("--statistics-dir", type=Path, required=True)
-    parser.add_argument("--output-path", type=Path, required=True)
     parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=256,
-        help="Number of independent tile MAP fits solved in one accelerator batch.",
-    )
-    parser.add_argument("--optimizer-iterations", type=int, default=160)
-    parser.add_argument("--rate-knot-spacing-hours", type=float, default=48.0)
-    parser.add_argument(
-        "--detector",
-        action="append",
+        "--input-path",
+        type=Path,
         required=True,
-        choices=DETECTORS,
-        help="Detector to update; repeat explicitly for WFI01 through WFI18.",
+        help="Nexus run root, corrected-statistics directory, or base H5 file.",
     )
+    parser.add_argument("--output-path", type=Path, required=True)
     args = parser.parse_args(argv)
-    args.detectors = list(dict.fromkeys(args.detector))
-    if set(args.detectors) != set(DETECTORS):
-        parser.error("Pass all 18 detectors explicitly with repeated --detector flags")
-    if not args.base_h5.is_file():
-        parser.error(f"Base H5 does not exist: {args.base_h5}")
-    if not args.statistics_dir.is_dir():
-        parser.error(f"Statistics directory does not exist: {args.statistics_dir}")
-    if args.batch_size < 1:
-        parser.error("--batch-size must be positive")
-    if args.optimizer_iterations < 1:
-        parser.error("--optimizer-iterations must be positive")
-    if not np.isfinite(args.rate_knot_spacing_hours) or args.rate_knot_spacing_hours <= 0.0:
-        parser.error("--rate-knot-spacing-hours must be positive and finite")
+    args.input_path = args.input_path.expanduser().resolve()
+    args.output_path = args.output_path.expanduser().resolve()
+    if not args.input_path.exists():
+        parser.error(f"Input path does not exist: {args.input_path}")
     return args
 
 
 def main_streaming(argv=None):
     """Fit independent tile histories from the supplied H5 and statistics only."""
     args = parse_args(argv)
-    base_h5 = args.base_h5.resolve()
-    statistics_dir = args.statistics_dir.resolve()
+    base_h5, statistics_dir = resolve_updater_input(args.input_path)
     output_root = args.output_path.resolve()
+    detectors = DETECTORS
+    batch_size = H5_UPDATE_BATCH_SIZE
+    optimizer_iterations = H5_UPDATE_MAX_ITERATIONS
+    rate_knot_spacing_hours = H5_RATE_KNOT_SPACING_HOURS
     run_started = time.perf_counter()
     base_h5_sha256 = sha256_file(base_h5)
 
@@ -2687,7 +2739,7 @@ def main_streaming(argv=None):
 
     detector_data = {}
     detector_tile_paths = {}
-    for detector in args.detectors:
+    for detector in detectors:
         statistics_path = corrected_statistics_path(
             statistics_dir, detector, TILE_SIZE_PIXELS
         )
@@ -2713,9 +2765,9 @@ def main_streaming(argv=None):
 
     reference_data = detector_data["WFI01"][0]
     rate_control_days = rate_spline_knot_days(
-        reference_data, spacing_days=args.rate_knot_spacing_hours / 24.0
+        reference_data, spacing_days=rate_knot_spacing_hours / 24.0
     )
-    for detector in args.detectors:
+    for detector in detectors:
         for tile_id, data in detector_data[detector].items():
             for name in (
                 "days", "led", "repeat", "program", "groups", "exposure_times"
@@ -2751,7 +2803,7 @@ def main_streaming(argv=None):
             lookup_writer = csv.DictWriter(lookup_csv, fieldnames=lookup_fields)
             lookup_writer.writeheader()
 
-            for detector in args.detectors:
+            for detector in detectors:
                 fit_root = (
                     paths["production"] / detector.lower()
                     / "relative_response" / "fits"
@@ -2817,8 +2869,8 @@ def main_streaming(argv=None):
                     )
                     lookup_paths.append(cache_path)
 
-                for batch_start in range(0, len(tile_ids), args.batch_size):
-                    batch_stop = min(batch_start + args.batch_size, len(tile_ids))
+                for batch_start in range(0, len(tile_ids), batch_size):
+                    batch_stop = min(batch_start + batch_size, len(tile_ids))
                     batch_data = data_list[batch_start:batch_stop]
                     optimizer_started = time.perf_counter()
                     batch_values, batch_diagnostics = fit_h5_tile_batch(
@@ -2828,7 +2880,7 @@ def main_streaming(argv=None):
                         jax,
                         jnp,
                         led_log_offset_prior_sigma_log=0.01,
-                        max_iterations=args.optimizer_iterations,
+                        max_iterations=optimizer_iterations,
                         rate_knot_days=rate_control_days,
                         thickness_prior_centers_list=prior_centers_list[
                             batch_start:batch_stop
@@ -2972,11 +3024,11 @@ def main_streaming(argv=None):
         "base_h5_sha256": base_h5_sha256,
         "optical_lookup_fingerprint": optics_fingerprint,
         "statistics_dir": str(statistics_dir),
-        "detectors": args.detectors,
+        "detectors": detectors,
         "optimizer": "batched damped Gauss-Newton, block-independent per tile",
-        "optimizer_iterations": args.optimizer_iterations,
-        "optimizer_batch_size": args.batch_size,
-        "rate_spline_knot_spacing_hours": float(args.rate_knot_spacing_hours),
+        "optimizer_iterations": optimizer_iterations,
+        "optimizer_batch_size": batch_size,
+        "rate_spline_knot_spacing_hours": float(rate_knot_spacing_hours),
         "rate_spline_knot_count": int(rate_control_days.size),
         "rate_prior_mean_nm_day": DEFAULT_RATE_MEAN_NM_DAY,
         "rate_prior_sigma_log": DEFAULT_RATE_SIGMA_LOG,
@@ -3022,14 +3074,14 @@ def main_streaming(argv=None):
         "base_h5_sha256": base_h5_sha256,
         "optical_lookup_fingerprint": optics_fingerprint,
         "statistics_dir": str(statistics_dir),
-        "detectors": args.detectors,
+        "detectors": detectors,
         "tile_history_count": int(updated_bundle["tile_ids"].size),
         "observation_epoch_count": int(updated_bundle["observation_days"].size),
         "lookup_thickness_step_nm": float(DEFAULT_LOOKUP_STEP_NM),
         "optimizer": "batched damped Gauss-Newton with independent tile blocks",
-        "optimizer_iterations": int(args.optimizer_iterations),
-        "optimizer_batch_size": int(args.batch_size),
-        "rate_spline_knot_spacing_hours": float(args.rate_knot_spacing_hours),
+        "optimizer_iterations": int(optimizer_iterations),
+        "optimizer_batch_size": int(batch_size),
+        "rate_spline_knot_spacing_hours": float(rate_knot_spacing_hours),
         "rate_spline_knot_count": int(rate_control_days.size),
         "h5_lookup_seconds": float(lookup_seconds),
         "optimizer_seconds": float(optimizer_seconds),
