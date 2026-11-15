@@ -19,7 +19,6 @@ import run_wfi_tmm_emcee_warmup as emcee_warmup
 from reset_events import (
     DEFAULT_RESET_CONFIG,
     load_reset_config,
-    resolve_reset_events,
 )
 from wfi_production_layout import (
     DEFAULT_TILE_SIZE,
@@ -278,6 +277,13 @@ def archive_matches_statistics(
                     archived.reshape(-1), statistics_row_fingerprints(statistics_path)
                 )
             expected_reset_day = statistics_reset_day(statistics_path)
+            expected_events = None
+            if reset_events is not None:
+                expected_data = production.load_tile_statistics(
+                    statistics_path, reset_events=reset_events
+                )
+                expected_reset_day = float(expected_data["reset_days"][0])
+                expected_events = expected_data["reset_events"]
             if expected_reset_day is not None:
                 if "ice_reset_day" not in samples:
                     return False
@@ -288,10 +294,7 @@ def archive_matches_statistics(
                     rtol=0.0,
                     atol=1.0e-12,
                 )
-            if reset_events is not None and expected_reset_day is not None:
-                expected_events = resolve_reset_events(
-                    {"events": tuple(reset_events)}, expected_reset_day
-                )
+            if expected_events is not None:
                 expected_days = np.asarray(
                     [event["day"] for event in expected_events], dtype=float
                 )

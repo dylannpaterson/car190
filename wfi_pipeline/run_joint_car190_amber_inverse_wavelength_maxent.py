@@ -330,8 +330,10 @@ def main():
         reset_event_names, np.asarray(configured_names).astype(str)
     ):
         raise ValueError("Fit reset-event count does not match the shared reset config")
-    for index, event in enumerate(reset_config["events"][1:], start=1):
-        if not np.isclose(reset_days[index], float(event["day"]), rtol=0.0, atol=1.0e-10):
+    for index, event in enumerate(reset_config["events"]):
+        if "day" in event and not np.isclose(
+            reset_days[index], float(event["day"]), rtol=0.0, atol=1.0e-10
+        ):
             raise ValueError(f"Fit reset boundary differs for event {event['name']}")
     import experiment_joint_wfi01_weekly_ice as weekly_ice
 

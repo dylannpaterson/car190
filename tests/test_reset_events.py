@@ -12,6 +12,7 @@ def test_repository_reset_config_preserves_validated_boundary_and_priors():
         "program1063_reset",
         "third_decon",
     ]
+    assert config["events"][0]["day"] == pytest.approx(12.907397928240743)
     assert config["events"][1]["day"] == pytest.approx(38.79784510416666)
     assert config["events"][1]["relative_response_warmup"] == {
         "start_nm": 40.0,
@@ -52,14 +53,19 @@ def test_reset_site_names_support_three_configured_decons():
     assert all(name in values for name in thickness_names + offset_names)
 
 
-def test_configured_reset_events_resolve_to_statistics_reset_and_ordered_days():
+def test_configured_reset_events_keep_the_explicit_decon_days():
     config = load_reset_config()
     events = resolve_reset_events(config, 12.0)
 
-    np.testing.assert_allclose([event["day"] for event in events], [12.0, 38.79784510416666])
-
-    with pytest.raises(ValueError, match="strictly increasing"):
-        resolve_reset_events(config, 40.0)
+    np.testing.assert_allclose(
+        [event["day"] for event in events],
+        [12.907397928240743, 38.79784510416666],
+    )
+    events_for_different_statistics = resolve_reset_events(config, 40.0)
+    np.testing.assert_allclose(
+        [event["day"] for event in events_for_different_statistics],
+        [12.907397928240743, 38.79784510416666],
+    )
 
 
 def test_tile_statistics_loads_an_arbitrary_yaml_reset_list(tmp_path):

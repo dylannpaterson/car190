@@ -399,9 +399,9 @@ regression contract.
 
 Reset and decon boundaries are read from `wfi_pipeline/reset_events.yaml` by
 both production routes, the joint ice-history fit, bundle/H5 packaging, the H5
-history updater, and production trajectory plots. The first event uses the
-Program 1063 day recorded in each statistics file; later events specify their
-day relative to the same reference. Add an event entry with a unique `name`,
+history updater, and production trajectory plots. The default Decon2 boundary
+is explicitly `12.907397928240743` days; the third-decon boundary is
+`38.79784510416666` days. Add an event entry with a unique `name`,
 `day`, and `thickness_prior` (`median_nm` and `log_sigma`). Optional
 `relative_response_warmup` and `h5_prior` blocks configure the scalar-rate
 warmup and H5-anchored thickness prior. Event days must be strictly increasing.

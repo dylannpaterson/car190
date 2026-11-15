@@ -1,10 +1,9 @@
 version: 1
 
-# The first event is located from program 1063 in each corrected statistics
-# file. Additional reset/decon events use elapsed days from the same reference.
+# Event days are elapsed days from the pipeline's fixed reference epoch.
 events:
   - name: program1063_reset
-    day_source: program1063
+    day: 12.907397928240743
     thickness_prior:
       median_nm: 10
       log_sigma: 1.5

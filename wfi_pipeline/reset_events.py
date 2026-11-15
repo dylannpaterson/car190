@@ -16,9 +16,9 @@ _EVENT_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 def load_reset_config(path=None):
     """Load reset events and their thickness-prior settings from YAML.
 
-    The first event is the program-1063 reset found in each statistics file.
-    Remaining events have explicit elapsed-day boundaries. Adding another
-    event is a YAML-only operation for the production fit and H5 updater.
+    The first event normally has an explicit elapsed-day boundary. A
+    ``day_source: program1063`` entry remains supported for runs that need to
+    derive that boundary from the corrected statistics.
     """
     path = DEFAULT_RESET_CONFIG if path is None else Path(path).expanduser()
     path = path.resolve()
@@ -57,9 +57,23 @@ def load_reset_config(path=None):
         names.add(name)
 
         if index == 0:
-            if event.get("day_source") != "program1063" or "day" in event:
+            day_source = event.get("day_source")
+            if day_source == "program1063":
+                if "day" in event:
+                    raise ValueError(
+                        "The first reset event cannot have both day and day_source"
+                    )
+            elif day_source is None:
+                day = float(event.get("day", np.nan))
+                if not np.isfinite(day):
+                    raise ValueError(
+                        "The first reset event requires a finite day or "
+                        "day_source: program1063"
+                    )
+                event["day"] = day
+            else:
                 raise ValueError(
-                    "The first reset event must use day_source: program1063"
+                    "The first reset event day_source must be program1063"
                 )
         else:
             day = float(event.get("day", np.nan))
@@ -112,7 +126,7 @@ def load_reset_config(path=None):
             }
         normalized.append(event)
 
-    explicit_days = [event["day"] for event in normalized[1:]]
+    explicit_days = [event["day"] for event in normalized if "day" in event]
     if np.any(np.diff(explicit_days) <= 0.0):
         raise ValueError("Explicit reset-event days must be strictly increasing")
     return {
@@ -123,7 +137,7 @@ def load_reset_config(path=None):
 
 
 def resolve_reset_events(config, statistics_reset_day):
-    """Attach the statistics-derived first day and return ordered event records."""
+    """Resolve any statistics-derived event and return ordered event records."""
     events = config["events"]
     reset_day = float(statistics_reset_day)
     if not np.isfinite(reset_day):
@@ -131,14 +145,13 @@ def resolve_reset_events(config, statistics_reset_day):
     resolved = []
     for index, event in enumerate(events):
         item = deepcopy(event)
-        if index == 0:
+        if item.get("day_source") == "program1063":
             item["day"] = reset_day
         resolved.append(item)
     days = np.asarray([event["day"] for event in resolved], dtype=float)
     if np.any(np.diff(days) <= 0.0):
         raise ValueError(
-            "Configured reset/decon events must follow the statistics-derived "
-            "program-1063 reset in strictly increasing day order"
+            "Configured reset/decon events must be strictly increasing"
         )
     return tuple(resolved)
 

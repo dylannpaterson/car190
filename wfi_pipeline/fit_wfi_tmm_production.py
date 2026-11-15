@@ -873,7 +873,7 @@ def load_tile_statistics(path, third_decon_day=None, reset_events=None):
         "repeat_values": repeat_values,
         "repeat_index": repeat_index,
         "node_days": node_days,
-        "reset_day": reset_day,
+        "reset_day": float(reset_days[0]),
         "reset_days": reset_days,
         "reset_event_names": tuple(event["name"] for event in resolved_events),
         "reset_events": tuple(resolved_events),
