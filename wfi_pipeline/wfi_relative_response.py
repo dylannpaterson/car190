@@ -763,9 +763,11 @@ def _prior_residuals(
             if isinstance(thickness_prior_log_sigma, dict)
             else thickness_prior_log_sigma
         )
-        if not np.isfinite(sigma) or sigma <= 0.0:
+        if isinstance(sigma, (int, float, np.integer, np.floating)) and (
+            not np.isfinite(sigma) or sigma <= 0.0
+        ):
             raise ValueError("Thickness prior log sigma must be positive and finite")
-        return float(sigma)
+        return jnp.asarray(sigma, dtype=float)
 
     def thickness_center(name):
         if thickness_prior_log_centers is None:

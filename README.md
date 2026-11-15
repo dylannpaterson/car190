@@ -5,10 +5,12 @@ primary workflow converts calibrated MAST products into compact tile
 sufficient statistics, then fits an air/ice/AR/HgCdTe transfer-matrix model
 to the statistics with NumPyro.
 
-The repository root exposes only two local model-pipeline commands:
+The repository root exposes two local model-pipeline commands:
 `run_wfi_relative_response_pipeline.py` and `run_wfi_full_tmm_pipeline.py`.
-Their shared implementation and stage runners live in `wfi_pipeline/`; retained
-standalone research scripts live in `archive/exploratory/`.
+The fast `update_ice_history.py` utility updates full per-tile histories from a
+base H5 and corrected statistics without rerunning TMM or the CAR190/Amber joint
+optimizer. Shared implementation and stage runners live in `wfi_pipeline/`;
+retained standalone research scripts live in `archive/exploratory/`.
 
 The full-TMM production model is intentionally fixed. The pipeline invokes its
 internal `wfi_pipeline/run_wfi_production.py` stage as fresh-EMCEE-initialized
@@ -391,6 +393,41 @@ The deliverable H5 is `production/wavelength_response_bundle/final/joint_modulat
 The reflectance-mode, history-reference, and prototype H5s are build-stage
 intermediates under `production/wavelength_response_bundle/intermediates/h5/`.
 
+### Fast H5-based full ice-history update
+
+Use this when new corrected statistics arrive and the H5's fixed optical state
+should be retained. The updater derives the six-LED response from the supplied
+H5, then fits independent 48-hour log-rate splines with knots at the reset
+boundaries, plus reset thicknesses, grey offsets, and LED offsets. Tile fits
+are evaluated in independent accelerator batches; there is no cross-tile
+smoothing or shared trajectory. The response table is cached by the H5 optical
+fingerprint. No source per-tile fits, fixed-response cache, TMM fit, or
+CAR190/Amber joint fit is used by the ice estimator.
+
+```bash
+detectors=(WFI01 WFI02 WFI03 WFI04 WFI05 WFI06 WFI07 WFI08 WFI09 WFI10 WFI11 WFI12 WFI13 WFI14 WFI15 WFI16 WFI17 WFI18)
+detector_args=()
+for detector in "${detectors[@]}"; do detector_args+=(--detector "$detector"); done
+
+python update_ice_history.py \
+  --base-h5 /path/to/latest/production/wavelength_response_bundle/final/joint_modulated_v2.h5 \
+  --statistics-dir /path/to/20261113/corrected_statistics_4h_thinned \
+  --output-path /path/to/20261113/production/pipeline_runs/relative_response_update \
+  "${detector_args[@]}"
+```
+
+The H5 is the sole optical/trajectory fit input. The sibling standard
+wavelength bundles are read only as spectral-output scaffolds, not as fit
+inputs. The updater fits LED offsets from the corrected statistics with the
+production prior. It writes the usual base/modulated bundle and
+`final/joint_modulated_v2.h5` filenames.
+The complete independent tile histories are retained at every data epoch in
+`production/wavelength_response_bundle/intermediates/h5/joint_ice_history_reference.h5`;
+the Eric-reader H5 keeps the rank-one deposition projection for compatibility.
+The updater also refreshes all per-detector diagnostics and the complete 18-SCA
+focal-plane and ice-trend plot sets under
+`production/plots/relative_response/{focal_plane,trajectories,trajectories_last_7d}/`.
+
 The runtime data inputs that used to live beside the repository are now copied
 under `car201_data/` and `external_reference_data/`. Their `INPUTS.json` and
 `PORTABLE_INPUTS.json` files record sizes and SHA256 hashes. Copy both data
@@ -398,10 +435,8 @@ folders with the repository when moving the pipeline to another machine; the
 active code resolves them from the repository root and no longer uses sibling
 `CAR201/` or workspace paths.
 
-The repository root intentionally contains only those two model-pipeline
-entrypoints. Stage modules in `wfi_pipeline/` are implementation details, not
-separate operator workflows. Standalone analysis and experiment scripts have
-been moved to `archive/exploratory/`.
+Stage modules in `wfi_pipeline/` are implementation details. Standalone
+analysis and experiment scripts have been moved to `archive/exploratory/`.
 
 ### 2. Internal production TMM stage
 
