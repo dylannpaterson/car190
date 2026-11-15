@@ -34,7 +34,6 @@ import wfi_wavelength_response_bundle as bundle_io
 from export_joint_ice_history_reference import deposition_factorizations_on_blocks
 from wfi_pipeline_defaults import (
     DETECTORS,
-    ERIC_V3_BASE_MODEL,
     RELATIVE_RESPONSE,
     THIRD_DECON_DAY,
     TILE_SIZE_PIXELS,
@@ -2622,69 +2621,25 @@ def _legacy_main(argv=None):
     print(json.dumps({**report, "validation": str(validation_path)}, indent=2), flush=True)
 
 
-def resolve_updater_input(input_path):
-    """Resolve an H5/statistics input root without extra per-model arguments."""
+def resolve_statistics_input(input_path):
+    """Resolve a Nexus run root or corrected-statistics directory."""
     source = Path(input_path).expanduser().resolve()
-    if not source.exists():
+    if not source.is_dir():
         raise FileNotFoundError(source)
-    if source.is_file() and source.suffix.lower() in (".h5", ".hdf5"):
-        base_h5 = source
-        roots = (source.parent, *source.parents)
-    elif source.is_dir():
-        roots = (source, *source.parents)
-        base_h5 = None
-    else:
-        raise ValueError(f"Input path must be a dated run directory or an H5 file: {source}")
-
-    statistics_dir = None
-    for root in roots:
-        for candidate in (
-            root / "corrected_statistics_4h_thinned",
-            root / "corrected_statistics",
-            root,
+    candidates = (
+        source / "corrected_statistics_4h_thinned",
+        source / "corrected_statistics",
+        source,
+    )
+    for candidate in candidates:
+        if candidate.is_dir() and all(
+            corrected_statistics_path(candidate, detector, TILE_SIZE_PIXELS).is_file()
+            for detector in DETECTORS
         ):
-            if candidate.is_dir() and all(
-                corrected_statistics_path(candidate, detector, TILE_SIZE_PIXELS).is_file()
-                for detector in DETECTORS
-            ):
-                statistics_dir = candidate.resolve()
-                break
-        if statistics_dir is not None:
-            break
-    if statistics_dir is None:
-        raise FileNotFoundError(
-            f"Input path {source} has no complete 18-detector corrected-statistics directory"
-        )
-
-    if base_h5 is None:
-        preferred = (
-            source / "production/wavelength_response_bundle/final/joint_modulated_v2.h5",
-            source / "production/wavelength_response_bundle/eric_v3_reference/ice_response_model_v3.h5",
-            source / "wavelength_response_bundle/final/joint_modulated_v2.h5",
-            source / "wavelength_response_bundle/eric_v3_reference/ice_response_model_v3.h5",
-        )
-        base_h5 = next((path for path in preferred if path.is_file()), None)
-        if base_h5 is None:
-            matches = sorted(
-                path
-                for pattern in ("joint_modulated_v2.h5", "ice_response_model_v3.h5")
-                for path in source.rglob(pattern)
-                if path.is_file()
-            )
-            if len(matches) == 1:
-                base_h5 = matches[0]
-            elif len(matches) > 1:
-                raise ValueError(
-                    f"Multiple base H5 models are under {source}; put the selected model at "
-                    "production/wavelength_response_bundle/final/joint_modulated_v2.h5"
-                )
-            elif ERIC_V3_BASE_MODEL.is_file():
-                base_h5 = ERIC_V3_BASE_MODEL
-        if base_h5 is None or not Path(base_h5).is_file():
-            raise FileNotFoundError(
-                f"No base response H5 was found under {source} or at {ERIC_V3_BASE_MODEL}"
-            )
-    return Path(base_h5).resolve(), statistics_dir
+            return candidate.resolve()
+    raise FileNotFoundError(
+        f"Input path {source} has no complete 18-detector corrected-statistics directory"
+    )
 
 
 def parse_args(argv=None):
@@ -2693,21 +2648,31 @@ def parse_args(argv=None):
         "--input-path",
         type=Path,
         required=True,
-        help="Nexus run root, corrected-statistics directory, or base H5 file.",
+        help="Nexus run root or corrected-statistics directory containing all 18 SCAs.",
+    )
+    parser.add_argument(
+        "--base-h5",
+        type=Path,
+        required=True,
+        help="Existing base Eric-readable response H5; independent of the new statistics.",
     )
     parser.add_argument("--output-path", type=Path, required=True)
     args = parser.parse_args(argv)
     args.input_path = args.input_path.expanduser().resolve()
+    args.base_h5 = args.base_h5.expanduser().resolve()
     args.output_path = args.output_path.expanduser().resolve()
     if not args.input_path.exists():
         parser.error(f"Input path does not exist: {args.input_path}")
+    if not args.base_h5.is_file():
+        parser.error(f"Base H5 does not exist: {args.base_h5}")
     return args
 
 
 def main_streaming(argv=None):
     """Fit independent tile histories from the supplied H5 and statistics only."""
     args = parse_args(argv)
-    base_h5, statistics_dir = resolve_updater_input(args.input_path)
+    base_h5 = args.base_h5
+    statistics_dir = resolve_statistics_input(args.input_path)
     output_root = args.output_path.resolve()
     detectors = DETECTORS
     batch_size = H5_UPDATE_BATCH_SIZE

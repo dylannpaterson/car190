@@ -407,18 +407,19 @@ CAR190/Amber joint fit is used by the ice estimator.
 ```bash
 python update_ice_history.py \
   --input-path /path/to/Nexus/20261113 \
+  --base-h5 /path/to/Nexus/20261111/production/wavelength_response_bundle/final/joint_modulated_v2.h5 \
   --output-path /path/to/Nexus/20261113/production/pipeline_runs/relative_response_update
 ```
 
-`--input-path` accepts a Nexus dated run root, corrected-statistics directory,
-or H5 file. It resolves the 18 corrected-statistics files and searches the
-input tree for a base H5; if the tree has statistics only, it uses the pinned
-repository Eric base H5. The fit uses that H5 as its only optical model input;
-no per-tile fit archive or response cache is read. Standard wavelength bundles
-beside the selected H5 are preserved as spectral-output scaffolds. LED offsets
-are fitted from the corrected statistics. Batch size, 48-hour spline spacing,
-and iteration limits use internal defaults. It writes the usual base/modulated
-bundle and `final/joint_modulated_v2.h5` filenames.
+`--input-path` resolves the 18 corrected-statistics files. `--base-h5` is an
+already-existing H5 from the previous validated run; it is independent of the
+new statistics and does not need to be produced in the new dated directory.
+The fit uses that H5 as its only optical model input; no per-tile fit archive
+or fixed-response cache is read. Standard wavelength bundles beside the base
+H5 are preserved as spectral-output scaffolds. LED offsets are fitted from the
+corrected statistics. Batch size, 48-hour spline spacing, and iteration limits
+use internal defaults. It writes the usual base/modulated bundle and
+`final/joint_modulated_v2.h5` filenames.
 The complete independent tile histories are retained at every data epoch in
 `production/wavelength_response_bundle/intermediates/h5/joint_ice_history_reference.h5`;
 the Eric-reader H5 keeps the rank-one deposition projection for compatibility.
