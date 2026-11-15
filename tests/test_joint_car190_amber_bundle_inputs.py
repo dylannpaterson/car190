@@ -118,3 +118,37 @@ def test_joint_history_samples_onto_existing_car190_axis():
     thickness, rate = builder._sample_joint_tile_ice(joint_history, 1, car190_days)
     np.testing.assert_array_equal(thickness, [10.0, 30.0, 50.0])
     np.testing.assert_array_equal(rate, [10.0, 10.0, 10.0])
+
+
+def test_joint_history_interpolates_nonidentical_source_times_without_crossing_resets():
+    joint_times = np.asarray([0.0, 1.0, 1.8, 2.0, 3.0, 4.0])
+    joint_history = {
+        "times": joint_times,
+        "thickness": np.asarray([[5.0, 7.0, 8.6, 3.0, 5.0, 7.0]]),
+        "rates": np.full((1, joint_times.size), 2.0),
+        "archive_path": Path("joint.npz"),
+        "summary": {"reset_days": [2.0]},
+    }
+    query_days = np.asarray([0.5, 1.5, 2.5, 3.5])
+
+    thickness, rates = builder._sample_joint_tile_ice(
+        joint_history, 0, query_days
+    )
+
+    np.testing.assert_allclose(thickness, [6.0, 8.0, 4.0, 6.0])
+    np.testing.assert_allclose(rates, 2.0)
+
+
+def test_joint_history_interpolation_rejects_queries_outside_episode_coverage():
+    joint_history = {
+        "times": np.asarray([0.0, 1.0, 2.0, 3.0]),
+        "thickness": np.asarray([[1.0, 2.0, 3.0, 4.0]]),
+        "rates": np.ones((1, 4)),
+        "archive_path": Path("joint.npz"),
+        "summary": {"reset_days": [2.0]},
+    }
+
+    import pytest
+
+    with pytest.raises(ValueError, match="exceed joint-history coverage"):
+        builder._sample_joint_tile_ice(joint_history, 0, [0.5, 1.5, 2.5, 3.5])

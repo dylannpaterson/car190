@@ -306,16 +306,47 @@ def _load_joint_ice_history(modulation_root, detector, modulation_item=None):
 
 
 def _sample_joint_tile_ice(joint_history, tile_id, source_days):
-    """Sample the joint fit onto the bundle's existing CAR190 observation axis."""
-    times = joint_history["times"]
-    indices = np.searchsorted(times, np.asarray(source_days, dtype=float))
-    if (np.any(indices >= times.size)
-            or not np.allclose(times[indices], source_days, rtol=0.0, atol=1.0e-10)):
-        raise ValueError(f"Joint ice history lacks source observation times in {joint_history['archive_path']}")
+    """Interpolate joint ice histories onto the bundle axis within reset episodes."""
+    times = np.asarray(joint_history["times"], dtype=float).reshape(-1)
+    query_days = np.asarray(source_days, dtype=float).reshape(-1)
     if not 0 <= int(tile_id) < joint_history["thickness"].shape[0]:
         raise ValueError(f"Tile {tile_id} is outside {joint_history['archive_path']}")
-    return (joint_history["thickness"][int(tile_id), indices],
-            joint_history["rates"][int(tile_id), indices])
+    reset_days = np.asarray(
+        joint_history.get("summary", {}).get("reset_days", []), dtype=float
+    ).reshape(-1)
+    source_episode = np.searchsorted(reset_days, times, side="right")
+    query_episode = np.searchsorted(reset_days, query_days, side="right")
+    thickness = np.empty(query_days.size, dtype=float)
+    rates = np.empty(query_days.size, dtype=float)
+    source_thickness = np.asarray(joint_history["thickness"][int(tile_id)], dtype=float)
+    source_rates = np.asarray(joint_history["rates"][int(tile_id)], dtype=float)
+    for episode in np.unique(query_episode):
+        query_mask = query_episode == episode
+        source_mask = source_episode == episode
+        if not np.any(source_mask):
+            raise ValueError(
+                f"Joint ice history has no samples in reset episode {episode} "
+                f"for {joint_history['archive_path']}"
+            )
+        episode_times = times[source_mask]
+        episode_queries = query_days[query_mask]
+        if (
+            episode_queries.min() < episode_times[0] - 1.0e-9
+            or episode_queries.max() > episode_times[-1] + 1.0e-9
+        ):
+            raise ValueError(
+                f"Bundle observation days exceed joint-history coverage in reset "
+                f"episode {episode}: query [{episode_queries.min():.9g}, "
+                f"{episode_queries.max():.9g}], history [{episode_times[0]:.9g}, "
+                f"{episode_times[-1]:.9g}] from {joint_history['archive_path']}"
+            )
+        thickness[query_mask] = np.interp(
+            episode_queries, episode_times, source_thickness[source_mask]
+        )
+        rates[query_mask] = np.interp(
+            episode_queries, episode_times, source_rates[source_mask]
+        )
+    return thickness, rates
 
 
 def _modulation_dir(modulation_root, detector):
