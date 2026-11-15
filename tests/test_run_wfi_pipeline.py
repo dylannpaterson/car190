@@ -76,6 +76,23 @@ class WfiPipelineTests(unittest.TestCase):
             config_index = command.index("--reset-config")
             self.assertEqual(command[config_index + 1], str(reset_config["path"]))
 
+    def test_main_pipeline_dispatches_global_rate_plots(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = pipeline.PipelineRun(
+                root / "corrected_statistics_4h_thinned",
+                root / "production_run",
+                FULL_TMM,
+            )
+            with patch.object(run, "_run_command") as run_command:
+                run._run_global_rate_plots(root / "corrected_statistics_4h_thinned")
+            command = run_command.call_args.args[1]
+            assert str(Path("run_wfi_global_rate_plots.py")) in " ".join(command)
+            assert command[command.index("--route") + 1] == FULL_TMM
+            outputs = run_command.call_args.kwargs["outputs"]
+            assert any(path.name == "wfi_full_focal_plane_rate_maps.png" for path in outputs)
+            assert any(path.name == "wfi_all_detector_ice_rate_trajectories.png" for path in outputs)
+
     def test_central_full_tmm_defaults_match_fit_runners(self):
         self.assertEqual(FULL_TMM_EMCEE_WALKERS, emcee_warmup.EMCEE_WALKERS)
         self.assertEqual(FULL_TMM_EMCEE_STEPS, emcee_warmup.EMCEE_STEPS)

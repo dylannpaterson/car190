@@ -397,6 +397,10 @@ input, route, settings profile, or pipeline version is rejected for that output
 path. See `docs/WFI_FULL_PIPELINE_REFACTOR_PLAN.md` for the output layout and
 regression contract.
 
+Both frontends also generate the per-detector plots and the combined
+18-detector focal-plane rate maps and all-detector rate trajectories under
+`production/plots/<route>/` by default.
+
 Reset and decon boundaries are read from `wfi_pipeline/reset_events.yaml` by
 both production routes, the joint ice-history fit, bundle/H5 packaging, the H5
 history updater, and production trajectory plots. The default Decon2 boundary

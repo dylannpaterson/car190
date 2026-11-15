@@ -1197,6 +1197,7 @@ class PipelineRun:
                 )
                 self._run_tmm_plots(statistics_dir, detector, fit_roots[detector])
 
+            self._run_global_rate_plots(statistics_dir)
             base_bundle = self._build_base_bundle()
             self._run_joint_fits(statistics_dir, fit_roots, six_led_roots)
             modulated_bundle, final_h5 = self._run_bundle_and_h5(base_bundle)
@@ -1275,6 +1276,30 @@ class PipelineRun:
         self._run_command(
             "tmm_diagnostics", command, detector=detector,
             outputs=plot_outputs,
+        )
+
+    def _run_global_rate_plots(self, statistics_dir):
+        plot_root = self.paths["plots"]
+        focal_plane = plot_root / "focal_plane"
+        trajectories = plot_root / "trajectories"
+        recent_trajectories = plot_root / "trajectories_last_7d"
+        outputs = [
+            focal_plane / "wfi_full_focal_plane_rate_maps.png",
+            focal_plane / "wfi_full_focal_plane_aom_rate_jump_percent.png",
+            trajectories / "wfi_all_detector_ice_rate_trajectories.png",
+            recent_trajectories
+            / "wfi_all_detector_ice_rate_trajectories_last_7d.png",
+        ]
+        command = [
+            sys.executable,
+            str(ROOT / "wfi_pipeline" / "run_wfi_global_rate_plots.py"),
+            "--statistics-dir", str(statistics_dir),
+            "--production-root", str(self.paths["production"]),
+            "--route", str(self.profile.name),
+            "--output-dir", str(plot_root),
+        ]
+        self._run_command(
+            "global_rate_diagnostics", command, outputs=outputs
         )
 
 
