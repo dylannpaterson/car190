@@ -304,8 +304,9 @@ air -> ice -> antireflection (AR) layer 1 -> AR layer 2 -> AR layer 3
 
 The transfer-matrix method (TMM) calculates the amplitude and phase of
 reflected light through the layers at the wavelengths sampled by each source
-spectral energy distribution (SED). The clean stack's complex amplitude
-reflection coefficient is denoted $r_{\mathrm{TMM},k}(\lambda)$. The complex
+spectral energy distribution (SED). The unmodulated, ice-free reference
+stack's complex amplitude reflection coefficient is denoted
+$r_{\mathrm{TMM},k}(\lambda)$. The complex
 refractive index is written $n+i k$: $n$ describes refraction and $k$ describes
 absorption. The model
 assumes:
@@ -327,16 +328,17 @@ P_{\mathrm{sub}}=\operatorname{Re}\!\left(\frac{Y_s}{Y_0}\right)
 \left|\frac{2Y_0}{Y_0U+V}\right|^2.
 $$
 
-For a clean (ice-free) stack, let $P_{\mathrm{sub}}^{\mathrm{clean}}(\lambda)$
-be the substrate power from the same expression with the ice layer removed.
-Adding ice of thickness $d$ changes the transfer-boundary pair and produces
+For the ice-free reference stack, let
+$P_{\mathrm{sub}}^{\mathrm{ice\text{-}free}}(\lambda)$ be the substrate power
+with the ice layer removed. Adding ice of thickness $d$ changes the
+transfer-boundary pair and produces
 $P_{\mathrm{sub}}^{\mathrm{ice}}(\lambda,d)$. Their ratio describes the
 wavelength-dependent response change caused by ice:
 
 $$
 \mathcal{R}_{k}^{\mathrm{RCS}}(\lambda,d)=
 \frac{P_{\mathrm{sub},k}^{\mathrm{ice}}(\lambda,d)}
-     {P_{\mathrm{sub},k}^{\mathrm{clean}}(\lambda)}.
+     {P_{\mathrm{sub},k}^{\mathrm{ice\text{-}free}}(\lambda)}.
 $$
 
 This ratio connects the physical stack to the RCS measurement: the LED's
@@ -595,15 +597,16 @@ eight broad filters, providing complementary wavelength coverage. Combining
 the data can therefore constrain smooth response structure between the LED
 bands while retaining the RCS time sampling of ice evolution.
 
-The joint model builds on the RCS-based physical model. It keeps the clean TMM
-optical state fixed, modifies its clean complex reflection
-smoothly with wavelength, and refines each tile's RCS-derived ice history
-against both data sets. The reflection adjustment is propagated through the
-ice layer in the TMM calculation before predicting measured counts.
+The joint model builds on the RCS-based physical model. It keeps the full-TMM
+optical state of the unmodulated, ice-free reference fixed, applies a smooth
+wavelength-dependent modulation to its ice-free complex reflection, and
+refines each tile's RCS-derived ice history against both data sets. The
+modulated reflection is propagated through the ice layer in the TMM calculation
+before predicting measured counts.
 
-### Joint clean-reflection and photometric forward model
+### Joint ice-free-reflection and photometric forward model
 
-For detector $d$, tile $k$, and wavelength $\lambda$, the adjusted clean
+For detector $d$, tile $k$, and wavelength $\lambda$, the modulated ice-free
 reflection is
 
 $$
@@ -617,26 +620,26 @@ g_d(\lambda)&=\sum_{j=1}^{15}a_{d,j}B_j(\lambda),\\
 $$
 
 The basis functions $B_j$ are shared by tiles on detector $d$ and are defined
-below. The modulation specifies the wavelength-dependent clean complex
-reflection. At each tile's ice thickness, the modulated reflection sets the
-clean-stack input admittance
+below. Here $r_{\mathrm{TMM}}$ denotes the unmodulated, ice-free TMM reflection;
+the modulation specifies its wavelength-dependent change. At each tile's ice
+thickness, the modulated ice-free reflection sets the ice-layer input admittance
 $Y_{\mathrm{mod}}=Y_0(1-r_{\mathrm{mod}})/(1+r_{\mathrm{mod}})$. The fitted
-clean-stack transfer normalization and substrate admittance $Y_s$ remain fixed;
-the ice-layer transfer matrix is applied to this boundary to calculate
-$P_{\mathrm{sub}}^{\mathrm{ice,mod}}$.
+ice-free reference-stack transfer normalization and substrate admittance $Y_s$
+remain fixed. The ice-layer transfer matrix is applied to this boundary to
+calculate $P_{\mathrm{sub}}^{\mathrm{ice,mod}}$.
 
 For CAR201, the wavelength-dependent relative substrate response is
 
 $$
 \mathcal{R}_{d,k}(\lambda,t)=
 \frac{P^{\mathrm{ice,mod}}_{\mathrm{sub},d,k}(\lambda,d_k(t))}
-     {P^{\mathrm{clean}}_{\mathrm{sub},d,k}(\lambda)}.
+     {P^{\mathrm{ice\text{-}free}}_{\mathrm{sub},d,k}(\lambda)}.
 $$
 
-The numerator is substrate power after the modulated clean reflection has
+The numerator is substrate power after the modulated ice-free reflection has
 been propagated through ice of thickness $d_k(t)$; the denominator is the
-fixed, unmodulated, ice-free clean-TMM substrate power. For star $s$, filter
-$f$, and visit $v$, the band-integrated model rate and reference-visit-relative
+fixed, unmodulated, ice-free TMM substrate power. For star $s$, filter $f$, and
+visit $v$, the band-integrated model rate and reference-visit-relative
 magnitude prediction are
 
 $$
@@ -656,7 +659,7 @@ LED's energy-weighted TMM response with that LED's first observation.
 #### Spectral-Modulation Basis Specification
 
 This subsection defines the basis functions, bounds, and regularizers for the
-joint clean-reflection adjustment.
+joint ice-free-reflection adjustment.
 
 The basis functions $B_j$ are fixed, dimensionless functions of wavelength
 $\lambda$ (in nanometers); their knots and shapes are defined directly in
@@ -1000,17 +1003,19 @@ dashed line marks the post-roll transition. Between visits, model curves are
 evaluated on a 0.25-day grid using the nearest measured source-to-tile
 assignment, and are split at reset and roll boundaries.
 
-![Figure 6. Effect of joint spectral modulation on the clean WFI02 tile-135 complex reflection.](./figures/wfi02_tile135_complex_reflectance.png)
+![Figure 6. Effect of joint spectral modulation on the ice-free WFI02 tile-135 complex reflection.](./figures/wfi02_tile135_complex_reflectance.png)
 
-**Figure 6. Effect of joint spectral modulation on the clean complex reflection.**
-The panels show the amplitude and unwrapped phase of the ice-free reflection
-for representative WFI02 tile 135, before modulation (blue dashed) and after
-the final joint-fit modulation (orange). The same fixed full-TMM tile state is
-used for both curves; the fitted detector-wide modulation multiplies the clean
-reflection by $\exp[g(\lambda)+i\phi(\lambda)]$. The horizontal axes show
-reciprocal wavelength and wavelength over the 470--2335 nm effective-area
-support. The phase branches are aligned at the longest wavelength, retaining
-the fitted phase shift. The curves are MAP spectra of the clean reflection.
+**Figure 6. Effect of joint spectral modulation on the ice-free complex
+reflection.** The panels show the amplitude and unwrapped phase of the ice-free
+reflection for representative WFI02 tile 135, before modulation (blue dashed,
+the unmodulated ice-free reference) and after the final joint-fit modulation
+(orange, the modulated ice-free reflection). The same fixed full-TMM tile state
+is used for both curves; the fitted detector-wide modulation multiplies the
+unmodulated ice-free reflection by $\exp[g(\lambda)+i\phi(\lambda)]$. The
+horizontal axes show reciprocal wavelength and wavelength over the 470--2335 nm
+effective-area support. The phase branches are aligned at the longest
+wavelength, retaining the fitted phase shift. Both curves are MAP spectra of
+the ice-free reflection.
 
 ### Independent Spectrum Checks
 
@@ -1031,7 +1036,7 @@ fitted stellar spectra.
 
 The reported CAR201 prediction is the relative substrate-power convention
 defined in Section 5: modulated ice-coated substrate power divided by the
-fixed unmodulated, ice-free clean-TMM power, integrated with the stellar photon
+fixed unmodulated, ice-free TMM power, integrated with the stellar photon
 spectrum and detector effective area. The fit produces independent tile ice
 histories and detector-wide complex spectral adjustments. Optical coefficients
 are effective parameters of the adopted model.
