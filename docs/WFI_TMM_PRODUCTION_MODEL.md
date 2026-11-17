@@ -235,7 +235,8 @@ log responses from unscaled detector counts; orange points are the same matched
 exposures after photodiode/side-swap, temperature-gain, and ACM corrections.
 Circles mark CAR190 (Program 1039); triangles mark CAR216 (Program 1063).
 The separation of the colored series shows the net change introduced by the
-preprocessing sequence. Dotted vertical lines mark the physical ice resets.
+preprocessing sequence. Dotted and dash-dot vertical lines mark the Decon2 and
+Decon3 ice resets, respectively.
 
 ### Stellar SED Estimation
 
@@ -259,11 +260,11 @@ determined by the priors.
 The SED fits use nested sampling (`dynesty`), which maintains 80 active samples
 (called live points) and stops when the estimated remaining log evidence is
 below 1 ($\mathrm{dlogz}=1$). The resulting posterior draws are approximate. Each
-fitted star has 128 draws. A draw is a complete extincted spectrum,
-retaining correlations between wavelengths. Catalog magnitude uncertainties
-have a 0.03 mag floor to account for calibration and model error. After
-magnitudes are converted to fluxes, measurement errors are treated as
-independent and Gaussian.
+fitted star has 128 draws. A draw is a complete extincted spectrum, retaining
+correlations between wavelengths. Catalog magnitude uncertainties have a
+0.03 mag floor to account for calibration and model error. After magnitudes
+are converted to fluxes, measurement errors are treated as independent and
+Gaussian.
 
 The SED posterior conditions on the Fitzpatrick extinction law and selected
 atmosphere-model family, with uncertainty represented through the fitted
@@ -344,6 +345,9 @@ and divided by the corresponding ice-free power. This gives one relative
 response per LED and ice thickness. Its logarithm is differenced from the first
 observation of that LED before comparison with the data.
 
+The modeled optical response depends on the AR coating, HgCdTe substrate, and
+deposited ice. We parameterize their optical properties separately below.
+
 #### Antireflection-Layer Parameters
 
 Each tile has two fitted parameters per antireflection layer: thickness and
@@ -399,6 +403,10 @@ The baseline ice refractive index is $n=1.25+i0$. The initial full-TMM fit
 estimates one positive wavelength-independent scale per tile; later
 ice-thickness-history fits hold that state fixed. Ice is modeled as lossless,
 with $k=0$, at normal incidence.
+
+The optical model gives the detector response for a specified ice thickness.
+To predict how the RCS response evolves, we combine it with a time-dependent
+model of ice deposition onto the detector.
 
 ### Tile Ice-Deposition Rate and Thickness-History Model
 
@@ -498,12 +506,11 @@ data-only within-group scatter $Q-S^2/n$ and the model-dependent residual term.
 
 ## 4. RCS Ice-Thickness-History Fitting
 
-With the layered optical response and ice-dependent power defined above, the
-RCS measurements can be used to infer the optical state and each tile's
-ice-thickness history. The six LEDs provide repeated time samples at discrete
-wavelength bands. The initial fit estimates the full optical state; subsequent
-rapid updates hold that state fixed and refit the ice-deposition-rate
-trajectories that determine the time-dependent thickness histories.
+The physical model relates changes in the RCS response to the ice thickness on
+each detector tile. Fitting that model to the observed six-LED time series
+estimates both the detector's optical properties and its ice-thickness history.
+The fitting procedure begins with a full-TMM fit, followed by rapid updates
+that hold the fitted optical state fixed.
 
 ### Full-TMM Optical Fit and Initialization
 
@@ -514,10 +521,9 @@ constant-in-time ice-deposition rate. This reduces the number of trajectory
 parameters while the sampler explores the nonlinear posterior over optical
 parameters, ice thicknesses, and ice-deposition rate. Its high-posterior states
 identify promising likelihood basins for deterministic MAP refinement. The
-best constant ice-deposition-rate state initializes that refinement: its
-rate is copied across the time nodes, which are then allowed to vary
-independently in the final fit. The resulting full-TMM optical state supplies
-the fixed response model used by rapid RCS updates.
+search supplies an optical-parameter starting region for the final fit. The
+resulting full-TMM optical state supplies the fixed response model used by rapid
+RCS updates.
 
 ### Rapid RCS Update with Precomputed Responses
 
@@ -534,18 +540,13 @@ and interpolated during the fit. The fixed optical quantities are:
 - normal incidence.
 
 The rapid fit estimates each tile's ice-thickness history, reset response
-offsets, and small per-LED log offsets. A constant ice-deposition-rate
-preliminary fit provides starting values for the time-varying fit and, for the
-post-Decon3 segment, an estimate of each tile's starting ice thickness. These
-estimates center the prior on post-Decon3 starting thickness listed below.
+offsets, small per-LED log offsets, and node-wise ice-deposition rates.
 
 ### RCS-Only Parameter Priors and Bounds
 
 The two RCS-only stages use independent per-tile ice-thickness histories and
 ice-deposition-rate trajectories. The rapid update holds the full-TMM optical
-state fixed and fits small LED offsets. Its post-Decon3 starting-thickness
-prior is centered on the constant ice-deposition-rate preliminary fit for each
-tile.
+state fixed and fits small LED offsets.
 
 | Quantity | Full-TMM RCS fit | Rapid RCS update |
 | --- | --- | --- |
@@ -575,29 +576,24 @@ $$
 =\arg\max_{\theta}p(D\mid\theta)\,p(\theta).
 $$
 
-The fitting sequence separates broad exploration from final time-varying
-estimation:
+Starting from the high-posterior region identified by MCMC, the fit proceeds in
+three stages:
 
-1. **Explore the full-TMM posterior.** The MCMC basin search uses a constant
-   ice-deposition rate through time. This reduces the number of trajectory
-   parameters while the sampler explores the nonlinear coupling between the
-   optical state, starting ice thicknesses, and ice-deposition rate. The best
-   high-posterior state provides a starting basin for deterministic refinement;
-   it is not the final ice-thickness history.
-2. **Refine the full-TMM MAP fit.** The selected constant ice-deposition rate
-   is copied to the time nodes as an initial value. The bounded fit then
-   estimates the optical parameters and each tile's independent, time-varying
-   ice-deposition-rate trajectory. The RCS likelihood moves these node values
-   to match the measured response, while the priors regularize parameters that
-   the data constrain weakly.
-3. **Estimate post-Decon3 starting thickness for the rapid fit.** The
-   post-Decon3 ice thickness is not determined by the event itself. Over
-   the observed post-event interval, a thicker residual film with slower
-   subsequent ice deposition can produce a response similar to a thinner
-   starting film with faster ice deposition. A constant ice-deposition-rate
-   preliminary fit estimates each tile's post-Decon3 starting ice thickness;
-   the rapid-fit prior is centered on that estimate.
-4. **Fit the rapid time-varying ice-thickness history.** With the full-TMM
+1. **Refine the full-TMM MAP fit.** The best constant-rate MCMC state initializes
+   the deterministic fit. Its scalar ice-deposition rate is copied to each time
+   node before those rates are allowed to vary independently. The MAP fit then
+   refines the optical parameters and per-node ice-deposition rates against the
+   RCS likelihood, with the priors regularizing parameters that the data
+   constrain weakly.
+2. **Estimate post-Decon3 starting thickness for the rapid fit.** The
+   post-Decon3 ice thickness is not determined by the event itself. Over the
+   observed post-event interval, a thicker residual film with slower subsequent
+    ice deposition can produce a response similar to a thinner starting film
+    with faster ice deposition. A constant ice-deposition-rate preliminary fit
+    estimates each tile's post-Decon3 starting ice thickness and provides
+    initial rate values for the rapid fit. Its thickness estimate centers the
+    rapid-fit prior for the post-Decon3 segment.
+3. **Fit the rapid time-varying ice-thickness history.** With the full-TMM
    optical state held fixed, precomputed per-LED response curves are combined
    with the RCS data to estimate independent ice-deposition rates at the time
    nodes. Integrating those rates gives each tile's final ice-thickness history,
@@ -613,21 +609,17 @@ history is estimated independently.
 
 ## 5. Joint RCS and Stellar Photometry Model
 
-### Why combine RCS with stellar photometry?
+### Motivation for the Joint Model
 
-The RCS constrains the optical response through six LED bands. Those repeated
-measurements give strong temporal information, but they sample the spectrum at
-only six separated wavelength ranges. The CAR201 stellar photometry adds
-measurements in eight broad filters, providing complementary wavelength coverage. Combining
-the data can therefore constrain smooth response structure between the LED
-bands while retaining the RCS time sampling of ice evolution.
-
-The joint model builds on the RCS-based physical model. It keeps the full-TMM
-optical state of the unmodulated, ice-free reference fixed, applies a smooth
-wavelength-dependent modulation to its ice-free complex reflection, and
-refines each tile's RCS-derived ice-thickness history against both data sets. The
-modulated reflection is propagated through the ice layer in the TMM calculation
-before predicting measured counts.
+The RCS measurements provide high-cadence constraints on ice evolution, but
+their spectral coverage is limited to six LED bands. Stellar photometry from
+CAR201 provides complementary measurements across eight broad filters, allowing
+the wavelength-dependent detector response to be constrained between and beyond
+the LED bands. Using the fixed full-TMM optical state as its baseline, the joint
+model extends the RCS-only fit by adding a smooth spectral modulation of the
+ice-free complex reflection and refining the RCS-derived ice-thickness
+histories. The fitted reflection modulation is propagated through the ice layer
+when predicting the measured counts.
 
 ### Joint ice-free-reflection and photometric forward model
 
@@ -990,6 +982,10 @@ bounded L-BFGS-B.
 
 ## 6. Results and Discussion
 
+The results compare RCS-only and joint-fit ice-thickness histories, their
+agreement with RCS and CAR201 stellar photometry, and the spectral change from
+modulation, using WFI02 tile 135 and the full WFI02 photometry sample.
+
 ### RCS ice-thickness histories and fit agreement
 
 ![Figure 3. RCS and joint-fit ice-thickness history and ice-deposition rate for representative WFI02 tile 135.](./figures/wfi02_representative_ice_history.png)
@@ -1000,8 +996,8 @@ initialization (dashed purple), rapid RCS update (blue), and final joint RCS +
 stellar-photometry fit (orange). The lower panel shows the corresponding ice-deposition
 rates; the joint-fit ice-deposition rate is the derivative of its fitted
 ice-thickness history evaluated on a dense date grid.
-Dotted vertical lines mark Decon2 and Decon3; model curves are drawn separately
-across each reset. The displayed trajectories are MAP estimates.
+Dotted and dash-dot vertical lines mark Decon2 and Decon3, respectively; model
+curves are drawn separately across each reset. The displayed trajectories are MAP estimates.
 
 ![Figure 4. Corrected RCS data and RCS-only and joint-modulated fits for WFI02 tile 135.](./figures/wfi02_tile135_rcs_model_data.png)
 
@@ -1017,21 +1013,28 @@ Decon3 resets.
 
 ### CAR201 joint-fit data and predictions
 
+The RCS examples are followed by the joint model's predictions across the eight
+CAR201 filters.
+
 ![Figure 5. Full WFI02 CAR201 data compared with base and joint-modulated model predictions.](./figures/wfi02_full_car201_model_data.png)
 
 **Figure 5. CAR201 data and model predictions for WFI02.** The panels show
 all eight filters and all 33,645 valid measurements from 604 stars in the WFI02
 joint-fit sample, summarized by visit. Black points and error bars show the
 median and 16th--84th percentile range of observed median-centered magnitude
-changes across stars. The blue dashed curve is the unmodulated TMM prediction
-using RCS-only ice-thickness histories; the orange curve and band show the joint
-modulated prediction using the jointly refined ice-thickness histories. Both
-predictions use
-the fitted post-roll offsets, with star/filter locations profiled separately
-for each model. Dotted vertical lines mark the decontamination resets; the
-dashed line marks the post-roll transition. Between visits, model curves are
-evaluated on a 0.25-day grid using the nearest measured source-to-tile
-assignment, and are split at reset and roll boundaries.
+changes across stars; model summaries at each visit use the same observed-star
+cohort. For this display, the fitted post-roll offset is
+transferred from the model predictions to the observed values with the
+compensating sign, preserving the comparison residuals. The blue dashed curve
+is the unmodulated TMM prediction using RCS-only ice-thickness histories; the
+orange curve and band show the joint-modulated prediction using the jointly
+refined ice-thickness histories. The model curves omit the post-roll term.
+Star/filter locations are profiled separately for each model. Dotted and dash-dot
+vertical lines mark Decon2 and Decon3, respectively; the dashed line marks the
+post-roll transition.
+Between visits, model curves are evaluated on a 0.25-day grid using the nearest
+available pass for each source's tile assignment and split at the Decon2 and
+Decon3 resets.
 
 ![Figure 6. Effect of joint spectral modulation on the ice-free WFI02 tile-135 complex reflection.](./figures/wfi02_tile135_complex_reflectance.png)
 
