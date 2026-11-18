@@ -44,10 +44,14 @@ def main():
     timestamps = np.asarray(bundle["observation_start_time"]).astype(str)
     if timestamps.size != days.size:
         raise ValueError("Unmodulated bundle time labels do not match its observation axis")
-    reset_days = np.asarray(
-        [float(bundle["ice_reset_day"]), float(bundle["third_decon_day"])], dtype=float
-    )
-    episode = np.searchsorted(reset_days, days, side="right").astype(np.int8)
+    if "reset_event_days" in bundle:
+        reset_days = np.asarray(bundle["reset_event_days"], dtype=float).reshape(-1)
+    else:
+        reset_days = [float(bundle["ice_reset_day"])]
+        if "third_decon_day" in bundle:
+            reset_days.append(float(bundle["third_decon_day"]))
+        reset_days = np.asarray(reset_days, dtype=float)
+    episode = np.searchsorted(reset_days, days, side="right").astype(np.int32)
     deposition_fit = deposition_factorizations_on_blocks(
         days, episode, thickness, spacing_days=2.0, multi_rank=16
     )

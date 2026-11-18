@@ -196,6 +196,10 @@ def cached_fit_matches(
             archived_reset_prior_sigmas = np.asarray(
                 fit.get("reset_event_thickness_prior_log_sigma", []), dtype=float
             ).reshape(-1)
+            archived_reset_warmup_sigmas = np.asarray(
+                fit.get("reset_event_relative_response_warmup_log_sigma", []),
+                dtype=float,
+            ).reshape(-1)
         if warmup_prior_root is None:
             prior_matches = (
                 archived_warmup_root is None
@@ -205,15 +209,32 @@ def cached_fit_matches(
         else:
             prior_matches = (
                 archived_warmup_root == Path(warmup_prior_root).resolve()
-                and archived_prior_sigma is not None
-                and np.isclose(
+                and archived_prior_stages == str(thickness_prior_stages)
+            )
+            if thickness_prior_stages == "configured":
+                expected_warmup_sigmas = np.asarray(
+                    [
+                        event.get("relative_response_warmup", {}).get(
+                            "log_sigma", np.nan
+                        )
+                        for event in (reset_events or ())
+                    ],
+                    dtype=float,
+                )
+                prior_matches = prior_matches and archived_prior_sigma is None and np.allclose(
+                    archived_reset_warmup_sigmas,
+                    expected_warmup_sigmas,
+                    rtol=0.0,
+                    atol=1.0e-12,
+                    equal_nan=True,
+                )
+            else:
+                prior_matches = prior_matches and archived_prior_sigma is not None and np.isclose(
                     archived_prior_sigma,
                     float(thickness_prior_log_sigma),
                     rtol=0.0,
                     atol=1.0e-12,
                 )
-                and archived_prior_stages == str(thickness_prior_stages)
-            )
         reset_layout_matches = True
         if reset_events is not None:
             expected_data = relative_fit.production.load_tile_statistics(
@@ -249,6 +270,15 @@ def cached_fit_matches(
                 ],
                 dtype=float,
             )
+            expected_warmup_sigmas = np.asarray(
+                [
+                    event.get("relative_response_warmup", {}).get(
+                        "log_sigma", np.nan
+                    )
+                    for event in reset_events
+                ],
+                dtype=float,
+            )
             reset_layout_matches = reset_layout_matches and np.allclose(
                 archived_reset_prior_medians,
                 expected_medians,
@@ -259,6 +289,13 @@ def cached_fit_matches(
                 expected_sigmas,
                 rtol=0.0,
                 atol=1.0e-12,
+            )
+            reset_layout_matches = reset_layout_matches and np.allclose(
+                archived_reset_warmup_sigmas,
+                expected_warmup_sigmas,
+                rtol=0.0,
+                atol=1.0e-12,
+                equal_nan=True,
             )
             expected_starts = reset_event_initial_thickness_starts_nm or {}
             if expected_starts:
@@ -348,6 +385,7 @@ def fit_tile(
         warmup_prior_root,
         thickness_prior_log_sigma,
         thickness_prior_stages,
+        reset_events=reset_events,
     )
     posterior_path = output_dir / "posterior_samples.npz"
     if not force and cached_fit_matches(
@@ -901,10 +939,22 @@ def parse_args(argv=None):
         default=None,
         help="Constant-rate warmup directory containing fits/tile_### archives.",
     )
-    parser.add_argument("--thickness-prior-log-sigma", type=float, default=None)
+    parser.add_argument(
+        "--thickness-prior-log-sigma",
+        type=float,
+        default=None,
+        help=(
+            "Override the warmup-centered thickness-prior log sigma for legacy "
+            "stage selectors; configured uses each event's YAML value."
+        ),
+    )
     parser.add_argument(
         "--thickness-prior-stages",
         default=None,
+        help=(
+            "Warmup-centered stages: configured (event YAML), all, third-decon "
+            "(legacy), or reset-event:<name>."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -939,15 +989,26 @@ def run_detector(
     reset_events = None if reset_events is None else tuple(reset_events)
     reset_event_starts = {}
     if reset_events is not None:
-        if len(reset_events) > 1:
-            configured_day = float(reset_events[1]["day"])
-            if third_decon_day is not None and not np.isclose(
-                float(third_decon_day), configured_day, rtol=0.0, atol=1.0e-12
-            ):
-                raise ValueError(
-                    "third_decon_day conflicts with the shared reset configuration"
-                )
-            third_decon_day = configured_day
+        configured_third_day = next(
+            (
+                float(event["day"])
+                for event in reset_events
+                if event["name"] == "third_decon"
+            ),
+            None,
+        )
+        if (
+            third_decon_day is not None
+            and configured_third_day is not None
+            and not np.isclose(
+                float(third_decon_day), configured_third_day, rtol=0.0, atol=1.0e-12
+            )
+        ):
+            raise ValueError(
+                "third_decon_day conflicts with the shared reset configuration"
+            )
+        if configured_third_day is not None:
+            third_decon_day = configured_third_day
         warmup_events = [
             event for event in reset_events if event.get("relative_response_warmup")
         ]
@@ -960,17 +1021,8 @@ def run_detector(
                 third_decon_initial_thickness_start_nm
             )
         if warmup_prior_root is not None and warmup_events:
-            if thickness_prior_log_sigma is None:
-                thickness_prior_log_sigma = float(
-                    warmup_events[0]["relative_response_warmup"]["log_sigma"]
-                )
             if thickness_prior_stages is None:
-                event = warmup_events[0]
-                thickness_prior_stages = (
-                    "third-decon"
-                    if event["name"] == "third_decon"
-                    else f"reset-event:{event['name']}"
-                )
+                thickness_prior_stages = "configured"
     if third_decon_day is not None:
         third_decon_day = float(third_decon_day)
         if not np.isfinite(third_decon_day):
@@ -995,6 +1047,7 @@ def run_detector(
         warmup_prior_root,
         thickness_prior_log_sigma,
         thickness_prior_stages,
+        reset_events=reset_events,
     )
     led_log_offset_prior_sigma_log = float(led_log_offset_prior_sigma_log)
     if (
@@ -1200,9 +1253,13 @@ def main(argv=None):
     reset_config = load_reset_config(args.reset_config)
     reset_events = list(reset_config["events"])
     if args.third_decon_day is not None:
-        if len(reset_events) < 2:
-            raise ValueError("--third-decon-day requires a second reset event")
-        reset_events[1]["day"] = float(args.third_decon_day)
+        third_event = next(
+            (event for event in reset_events if event["name"] == "third_decon"),
+            None,
+        )
+        if third_event is None:
+            raise ValueError("--third-decon-day requires a third_decon event in the reset config")
+        third_event["day"] = float(args.third_decon_day)
     run_detector(
         args.detector,
         args.statistics_dir,

@@ -32,16 +32,33 @@ def _reset_layout(fit_roots):
             if "reset_event_days" in archive:
                 days = np.asarray(archive["reset_event_days"], dtype=float).reshape(-1)
                 names = np.asarray(archive["reset_event_names"]).astype(str).reshape(-1)
-            else:
-                days = np.asarray(
-                    [archive["ice_reset_day"]]
-                    + ([archive["third_decon_day"]]
-                       if "third_decon_day" in archive else []),
-                    dtype=float,
-                ).reshape(-1)
+            elif "ice_reset_days" in archive:
+                days = np.asarray(archive["ice_reset_days"], dtype=float).reshape(-1)
                 names = np.asarray(
-                    ["second_decon"]
-                    + (["third_decon"] if days.size > 1 else [])
+                    archive.get(
+                        "reset_event_names",
+                        [
+                            "second_decon" if index == 0 else
+                            "third_decon" if index == 1 else
+                            f"reset_event_{index + 1}"
+                            for index in range(days.size)
+                        ],
+                    )
+                ).astype(str).reshape(-1)
+            else:
+                legacy_days = [
+                    float(np.asarray(archive["ice_reset_day"]).reshape(-1)[0])
+                ]
+                if "third_decon_day" in archive:
+                    legacy_days.append(
+                        float(np.asarray(archive["third_decon_day"]).reshape(-1)[0])
+                    )
+                days = np.asarray(legacy_days, dtype=float)
+                names = np.asarray(
+                    [
+                        "second_decon" if index == 0 else "third_decon"
+                        for index in range(days.size)
+                    ]
                 ).astype(str)
         if days.size == 0 or names.size != days.size or np.any(np.diff(days) <= 0.0):
             raise ValueError(f"{detector}: invalid reset-event metadata in {archive_path}")

@@ -537,36 +537,84 @@ def _archive_scalar(samples, names):
     return None
 
 
-def load_initial_thickness_map(output_dir, expected_sca, tile_size):
-    """Load the three fitted initial-thickness stages for one detector."""
+def _reset_event_display_name(name):
+    known = {"second_decon": "Decon2", "third_decon": "Decon3"}
+    return known.get(str(name), str(name).replace("_", " ").capitalize())
+
+
+def initial_thickness_metric_specs(reset_event_names):
+    names = tuple(str(name) for name in reset_event_names)
+    metrics = [(f"Before {_reset_event_display_name(names[0])}", "initial_thickness_nm")]
+    metrics.extend(
+        (
+            f"After {_reset_event_display_name(name)}",
+            f"reset_event_{index + 1}_initial_thickness_nm",
+        )
+        for index, name in enumerate(names)
+    )
+    return tuple(metrics)
+
+
+def load_initial_thickness_map(
+    output_dir, expected_sca, tile_size, *, return_metrics=False
+):
+    """Load initial thickness for the starting state and every reset event."""
     entries = tile_directory_entries(Path(output_dir) / "fits")
     try:
         complete_tile_ids(tile_id for tile_id, _path in entries)
     except ValueError:
         return None
     tile_grid_size = tile_grid_size_for_tile_size(tile_size)
+    first_archive_path = entries[0][1] / "posterior_samples.npz"
+    if not first_archive_path.is_file():
+        return None
+    with np.load(first_archive_path, allow_pickle=False) as samples:
+        if "reset_event_names" in samples:
+            reset_names = np.asarray(samples["reset_event_names"]).astype(str).reshape(-1)
+        else:
+            reset_names = np.asarray(
+                ["second_decon"]
+                + (["third_decon"] if "third_decon_day" in samples else [])
+            )
+    metrics = initial_thickness_metric_specs(reset_names)
     values = {
         field: np.full((tile_grid_size, tile_grid_size), np.nan, dtype=float)
-        for _title, field in INITIAL_THICKNESS_METRICS
+        for _title, field in metrics
     }
-    log_fields = {
-        "initial_thickness_nm": "initial_thickness_log_nm",
-        "reset_initial_thickness_nm": "reset_initial_thickness_log_nm",
-        "third_decon_initial_thickness_nm": "third_decon_initial_thickness_log_nm",
-    }
+    legacy_log_fields = (
+        "reset_initial_thickness_log_nm",
+        "third_decon_initial_thickness_log_nm",
+    )
     for tile_id, fit_dir in entries:
         posterior_path = fit_dir / "posterior_samples.npz"
         if not posterior_path.is_file():
             return None
         with np.load(posterior_path, allow_pickle=False) as samples:
-            for field, log_field in log_fields.items():
-                value = _archive_scalar(samples, (field,))
-                if value is None:
-                    log_value = _archive_scalar(samples, (log_field,))
-                    value = None if log_value is None else float(np.exp(log_value))
-                if value is not None:
+            stage_values = [_archive_scalar(samples, ("initial_thickness_nm",))]
+            if stage_values[0] is None:
+                initial_log = _archive_scalar(samples, ("initial_thickness_log_nm",))
+                stage_values[0] = None if initial_log is None else float(np.exp(initial_log))
+            if "reset_event_initial_thickness_log_nm" in samples:
+                reset_logs = np.asarray(
+                    samples["reset_event_initial_thickness_log_nm"], dtype=float
+                ).reshape(-1)
+                stage_values.extend(np.exp(reset_logs).tolist())
+            else:
+                for index, name in enumerate(reset_names):
+                    alias = (
+                        legacy_log_fields[index]
+                        if index < len(legacy_log_fields)
+                        else f"reset_event_{index + 1}_initial_thickness_log_nm"
+                    )
+                    value = _archive_scalar(samples, (alias,))
+                    stage_values.append(None if value is None else float(np.exp(value)))
+            if len(stage_values) != len(metrics):
+                return None
+            for (_title, field), value in zip(metrics, stage_values, strict=True):
+                if value is not None and np.isfinite(value):
                     values[field][tile_id // tile_grid_size, tile_id % tile_grid_size] = value
-    return values if any(np.isfinite(value).any() for value in values.values()) else None
+    result = values if any(np.isfinite(value).any() for value in values.values()) else None
+    return (result, metrics) if return_metrics else result
 
 
 def load_all_current_ice_thickness_maps(
@@ -600,22 +648,28 @@ def load_all_initial_thickness_maps(
     tile_size=DEFAULT_TILE_SIZE,
     fit_subdir=None,
     fit_root=None,
+    return_metrics=False,
 ):
     maps = {}
+    metrics = None
     for sca in SCAS:
         output_dirs = detector_output_dirs(
             root, sca, fit_suffix, tile_size, fit_subdir, fit_root
         )
-        maps[sca] = next(
-            (
-                thickness_map
-                for output_dir in output_dirs
-                if (thickness_map := load_initial_thickness_map(
-                    output_dir, sca, tile_size
-                )) is not None
-            ),
-            None,
-        )
+        maps[sca] = None
+        for output_dir in output_dirs:
+            loaded = load_initial_thickness_map(
+                output_dir, sca, tile_size, return_metrics=True
+            )
+            if loaded is not None and loaded[0] is not None:
+                maps[sca], detector_metrics = loaded
+                if metrics is None:
+                    metrics = detector_metrics
+                elif detector_metrics != metrics:
+                    raise ValueError("Detector fits disagree on reset-event initial-thickness fields")
+                break
+    if return_metrics:
+        return maps, (INITIAL_THICKNESS_METRICS if metrics is None else metrics)
     return maps
 
 
@@ -634,12 +688,16 @@ def percentile_color_limits(maps, field, upper_percentile):
     return lower, upper
 
 
-def initial_thickness_color_limits(maps, upper_percentile=INITIAL_THICKNESS_VMAX_PERCENTILE):
+def initial_thickness_color_limits(
+    maps,
+    upper_percentile=INITIAL_THICKNESS_VMAX_PERCENTILE,
+    metrics=INITIAL_THICKNESS_METRICS,
+):
     finite_values = [
         values[field][np.isfinite(values[field])]
         for values in maps.values()
         if values is not None
-        for _title, field in INITIAL_THICKNESS_METRICS
+        for _title, field in metrics
         if np.isfinite(values[field]).any()
     ]
     if not finite_values:
@@ -1453,12 +1511,13 @@ def main():
         fit_subdir,
         fit_root,
     )
-    initial_thickness_maps = load_all_initial_thickness_maps(
+    initial_thickness_maps, initial_thickness_metrics = load_all_initial_thickness_maps(
         args.root,
         args.fit_suffix,
         args.tile_size,
         fit_subdir,
         fit_root,
+        return_metrics=True,
     )
     reset_maps, reset_day = load_all_reset_maps(
         args.root,
@@ -1577,10 +1636,12 @@ def main():
         initial_thickness_maps,
         model_label,
         pass_label,
-        metrics=INITIAL_THICKNESS_METRICS,
+        metrics=initial_thickness_metrics,
         title_prefix="Initial ice thickness by decon stage",
         observation_label=observation_label,
-        color_limits=initial_thickness_color_limits(initial_thickness_maps),
+        color_limits=initial_thickness_color_limits(
+            initial_thickness_maps, metrics=initial_thickness_metrics
+        ),
         colorbar_label="Initial ice thickness (nm)",
         metric_unit_label="nm",
         suptitle_fontsize=10,

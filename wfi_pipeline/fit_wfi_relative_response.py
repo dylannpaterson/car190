@@ -27,7 +27,7 @@ from wfi_relative_response import (
 
 
 DEFAULT_WARMUP_THICKNESS_PRIOR_LOG_SIGMA = 0.10
-DEFAULT_WARMUP_THICKNESS_PRIOR_STAGES = "third-decon"
+DEFAULT_WARMUP_THICKNESS_PRIOR_STAGES = "configured"
 
 
 def parse_args():
@@ -59,8 +59,11 @@ def parse_args():
     parser.add_argument("--thickness-prior-log-sigma", type=float, default=None)
     parser.add_argument(
         "--thickness-prior-stages",
-        choices=("all", "third-decon"),
         default=None,
+        help=(
+            "Warmup-centered thickness stages: configured (event YAML), all, "
+            "third-decon (legacy), or reset-event:<name>."
+        ),
     )
     return parser.parse_args()
 
@@ -70,30 +73,50 @@ def resolve_warmup_prior_settings(
     warmup_prior_root,
     thickness_prior_log_sigma,
     thickness_prior_stages,
+    reset_events=None,
 ):
-    """Resolve the warmup-prior defaults without choosing a reset boundary."""
+    """Resolve configured event warmup priors, retaining legacy CLI selectors."""
     if warmup_prior_root is None:
         if thickness_prior_log_sigma is not None or thickness_prior_stages is not None:
             raise ValueError("Thickness prior settings require warmup_prior_root")
         return None, None, None
-    if third_decon_day is None:
+    reset_events = tuple(reset_events or ())
+    if third_decon_day is None and not reset_events:
         raise ValueError(
-            "Warmup-centered thickness priors require an explicit third_decon_day"
+            "Warmup-centered thickness priors require reset-event configuration"
         )
-    if thickness_prior_log_sigma is None:
-        thickness_prior_log_sigma = DEFAULT_WARMUP_THICKNESS_PRIOR_LOG_SIGMA
-    thickness_prior_log_sigma = float(thickness_prior_log_sigma)
-    if not np.isfinite(thickness_prior_log_sigma) or thickness_prior_log_sigma <= 0.0:
-        raise ValueError("Thickness prior log sigma must be positive and finite")
     if thickness_prior_stages is None:
-        thickness_prior_stages = DEFAULT_WARMUP_THICKNESS_PRIOR_STAGES
-    if thickness_prior_stages not in ("all", "third-decon") and not str(
-        thickness_prior_stages
-    ).startswith("reset-event:"):
-        raise ValueError(
-            "Thickness prior stages must be 'all', 'third-decon', or "
-            "'reset-event:<event-name>'"
+        thickness_prior_stages = (
+            DEFAULT_WARMUP_THICKNESS_PRIOR_STAGES
+            if reset_events and thickness_prior_log_sigma is None
+            else "third-decon"
         )
+    valid_stage = (
+        thickness_prior_stages in ("configured", "all", "third-decon")
+        or str(thickness_prior_stages).startswith("reset-event:")
+    )
+    if not valid_stage:
+        raise ValueError(
+            "Thickness prior stages must be 'configured', 'all', 'third-decon', "
+            "or 'reset-event:<event-name>'"
+        )
+    if thickness_prior_stages == "configured":
+        configured = [event for event in reset_events if event.get("relative_response_warmup")]
+        if not configured:
+            raise ValueError(
+                "The reset config has no relative_response_warmup settings; "
+                "choose an explicit prior stage or add event warmup settings"
+            )
+        if thickness_prior_log_sigma is not None:
+            raise ValueError(
+                "configured warmup stages use each event's relative_response_warmup.log_sigma"
+            )
+    else:
+        if thickness_prior_log_sigma is None:
+            thickness_prior_log_sigma = DEFAULT_WARMUP_THICKNESS_PRIOR_LOG_SIGMA
+        thickness_prior_log_sigma = float(thickness_prior_log_sigma)
+        if not np.isfinite(thickness_prior_log_sigma) or thickness_prior_log_sigma <= 0.0:
+            raise ValueError("Thickness prior log sigma must be positive and finite")
     return (
         resolve_portable_path(warmup_prior_root),
         thickness_prior_log_sigma,
@@ -125,14 +148,18 @@ def warmup_thickness_prior(
     prior_stages,
 ):
     """Load a per-tile thickness prior center from a constant-rate warmup."""
-    if prior_stages not in ("all", "third-decon") and not str(
+    if prior_stages not in ("configured", "all", "third-decon") and not str(
         prior_stages
     ).startswith("reset-event:"):
         raise ValueError(
-            "prior_stages must be 'all', 'third-decon', or "
+            "prior_stages must be 'configured', 'all', 'third-decon', or "
             "'reset-event:<event-name>'"
         )
-    if not np.isfinite(prior_sigma_log) or prior_sigma_log <= 0.0:
+    if prior_stages != "configured" and (
+        prior_sigma_log is None
+        or not np.isfinite(prior_sigma_log)
+        or prior_sigma_log <= 0.0
+    ):
         raise ValueError("prior_sigma_log must be positive and finite")
     archive_path = (
         Path(warmup_root)
@@ -160,7 +187,12 @@ def warmup_thickness_prior(
                     else None
                 )
             use_warmup = prior_stages == "all"
-            if prior_stages == "third-decon":
+            if prior_stages == "configured":
+                warmup_settings = (
+                    {} if event is None else event.get("relative_response_warmup", {})
+                )
+                use_warmup = bool(warmup_settings)
+            elif prior_stages == "third-decon":
                 use_warmup = event_name == "third_decon"
             elif str(prior_stages).startswith("reset-event:"):
                 use_warmup = event_name == str(prior_stages).split(":", 1)[1]
@@ -183,7 +215,11 @@ def warmup_thickness_prior(
             if name not in archive:
                 raise ValueError(f"Warmup archive lacks {name}: {archive_path}")
             centers[name] = np.asarray(archive[name], dtype=float).copy()
-            sigmas[name] = prior_sigma_log
+            sigmas[name] = float(
+                warmup_settings.get("log_sigma", prior_sigma_log)
+                if prior_stages == "configured"
+                else prior_sigma_log
+            )
     return centers, sigmas
 
 
@@ -428,6 +464,13 @@ def write_outputs(
         ],
         dtype=np.float64,
     )
+    archive_values["reset_event_relative_response_warmup_log_sigma"] = np.asarray(
+        [
+            event.get("relative_response_warmup", {}).get("log_sigma", np.nan)
+            for event in configured_events
+        ],
+        dtype=np.float64,
+    )
     np.savez_compressed(output_dir / "posterior_samples.npz", **archive_values)
 
     ar_fields = ["detector", "tile_id", "tile_row", "tile_col"]
@@ -472,6 +515,19 @@ def write_outputs(
             raise ValueError("Relative-response trajectory lacks nodes in a reset segment")
         accumulations.append(node_ice[indices[-1]] - node_ice[indices[0]])
     mean_rate = float(np.sum(accumulations) / np.sum(np.diff(boundaries)))
+    active_events = [
+        event
+        for event in data.get("reset_events", ())
+        if float(np.min(days)) < float(event["day"]) < float(np.max(days))
+    ]
+    episode_names = (
+        [f"before_{active_events[0]['name']}"]
+        if active_events
+        else ["all_observations"]
+    ) + [f"after_{event['name']}" for event in active_events]
+    episode_rates = np.asarray(accumulations, dtype=float) / np.diff(boundaries)
+    if episode_rates.size != len(episode_names):
+        raise ValueError("Reset-episode rates do not match configured reset events")
     initial_rate = float(rates[0])
     final_rate = float(rates[-1])
     rate_row = {
@@ -492,6 +548,11 @@ def write_outputs(
         "mean_rate_nm_day_median": mean_rate,
         "mean_rate_nm_day_p84": mean_rate,
     }
+    episode_rate_fields = []
+    for episode_name, episode_rate in zip(episode_names, episode_rates, strict=True):
+        field = f"mean_rate_{episode_name}_nm_day"
+        rate_row[field] = float(episode_rate)
+        episode_rate_fields.append(field)
     with (output_dir / "tile_rate_posterior.csv").open("w", newline="") as handle:
         fields = [
             "detector",
@@ -510,6 +571,7 @@ def write_outputs(
             "mean_rate_nm_day_p16",
             "mean_rate_nm_day_median",
             "mean_rate_nm_day_p84",
+            *episode_rate_fields,
         ]
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
@@ -609,6 +671,7 @@ def fit_one(
         warmup_prior_root,
         thickness_prior_log_sigma,
         thickness_prior_stages,
+        reset_events=reset_events,
     )
     jax, jnp, _, _ = production.require_numpyro()
     jax.config.update("jax_enable_x64", True)
@@ -681,16 +744,15 @@ def fit_one(
             prior.get("log_sigma", production.INITIAL_THICKNESS_LOG_SIGMA)
         )
     if warmup_prior_root is not None:
-        if thickness_prior_log_sigma is None or thickness_prior_stages is None:
+        if thickness_prior_stages is None:
             raise ValueError(
-                "warmup_prior_root requires thickness_prior_log_sigma and "
-                "thickness_prior_stages"
+                "warmup_prior_root requires thickness_prior_stages"
             )
         configured_centers, configured_sigmas = warmup_thickness_prior(
             warmup_prior_root,
             int(np.asarray(data["tile_ids"]).reshape(-1)[0]),
             data,
-            float(thickness_prior_log_sigma),
+            thickness_prior_log_sigma,
             thickness_prior_stages,
         )
         warmup_thickness_centers.update(configured_centers)

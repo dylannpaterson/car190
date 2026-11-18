@@ -60,14 +60,10 @@ class PipelineProfile:
 
     name: str
     tile_size_pixels: int = TILE_SIZE_PIXELS
-    third_decon_day: float = THIRD_DECON_DAY
     workers: int = 2
     build_tmm_spectral_cache: bool = True
     build_six_led_cache_from_current_tmm: bool = False
     use_pinned_six_led_cache: bool = False
-    warmup_third_decon_start_nm: float | None = None
-    warmup_prior_log_sigma: float | None = None
-    warmup_prior_stages: str | None = None
     fit_led_log_offsets: bool = False
     led_log_offset_prior_sigma_log: float = 0.01
     relative_batch_size: int = 1
@@ -79,9 +75,6 @@ PROFILES = {
         build_tmm_spectral_cache=True,
         build_six_led_cache_from_current_tmm=False,
         use_pinned_six_led_cache=True,
-        warmup_third_decon_start_nm=40.0,
-        warmup_prior_log_sigma=0.1,
-        warmup_prior_stages="third-decon",
         fit_led_log_offsets=True,
         led_log_offset_prior_sigma_log=0.01,
         relative_batch_size=1,

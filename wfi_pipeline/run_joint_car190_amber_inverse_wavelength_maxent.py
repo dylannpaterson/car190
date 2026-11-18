@@ -311,8 +311,12 @@ def main():
             local_names = np.asarray(
                 fit_archive.get(
                     "reset_event_names",
-                    ["second_decon"]
-                    + (["third_decon"] if local_days.size > 1 else []),
+                    [
+                        "second_decon" if index == 0 else
+                        "third_decon" if index == 1 else
+                        f"reset_event_{index + 1}"
+                        for index in range(local_days.size)
+                    ],
                 )
             ).astype(str).reshape(-1)
         if reset_days is None:

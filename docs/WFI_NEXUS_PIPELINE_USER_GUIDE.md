@@ -68,6 +68,71 @@ python run_wfi_full_tmm_pipeline.py --input-path ../CAR190_reduction/20261117/ -
 This route is more computationally expensive. Both fit commands take the Nexus
 reduction root as input; the selected frontend determines the model route.
 
+## Reset and decontamination events
+
+The model fit frontends read the shared configuration at
+`wfi_pipeline/reset_events.yaml` in the modeling checkout. Event `day` values
+are elapsed days from `2026-09-12T01:25:50.714 UTC`, not UTC day numbers, and
+must be strictly increasing. The first entry is `second_decon` because the
+model timeline starts after Decon1; the second entry is `third_decon`. To move
+the configured third reset, edit the existing `third_decon.day`; the root
+pipeline commands take the date from this YAML.
+
+Append one entry per additional decontamination, with a unique name and a
+measured elapsed day later than the previous event. For example:
+
+```yaml
+  - name: fourth_decon
+    day: 65.0  # illustrative only; replace with the measured elapsed day
+    thickness_prior:
+      median_nm: 10
+      log_sigma: 1.5
+    h5_prior:
+      center: base_h5
+      log_sigma: 1.5
+    # Optional, cached-relative-response initialization only:
+    # relative_response_warmup:
+    #   start_nm: 40
+    #   log_sigma: 0.1
+```
+
+The fields serve different consumers:
+
+- `thickness_prior` sets the lognormal starting-ice prior for the production
+  TMM/relative-response fit at that reset.
+- `h5_prior` is for the separate fast H5 history-update utility. Its `center`
+  is either `configured_median` (use the configured thickness median) or
+  `base_h5` (use the starting H5 history); its `log_sigma` sets that update's
+  prior width.
+- `relative_response_warmup` is optional and only controls the constant-rate
+  initialization used by the cached relative-response route. It is not another
+  reset date or a prior for full TMM. It has `start_nm` and `log_sigma` fields;
+  the current Decon3 values are `40` nm and `0.1`, specific to the validated
+  production setup. Do not copy them to a new event without an intentional
+  choice. The cached route reads each event's own warm-up values; events without
+  this block use their `thickness_prior` for the final fit. This is why the
+  warm-up settings differ from the broader `thickness_prior` used by the final
+  fit.
+
+These are not competing decon-date options: `day` sets the physical ice-history
+boundary, while the three prior blocks configure different fit stages. The
+production fit, joint-refitted history, diagnostic plots, response bundles, and
+H5 gray-period arrays use the complete ordered event list, with variable-length
+reset-day, reset-name, and per-event-offset arrays. There is no fixed two-/three-
+reset limit in the current pipeline. Legacy fields named for Decon2 and Decon3
+are compatibility aliases; `reset_event_days`, `reset_event_names`, and the
+corresponding per-event arrays carry every configured reset.
+
+The reducer's `--decon-time ISO_TIMESTAMP` is separate: it marks a count-space
+step correction in the pixel statistics. The YAML `day` marks the physical
+ice-history reset. They can refer to the same observed event, but use different
+time formats and affect different parts of the model. Likewise, the lower-level
+`--third-decon-day` option overrides the existing third-reset day for direct
+stage runs; it does not add a fourth event. The two root fit frontends in this
+guide use the YAML instead. Use a fresh `--output-path` after any
+reset-configuration change; the run manifest records the YAML hash and prevents
+reusing an output root with different settings.
+
 ## Main fit outputs
 
 Paths below are relative to the `--output-path` used for that fit (for example,

@@ -102,7 +102,11 @@ def write_warmup_outputs(
             diagnostics["trajectory_rate_initialization_nm_day"]
         ),
         "response_cache_version": np.asarray(CACHE_VERSION),
-        "third_decon_day": np.asarray(reset_days[1]) if reset_days.size > 1 else np.asarray(np.nan),
+        "third_decon_day": np.asarray(
+            reset_days[data["reset_event_names"].index("third_decon")]
+            if "third_decon" in data["reset_event_names"]
+            else np.nan
+        ),
         "third_decon_initial_thickness_start_nm": np.asarray(
             np.nan
             if third_decon_initial_thickness_start_nm is None
@@ -113,7 +117,7 @@ def write_warmup_outputs(
     }
     if reset_days.size > 1:
         archive_values["ice_reset_days"] = reset_days
-        if data["reset_event_names"][1] == "third_decon":
+        if "third_decon" in data["reset_event_names"]:
             archive_values["post_third_decon_tile_log_offset"] = np.asarray(
                 values["post_third_decon_tile_log_offset"]
             )
@@ -377,25 +381,39 @@ def run_detector(
     reset_events = None if reset_events is None else tuple(reset_events)
     reset_event_starts = {}
     if reset_events is not None:
-        if len(reset_events) < 2:
-            raise ValueError("Reset configuration must include a decon event for warmup")
-        configured_day = float(reset_events[1]["day"])
-        if third_decon_day is not None and not np.isclose(
-            float(third_decon_day), configured_day, rtol=0.0, atol=1.0e-12
+        configured_third_day = next(
+            (
+                float(event["day"])
+                for event in reset_events
+                if event["name"] == "third_decon"
+            ),
+            None,
+        )
+        if (
+            third_decon_day is not None
+            and configured_third_day is not None
+            and not np.isclose(
+                float(third_decon_day), configured_third_day, rtol=0.0, atol=1.0e-12
+            )
         ):
             raise ValueError("third_decon_day conflicts with the reset configuration")
-        third_decon_day = configured_day
+        if configured_third_day is not None:
+            third_decon_day = configured_third_day
         reset_event_starts = {
             event["name"]: float(event["relative_response_warmup"]["start_nm"])
             for event in reset_events
             if event.get("relative_response_warmup")
         }
-    if third_decon_initial_thickness_start_nm is not None:
-        reset_event_starts["third_decon"] = float(
-            third_decon_initial_thickness_start_nm
-        )
-    if third_decon_day is None or not reset_event_starts:
-        raise ValueError("Reset configuration must supply warmup event day and start")
+        if third_decon_initial_thickness_start_nm is not None:
+            if configured_third_day is None:
+                raise ValueError(
+                    "third_decon_initial_thickness_start_nm requires a third_decon event"
+                )
+            reset_event_starts["third_decon"] = float(
+                third_decon_initial_thickness_start_nm
+            )
+    if reset_events is None and third_decon_day is None:
+        raise ValueError("Warmup requires reset-event configuration")
     for name, value in reset_event_starts.items():
         if not np.isfinite(value) or value <= 0.0:
             raise ValueError(f"{name} initial thickness start must be positive and finite")
@@ -470,7 +488,9 @@ def run_detector(
                 "statistics": cached_response.portable_path_string(statistics),
                 "tile_size": int(tile_size),
                 "workers": int(workers),
-                "third_decon_day": float(third_decon_day),
+                "third_decon_day": (
+                    None if third_decon_day is None else float(third_decon_day)
+                ),
                 "third_decon_initial_thickness_start_nm": third_decon_initial_thickness_start_nm,
                 "trajectory_rate_initialization_nm_day": rate_initialization_nm_day,
                 "fit_led_log_offsets": bool(fit_led_log_offsets),
@@ -520,9 +540,13 @@ def main(argv=None):
     reset_config = load_reset_config(args.reset_config)
     reset_events = list(reset_config["events"])
     if args.third_decon_day is not None:
-        if len(reset_events) < 2:
-            raise ValueError("--third-decon-day requires a second reset event")
-        reset_events[1]["day"] = float(args.third_decon_day)
+        third_event = next(
+            (event for event in reset_events if event["name"] == "third_decon"),
+            None,
+        )
+        if third_event is None:
+            raise ValueError("--third-decon-day requires a third_decon event in the reset config")
+        third_event["day"] = float(args.third_decon_day)
     run_detector(
         args.detector,
         args.statistics_dir,

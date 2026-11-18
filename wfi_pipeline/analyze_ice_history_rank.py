@@ -167,7 +167,7 @@ def analyze(history_path, output_dir, spacing_days=2.0):
     with h5py.File(history_path, "r") as history_file:
         observation = history_file["bundle_observation_axis"]
         days = np.asarray(observation["time_days_from_reference"], dtype=float)
-        episodes = np.asarray(observation["episode"], dtype=np.int8)
+        episodes = np.asarray(observation["episode"], dtype=np.int32)
         truth = np.asarray(observation["tile_thickness_nm"], dtype=float)
         stored_rates = np.asarray(observation["tile_rate_nm_per_day"], dtype=float)
         detectors = np.asarray(history_file["superpixels/detector"]).astype(str)

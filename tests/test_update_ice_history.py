@@ -1,3 +1,5 @@
+import csv
+
 import h5py
 import numpy as np
 
@@ -7,6 +9,8 @@ from wfi_pipeline.update_ice_history import (
     h5_fit_batch_size,
     lookup_tile_history,
     rate_spline_knot_days,
+    update_reader_h5,
+    write_tile_rate_summary,
 )
 
 
@@ -189,6 +193,82 @@ def test_extended_rate_knot_grid_adds_one_extra_step_when_endpoint_aligns():
 
     assert 4.5 in knots
     assert knots[-1] == 5.5
+
+
+def test_reader_h5_writer_preserves_arbitrary_reset_event_count(tmp_path):
+    base_h5 = tmp_path / "base.h5"
+    output_h5 = tmp_path / "updated.h5"
+    event_names = np.asarray(
+        ["second_decon", "third_decon", "fourth_decon", "fifth_decon"]
+    )
+    event_days = np.asarray([1.0, 2.0, 3.0, 4.0])
+    event_offsets = np.asarray([[0.1, 0.05, -0.02, 0.03]])
+    with h5py.File(base_h5, "w") as archive:
+        archive.create_group("deposition")
+        instrument = archive.create_group("instrument")
+        instrument.create_dataset("gray", data=np.zeros((256, 2), dtype=float))
+        instrument.create_dataset("gray_period_hours", data=np.asarray([24.0, 48.0]))
+
+    episode_rate = np.ones((256, 3), dtype=float)
+    factorization = {
+        "time_hours": np.asarray([0.0, 24.0, 48.0, 72.0]),
+        "episodes": np.asarray([0, 1, 2, 3], dtype=np.int32),
+        "blocks": np.asarray([[0, 3]], dtype=np.int32),
+        "rank1": {
+            "multipliers": np.ones((1,), dtype=float),
+            "log_a": np.zeros((256, 1), dtype=float),
+            "d_off_nm": np.zeros((256, 1), dtype=float),
+            "rate_nm_per_day": episode_rate,
+            "metrics": {},
+        },
+    }
+    bundle = {
+        "detectors": np.asarray(["WFI01"]),
+        "tile_ids": np.asarray([0]),
+        "reset_event_names": event_names,
+        "reset_event_tile_log_offsets": event_offsets,
+    }
+
+    update_reader_h5(
+        base_h5,
+        output_h5,
+        FakeEricModel(),
+        bundle,
+        factorization,
+        np.asarray(["2026-09-12T01:25:50.714"]),
+        event_days * 24.0,
+        0.0,
+    )
+
+    cumulative = np.cumsum(event_offsets[0])
+    previous = np.r_[0.0, cumulative[:-1]]
+    expected_gray = np.exp(cumulative) - np.exp(previous)
+    with h5py.File(output_h5, "r") as archive:
+        assert archive["instrument/gray_period_hours"].shape == (4,)
+        assert archive["instrument/gray"].shape == (256, 4)
+        np.testing.assert_allclose(archive["instrument/gray_period_hours"], event_days * 24.0)
+        np.testing.assert_allclose(archive["instrument/gray"][0], expected_gray)
+
+
+def test_tile_rate_summary_writes_one_rate_column_per_reset_episode(tmp_path):
+    data = {
+        "days": np.arange(9, dtype=float),
+        "reset_days": np.asarray([2.0, 4.0, 6.0]),
+        "reset_event_names": (
+            "second_decon", "third_decon", "fourth_decon"
+        ),
+        "metadata": {0: {"tile_row": 0, "tile_col": 0}},
+    }
+    path = tmp_path / "tile_rate_posterior.csv"
+
+    write_tile_rate_summary(path, "WFI01", 0, data, np.arange(1.0, 10.0))
+
+    with path.open(newline="") as handle:
+        row = next(csv.DictReader(handle))
+    assert float(row["mean_rate_before_second_decon_nm_day"]) == 1.5
+    assert float(row["mean_rate_after_second_decon_nm_day"]) == 3.5
+    assert float(row["mean_rate_after_third_decon_nm_day"]) == 5.5
+    assert float(row["mean_rate_after_fourth_decon_nm_day"]) == 8.0
 
 
 def test_bundle_root_uses_h5_provenance_when_h5_was_copied(tmp_path):

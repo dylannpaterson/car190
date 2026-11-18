@@ -157,7 +157,12 @@ def _reset_metadata(bundle):
         reset_names = np.asarray(bundle["reset_event_names"]).astype(str).reshape(-1)
     else:
         reset_names = np.asarray(
-            ["second_decon"] + ["third_decon"] * max(0, reset_days.size - 1)
+            [
+                "second_decon" if index == 0 else
+                "third_decon" if index == 1 else
+                f"reset_event_{index + 1}"
+                for index in range(reset_days.size)
+            ]
         )
     if (
         reset_days.size == 0
@@ -202,15 +207,61 @@ def _segment_trend(days, history, mask):
 
 
 def _episode_start_thickness(days, history, reset_days):
-    starts = [0]
-    for reset_day in reset_days:
-        candidates = np.flatnonzero(np.asarray(days, dtype=float) >= reset_day)
+    days = np.asarray(days, dtype=float)
+    history = np.asarray(history, dtype=float)
+    reset_days = np.asarray(reset_days, dtype=float)
+    values = np.full((history.shape[0], reset_days.size + 1), np.nan, dtype=float)
+    values[:, 0] = history[:, 0]
+    for stage, reset_day in enumerate(reset_days, start=1):
+        candidates = np.flatnonzero(days >= reset_day)
         if candidates.size:
-            starts.append(int(candidates[0]))
-    values = np.full((history.shape[0], 3), np.nan, dtype=float)
-    for stage, index in enumerate(starts[: values.shape[1]]):
-        values[:, stage] = history[:, index]
+            values[:, stage] = history[:, int(candidates[0])]
     return values
+
+
+def _event_display_name(name):
+    known = {"second_decon": "Decon2", "third_decon": "Decon3"}
+    return known.get(str(name), str(name).replace("_", " ").capitalize())
+
+
+def _episode_metric_specs(reset_names, metric):
+    reset_names = tuple(str(name) for name in reset_names)
+    if metric == "initial_thickness":
+        specs = [(f"Before {_event_display_name(reset_names[0])}", "initial_thickness_nm")]
+        specs.extend(
+            (
+                f"After {_event_display_name(name)}",
+                f"reset_event_{index + 1}_initial_thickness_nm",
+            )
+            for index, name in enumerate(reset_names)
+        )
+        return tuple(specs)
+    prefix = "Mean rate" if metric == "rate" else "Linear trend"
+    specs = [
+        (f"{prefix} before {_event_display_name(reset_names[0])}", f"episode_0_{metric}_nm_day")
+    ]
+    specs.extend(
+        (
+            f"{prefix} after {_event_display_name(name)}",
+            f"episode_{index + 1}_{metric}_nm_day",
+        )
+        for index, name in enumerate(reset_names)
+    )
+    return tuple(specs)
+
+
+def _field_color_limits(maps, field, upper_percentile):
+    finite = [
+        values[field][np.isfinite(values[field])]
+        for values in maps.values()
+        if values is not None and field in values and np.isfinite(values[field]).any()
+    ]
+    if not finite:
+        return 0.0, 1.0
+    values = np.concatenate(finite)
+    lower = float(np.min(values))
+    upper = float(np.percentile(values, upper_percentile))
+    return (lower, upper) if lower < upper else (lower, lower + 1.0)
 
 
 def _aom_event_day(statistics_path):
@@ -225,16 +276,15 @@ def _aom_event_day(statistics_path):
     )
 
 
-def _detector_focal_maps(data, reset_days, aom_day=None):
+def _detector_focal_maps(data, reset_days, reset_names, aom_day=None):
     days = data["days"]
     history = data["thickness"]
     rates = data["rates"]
     rows = data["tile_rows"]
     cols = data["tile_cols"]
     reset_day = float(reset_days[0])
-    next_reset = float(reset_days[1]) if reset_days.size > 1 else None
-    pre_reset = days < reset_day
-    post_reset = _segment_mask(days, reset_day, next_reset)
+    episode_ids = np.searchsorted(reset_days, days, side="right")
+    episode_masks = [episode_ids == episode for episode in range(reset_days.size + 1)]
 
     result = {
         "rates": {
@@ -252,33 +302,28 @@ def _detector_focal_maps(data, reset_days, aom_day=None):
         "aom_jump": None,
         "rate_histogram": {
             "detector": data["detector"],
-            "pre_rates": rates[:, pre_reset].reshape(-1),
-            "post_rates": rates[:, ~pre_reset].reshape(-1),
+            "pre_rates": rates[:, episode_masks[0]].reshape(-1),
+            "post_rates": (
+                rates[:, episode_masks[1]].reshape(-1)
+                if len(episode_masks) > 1
+                else np.empty(0, dtype=float)
+            ),
             "current_rate": float(np.median(rates[:, -1])),
             "reset_day": reset_day,
         },
     }
     initial_values = _episode_start_thickness(days, history, reset_days)
-    for column, (_label, field) in enumerate(focal_plotter.INITIAL_THICKNESS_METRICS):
-        result["initial_thickness"][field] = _tile_map(
-            initial_values[:, column], rows, cols
+    for column, (_label, field) in enumerate(
+        _episode_metric_specs(reset_names, "initial_thickness")
+    ):
+        result["initial_thickness"][field] = _tile_map(initial_values[:, column], rows, cols)
+    for episode, mask in enumerate(episode_masks):
+        result["reset_rates"][f"episode_{episode}_rate_nm_day"] = _tile_map(
+            _segment_rate(days, history, mask), rows, cols
         )
-    result["reset_rates"] = {
-        "pre_reset_mean_rate_nm_day": _tile_map(
-            _segment_rate(days, history, pre_reset), rows, cols
-        ),
-        "post_reset_mean_rate_nm_day": _tile_map(
-            _segment_rate(days, history, post_reset), rows, cols
-        ),
-    }
-    result["trend_rates"] = {
-        "pre_reset_trend_rate_nm_day": _tile_map(
-            _segment_trend(days, history, pre_reset), rows, cols
-        ),
-        "post_reset_trend_rate_nm_day": _tile_map(
-            _segment_trend(days, history, post_reset), rows, cols
-        ),
-    }
+        result["trend_rates"][f"episode_{episode}_trend_nm_day"] = _tile_map(
+            _segment_trend(days, history, mask), rows, cols
+        )
     result["last_48h"] = {
         "last_48h_mean_rate_nm_day": _tile_map(
             [
@@ -419,7 +464,9 @@ def save_joint_tile_rate_map(path, data):
     plt.close(figure)
 
 
-def _draw_focal_plane_products(bundle, statistics_dir, output_dir, reset_days):
+def _draw_focal_plane_products(
+    bundle, statistics_dir, output_dir, reset_days, reset_names
+):
     output_dir = Path(output_dir)
     focal_root = output_dir / "focal_plane"
     trajectory_root = output_dir / "trajectories"
@@ -459,7 +506,7 @@ def _draw_focal_plane_products(bundle, statistics_dir, output_dir, reset_days):
             ),
             None,
         )
-        maps = _detector_focal_maps(data, reset_days, aom_day)
+        maps = _detector_focal_maps(data, reset_days, reset_names, aom_day)
         rate_maps[detector] = maps["rates"]
         current_maps[detector] = maps["current_thickness"]
         initial_maps[detector] = maps["initial_thickness"]
@@ -518,28 +565,37 @@ def _draw_focal_plane_products(bundle, statistics_dir, output_dir, reset_days):
         metric_unit_label="nm",
     )
     outputs.append(current_output)
+    initial_metrics = _episode_metric_specs(reset_names, "initial_thickness")
     initial_output = focal_root / "wfi_full_focal_plane_initial_thicknesses.png"
     focal_plotter.draw_rate_mosaic(
         initial_output,
         initial_maps,
         model_label,
         pass_label,
-        metrics=focal_plotter.INITIAL_THICKNESS_METRICS,
+        metrics=initial_metrics,
         title_prefix="Joint-modulated thickness at each reset episode start",
         observation_label=observation_label,
-        color_limits=focal_plotter.initial_thickness_color_limits(initial_maps),
+        color_limits_by_field={
+            field: _field_color_limits(
+                initial_maps,
+                field,
+                focal_plotter.INITIAL_THICKNESS_VMAX_PERCENTILE,
+            )
+            for _title, field in initial_metrics
+        },
         colorbar_label="nm",
         metric_unit_label="nm",
     )
     outputs.append(initial_output)
-    reset_output = focal_root / "wfi_full_focal_plane_rate_maps_pre_post_reset.png"
+    reset_metrics = _episode_metric_specs(reset_names, "rate")
+    reset_output = focal_root / "wfi_full_focal_plane_rate_maps_by_episode.png"
     focal_plotter.draw_rate_mosaic(
         reset_output,
         reset_maps,
         model_label,
         pass_label,
-        metrics=focal_plotter.RESET_METRICS,
-        title_prefix="Joint-modulated accumulation rates around Decon2",
+        metrics=reset_metrics,
+        title_prefix="Joint-modulated accumulation rates by reset episode",
         observation_label=observation_label,
     )
     reset_contrast_output = reset_output.with_name(
@@ -551,8 +607,8 @@ def _draw_focal_plane_products(bundle, statistics_dir, output_dir, reset_days):
         model_label,
         pass_label,
         local_contrast=True,
-        metrics=focal_plotter.RESET_METRICS,
-        title_prefix="Joint-modulated accumulation rates around Decon2",
+        metrics=reset_metrics,
+        title_prefix="Joint-modulated accumulation rates by reset episode",
         observation_label=observation_label,
     )
     outputs.extend(
@@ -561,14 +617,15 @@ def _draw_focal_plane_products(bundle, statistics_dir, output_dir, reset_days):
             reset_contrast_output,
         )
     )
-    trend_output = focal_root / "wfi_full_focal_plane_trend_rates_pre_post.png"
+    trend_metrics = _episode_metric_specs(reset_names, "trend")
+    trend_output = focal_root / "wfi_full_focal_plane_trend_rates_by_episode.png"
     focal_plotter.draw_rate_mosaic(
         trend_output,
         trend_maps,
         model_label,
         pass_label,
-        metrics=focal_plotter.TREND_METRICS,
-        title_prefix="Joint-modulated ice-thickness trends around Decon2",
+        metrics=trend_metrics,
+        title_prefix="Joint-modulated ice-thickness trends by reset episode",
         observation_label=observation_label,
     )
     trend_contrast_output = trend_output.with_name(
@@ -580,8 +637,8 @@ def _draw_focal_plane_products(bundle, statistics_dir, output_dir, reset_days):
         model_label,
         pass_label,
         local_contrast=True,
-        metrics=focal_plotter.TREND_METRICS,
-        title_prefix="Joint-modulated ice-thickness trends around Decon2",
+        metrics=trend_metrics,
+        title_prefix="Joint-modulated ice-thickness trends by reset episode",
         observation_label=observation_label,
     )
     outputs.extend(
@@ -694,7 +751,7 @@ def plot_joint_modulated_trends(bundle_path, statistics_dir, output_dir, tile_si
     metadata = validate_joint_modulated_bundle(bundle)
     reset_days, reset_names = _reset_metadata(bundle)
     plot_outputs = _draw_focal_plane_products(
-        bundle, statistics_dir, output_dir, reset_days
+        bundle, statistics_dir, output_dir, reset_days, reset_names
     )
     detector_outputs = {}
     for detector in DETECTORS:

@@ -76,6 +76,61 @@ class WfiPipelineTests(unittest.TestCase):
             config_index = command.index("--reset-config")
             self.assertEqual(command[config_index + 1], str(reset_config["path"]))
 
+    def test_relative_pipeline_applies_warmup_settings_for_many_reset_events(self):
+        events = (
+            {
+                "name": "second_decon",
+                "day": 12.0,
+                "thickness_prior": {"median_nm": 10.0, "log_sigma": 1.5},
+            },
+            {
+                "name": "third_decon",
+                "day": 38.0,
+                "thickness_prior": {"median_nm": 10.0, "log_sigma": 1.5},
+                "relative_response_warmup": {"start_nm": 40.0, "log_sigma": 0.1},
+            },
+            {
+                "name": "fourth_decon",
+                "day": 55.0,
+                "thickness_prior": {"median_nm": 20.0, "log_sigma": 0.8},
+                "relative_response_warmup": {"start_nm": 25.0, "log_sigma": 0.25},
+            },
+        )
+        config = {
+            "path": Path("/tmp/reset_events_test.yaml"),
+            "sha256": "test-reset-sha256",
+            "events": events,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(pipeline, "load_reset_config", return_value=config):
+                run = pipeline.PipelineRun(
+                    root / "corrected_statistics_4h_thinned",
+                    root / "production_run",
+                    RELATIVE_RESPONSE,
+                )
+                with (
+                    patch.object(run, "_cache_complete", return_value=True),
+                    patch.object(run, "_tile_archives", return_value=True),
+                    patch.object(run, "_run_command") as run_command,
+                ):
+                    run._fit_detector(
+                        root / "corrected_statistics_4h_thinned", "WFI01"
+                    )
+
+        commands = [call.args[1] for call in run_command.call_args_list]
+        assert len(commands) == 2  # constant-rate start, then final cached fit
+        warmup = commands[0]
+        fit = commands[1]
+        assert warmup[warmup.index("--reset-config") + 1] == str(config["path"])
+        assert fit[fit.index("--reset-config") + 1] == str(config["path"])
+        assert fit[fit.index("--thickness-prior-stages") + 1] == "configured"
+        assert "--thickness-prior-log-sigma" not in fit
+        assert run.reset_warmup_starts == {
+            "third_decon": 40.0,
+            "fourth_decon": 25.0,
+        }
+
     def test_main_pipeline_dispatches_joint_modulated_trend_plots(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -119,6 +174,22 @@ class WfiPipelineTests(unittest.TestCase):
         self.assertEqual(FULL_TMM_EMCEE_WALKERS, emcee_warmup.EMCEE_WALKERS)
         self.assertEqual(FULL_TMM_EMCEE_STEPS, emcee_warmup.EMCEE_STEPS)
         self.assertEqual(FULL_TMM_EMCEE_SEED, emcee_warmup.EMCEE_SEED)
+
+    def test_emcee_site_order_has_unique_sites_for_arbitrary_reset_count(self):
+        events = [
+            {"name": name, "day": float(index + 1)}
+            for index, name in enumerate(
+                ("second_decon", "third_decon", "fourth_decon", "fifth_decon")
+            )
+        ]
+
+        site_order = emcee_warmup.reset_aware_site_order(
+            emcee_warmup.SITE_ORDER, events
+        )
+
+        assert len(site_order) == len(set(site_order))
+        assert "reset_event_3_initial_thickness_log_nm" in site_order
+        assert "post_reset_event_3_tile_log_offset" in site_order
         self.assertEqual(FULL_TMM_MAP_MAX_EVALUATIONS, tmm_production.PRODUCTION_MAP_STEPS)
         self.assertEqual(FULL_TMM_MAP_FTOL, tmm_production.PRODUCTION_MAP_FTOL)
         self.assertEqual(FULL_TMM_MAP_XTOL, tmm_production.PRODUCTION_MAP_XTOL)

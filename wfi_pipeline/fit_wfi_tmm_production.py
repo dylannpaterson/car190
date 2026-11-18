@@ -1665,7 +1665,6 @@ def _direct_thickness_state(data, log_thickness_nodes, jax, jnp):
     """Evaluate a piecewise-linear direct-thickness trajectory."""
     days = jnp.asarray(data["days"])
     node_days = np.asarray(data["node_days"], dtype=float)
-    reset_days = reset_days_for_data(data)
     observation_min = float(np.min(data["days"]))
     observation_max = float(np.max(data["days"]))
     active_reset_days = reset_days[
@@ -2086,6 +2085,7 @@ def build_model(
             raise ValueError("Entropy reference rates must be finite")
     reset_days = reset_days_for_data(data)
     reset_count = reset_days.size
+    reset_event_names = _reset_event_names(data, reset_count)
     n_rows = n_scas * n_tiles
     if n_rows != np.asarray(data["counts"]).shape[0]:
         raise ValueError("Tile statistics do not match the SCA/tile layout")
@@ -2662,7 +2662,19 @@ def build_model(
                 (n_scas, n_tiles)
             ),
         )
-        if active_reset_days.size >= 2:
+        numpyro.deterministic(
+            "tile_reset_episode_mean_rate_nm_day",
+            segment_rates.reshape((n_scas, n_tiles, segment_rates.shape[1])),
+        )
+        numpyro.deterministic(
+            "reset_episode_mean_rate_nm_day",
+            jnp.mean(segment_rates, axis=0),
+        )
+        if (
+            len(reset_event_names) > 1
+            and reset_event_names[1] == "third_decon"
+            and active_reset_days.size >= 2
+        ):
             numpyro.deterministic(
                 "tile_post_third_decon_mean_rate_nm_day",
                 segment_rates[:, 2].reshape((n_scas, n_tiles)),
@@ -2683,7 +2695,11 @@ def build_model(
             "post_reset_mean_rate_nm_day",
             jnp.mean(segment_rates[:, min(1, segment_rates.shape[1] - 1)]),
         )
-        if active_reset_days.size >= 2:
+        if (
+            len(reset_event_names) > 1
+            and reset_event_names[1] == "third_decon"
+            and active_reset_days.size >= 2
+        ):
             numpyro.deterministic(
                 "post_third_decon_mean_rate_nm_day",
                 jnp.mean(segment_rates[:, 2]),
@@ -3724,6 +3740,44 @@ def write_outputs(
     rate_cross_reset = np.asarray(
         samples["tile_cross_reset_mean_rate_nm_day"], dtype=float
     )
+    episode_rate_samples = np.asarray(
+        samples["tile_reset_episode_mean_rate_nm_day"], dtype=float
+    )
+    observation_min = float(np.min(data["days"]))
+    observation_max = float(np.max(data["days"]))
+    active_events = [
+        event
+        for event in data.get("reset_events", ())
+        if observation_min < float(event["day"]) < observation_max
+    ]
+    prior_events = [
+        event
+        for event in data.get("reset_events", ())
+        if float(event["day"]) <= observation_min
+    ]
+    future_events = [
+        event
+        for event in data.get("reset_events", ())
+        if float(event["day"]) >= observation_max
+    ]
+    if prior_events:
+        first_episode_name = f"after_{prior_events[-1]['name']}"
+    elif active_events:
+        first_episode_name = f"before_{active_events[0]['name']}"
+    elif future_events:
+        first_episode_name = f"before_{future_events[0]['name']}"
+    else:
+        first_episode_name = "all_observations"
+    episode_rate_names = [first_episode_name] + [
+        f"after_{event['name']}" for event in active_events
+    ]
+    if episode_rate_samples.shape[-1] != len(episode_rate_names):
+        raise ValueError(
+            "Reset-episode rate summaries do not match active configured reset events"
+        )
+    episode_rate_prefixes = [
+        f"{name}_mean_rate_nm_day" for name in episode_rate_names
+    ]
     with (output_dir / "tile_rate_posterior.csv").open("w", newline="") as handle:
         fields = [
             "detector", "tile_id", "tile_row", "tile_col",
@@ -3735,6 +3789,8 @@ def write_outputs(
             "post_reset_mean_rate_nm_day_p16", "post_reset_mean_rate_nm_day_median", "post_reset_mean_rate_nm_day_p84",
             "cross_reset_mean_rate_nm_day_p16", "cross_reset_mean_rate_nm_day_median", "cross_reset_mean_rate_nm_day_p84",
         ]
+        for prefix in episode_rate_prefixes:
+            fields.extend((f"{prefix}_p16", f"{prefix}_median", f"{prefix}_p84"))
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for sca_index, detector in enumerate(data["sca_names"]):
@@ -3760,6 +3816,11 @@ def write_outputs(
                     row[f"{prefix}_p16"] = np.percentile(values[:, sca_index, tile_index], 16)
                     row[f"{prefix}_median"] = np.percentile(values[:, sca_index, tile_index], 50)
                     row[f"{prefix}_p84"] = np.percentile(values[:, sca_index, tile_index], 84)
+                for episode_index, prefix in enumerate(episode_rate_prefixes):
+                    values = episode_rate_samples[:, sca_index, tile_index, episode_index]
+                    row[f"{prefix}_p16"] = np.percentile(values, 16)
+                    row[f"{prefix}_median"] = np.percentile(values, 50)
+                    row[f"{prefix}_p84"] = np.percentile(values, 84)
                 writer.writerow(row)
 
     warmup_prior_summary = []

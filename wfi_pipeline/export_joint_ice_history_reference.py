@@ -45,7 +45,7 @@ def write_array(group, name, data, **kwargs):
 def deposition_factorizations(times_days, episodes, thickness_nm, multi_rank=16):
     """Fit v3's rank-one spatial-rate form and a diagnostic multi-mode extension."""
     hours = np.asarray(times_days, dtype=float) * 24.0
-    episodes = np.asarray(episodes, dtype=np.int8)
+    episodes = np.asarray(episodes, dtype=np.int32)
     thickness = np.asarray(thickness_nm, dtype=float)
     left_indices = np.flatnonzero(episodes[:-1] == episodes[1:])
     dt_hours = np.diff(hours)[left_indices]
@@ -184,7 +184,7 @@ def deposition_factorizations_on_blocks(
     """Fit v3-style rate blocks on a compact 2-day grid to bundle histories."""
     days = np.asarray(times_days, dtype=float)
     hours = days * 24.0
-    episodes = np.asarray(episodes, dtype=np.int8)
+    episodes = np.asarray(episodes, dtype=np.int32)
     thickness = np.asarray(thickness_nm, dtype=float)
     if spacing_days <= 0.0:
         raise ValueError("Deposition block spacing must be positive")
@@ -412,14 +412,14 @@ def main(argv=None):
     bundle_utc = np.asarray(bundle["observation_start_time"]).astype(str)
     if bundle_utc.size != bundle_days.size:
         raise ValueError("The bundle observation-time labels do not match its time grid")
-    reset_days = np.asarray(
-        bundle.get(
-            "reset_event_days",
-            [float(bundle["ice_reset_day"]), float(bundle["third_decon_day"])],
-        ),
-        dtype=float,
-    ).reshape(-1)
-    episode = np.searchsorted(reset_days, bundle_days, side="right").astype(np.int8)
+    if "reset_event_days" in bundle:
+        reset_day_values = bundle["reset_event_days"]
+    else:
+        reset_day_values = [float(bundle["ice_reset_day"])]
+        if "third_decon_day" in bundle:
+            reset_day_values.append(float(bundle["third_decon_day"]))
+    reset_days = np.asarray(reset_day_values, dtype=float).reshape(-1)
+    episode = np.searchsorted(reset_days, bundle_days, side="right").astype(np.int32)
     deposition_fit = deposition_factorizations_on_blocks(
         bundle_days,
         episode,

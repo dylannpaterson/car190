@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 import fit_wfi_tmm_production as production
+import fit_wfi_relative_response as relative_fit
 import wfi_relative_response as relative_response
 from wfi_relative_response import (
     CACHE_VERSION,
@@ -382,6 +383,60 @@ def test_warm_values_override_third_decon_initial_thickness_start(tmp_path, monk
     np.testing.assert_allclose(
         values["third_decon_initial_thickness_log_nm"], np.log(40.0)
     )
+
+
+def test_configured_warmup_prior_uses_each_reset_events_own_sigma(tmp_path):
+    events = (
+        {
+            "name": "second_decon",
+            "day": 12.0,
+            "thickness_prior": {"median_nm": 10.0, "log_sigma": 1.5},
+            "h5_prior": {"center": "configured_median", "log_sigma": 1.5},
+        },
+        {
+            "name": "third_decon",
+            "day": 38.0,
+            "thickness_prior": {"median_nm": 10.0, "log_sigma": 1.5},
+            "relative_response_warmup": {"start_nm": 40.0, "log_sigma": 0.1},
+            "h5_prior": {"center": "base_h5", "log_sigma": 0.1},
+        },
+        {
+            "name": "fourth_decon",
+            "day": 55.0,
+            "thickness_prior": {"median_nm": 20.0, "log_sigma": 0.8},
+            "relative_response_warmup": {"start_nm": 25.0, "log_sigma": 0.25},
+            "h5_prior": {"center": "base_h5", "log_sigma": 0.5},
+        },
+    )
+    data = {
+        "reset_days": np.asarray([12.0, 38.0, 55.0]),
+        "reset_event_names": tuple(event["name"] for event in events),
+        "reset_events": events,
+    }
+    thickness_names, _offset_names = production.reset_site_names(data)
+    archive_path = tmp_path / "fits/tile_000/constant_rate_map.npz"
+    archive_path.parent.mkdir(parents=True)
+    np.savez_compressed(
+        archive_path,
+        **{
+            name: np.asarray([np.log(value)])
+            for name, value in zip(
+                thickness_names[1:], (12.0, 42.0, 27.0), strict=True
+            )
+        },
+    )
+
+    centers, sigmas = relative_fit.warmup_thickness_prior(
+        tmp_path, 0, data, prior_sigma_log=None, prior_stages="configured"
+    )
+
+    assert set(centers) == set(thickness_names)
+    assert sigmas[thickness_names[1]] == pytest.approx(1.5)
+    assert centers[thickness_names[1]] == pytest.approx(np.log(10.0))
+    assert centers[thickness_names[2]] == pytest.approx(np.log(42.0))
+    assert sigmas[thickness_names[2]] == pytest.approx(0.1)
+    assert centers[thickness_names[3]] == pytest.approx(np.log(27.0))
+    assert sigmas[thickness_names[3]] == pytest.approx(0.25)
 
 
 def test_third_decon_relative_prior_includes_third_initial_thickness():

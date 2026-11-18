@@ -41,6 +41,18 @@ FIXED_RATE_SITE_ORDER = (
 )
 
 
+def reset_aware_site_order(base_site_order, reset_events):
+    """Append one thickness/grey site per configured reset, without duplicates."""
+    reset_layout = {
+        "reset_days": np.arange(len(reset_events), dtype=float),
+        "reset_event_names": tuple(event["name"] for event in reset_events),
+    }
+    thickness_names, offset_names = production.reset_site_names(reset_layout)
+    reset_sites = set(thickness_names[1:]) | set(offset_names)
+    base = tuple(name for name in base_site_order if name not in reset_sites)
+    return (*base, *thickness_names[1:], *offset_names)
+
+
 def pack_sites(values, site_sizes, site_order=SITE_ORDER):
     return np.concatenate(
         [np.asarray(values[name], dtype=float).reshape(-1) for name in site_order]
@@ -169,12 +181,7 @@ def run_emcee(
     else:
         site_order = LINEAR_RATE_SITE_ORDER
     if reset_events is not None:
-        reset_layout = {
-            "reset_days": np.arange(len(reset_events), dtype=float),
-            "reset_event_names": tuple(event["name"] for event in reset_events),
-        }
-        thickness_names, offset_names = production.reset_site_names(reset_layout)
-        site_order = (*site_order, *thickness_names[1:], *offset_names)
+        site_order = reset_aware_site_order(site_order, reset_events)
     elif third_decon_day is not None:
         site_order = (
             *site_order,
@@ -537,6 +544,17 @@ def run_emcee(
         )
         best_values["np_log_rate_nodes"] = np.log(rate_nodes)
     fingerprint = production.statistics_fingerprint(data)
+    reset_days = production.reset_days_for_data(data)
+    reset_event_names = production._reset_event_names(data, reset_days.size)
+    thickness_names, offset_names = production.reset_site_names(data)
+    third_event_day = next(
+        (
+            float(day)
+            for name, day in zip(reset_event_names, reset_days, strict=True)
+            if name == "third_decon"
+        ),
+        np.nan,
+    )
     if warmup_chain is not None:
         np.savez_compressed(
             output_dir / "emcee_warmup_chain.npz",
@@ -569,9 +587,9 @@ def run_emcee(
             if fixed_incidence_angle_deg is None
             else fixed_incidence_angle_deg
         ),
-        third_decon_day=np.asarray(
-            np.nan if third_decon_day is None else third_decon_day
-        ),
+        third_decon_day=np.asarray(third_event_day),
+        reset_event_days=np.asarray(reset_days, dtype=np.float64),
+        reset_event_names=np.asarray(reset_event_names, dtype="U64"),
     )
     np.savez_compressed(
         output_dir / "emcee_best_sites.npz",
@@ -624,6 +642,20 @@ def run_emcee(
             if fixed_incidence_angle_deg is None
             else fixed_incidence_angle_deg
         ),
+        ice_reset_day=np.asarray(float(reset_days[0]), dtype=np.float64),
+        third_decon_day=np.asarray(third_event_day, dtype=np.float64),
+        reset_event_days=np.asarray(reset_days, dtype=np.float64),
+        reset_event_names=np.asarray(reset_event_names, dtype="U64"),
+        reset_event_thickness_site_names=np.asarray(thickness_names[1:], dtype="U96"),
+        reset_event_offset_site_names=np.asarray(offset_names, dtype="U96"),
+        reset_event_initial_thickness_log_nm=np.stack(
+            [np.asarray(best_values[name], dtype=float).reshape(-1) for name in thickness_names[1:]],
+            axis=-1,
+        ),
+        reset_event_tile_log_offsets=np.stack(
+            [np.asarray(best_values[name], dtype=float).reshape(-1) for name in offset_names],
+            axis=-1,
+        ),
     )
     summary_lines = [
         [
@@ -659,16 +691,13 @@ def run_emcee(
             "Best-state coordinates:",
             "",
             f"- AR raw: `{np.asarray(best_values['ar_tile_raw']).tolist()}`.",
-            "- Initial/reset thickness log nm: "
-            f"`{np.asarray(best_values['initial_thickness_log_nm']).tolist()}` / "
-            f"`{np.asarray(best_values['reset_initial_thickness_log_nm']).tolist()}`.",
-            (
-                "- Third-decon thickness log nm / tile log offset: "
-                f"`{np.asarray(best_values['third_decon_initial_thickness_log_nm']).tolist()}` / "
-                f"`{np.asarray(best_values['post_third_decon_tile_log_offset']).tolist()}`."
-                if "third_decon_initial_thickness_log_nm" in best_values
-                else ""
-            ),
+            "- Initial thickness log nm: "
+            f"`{np.asarray(best_values['initial_thickness_log_nm']).tolist()}`.",
+            f"- Reset-event names: `{list(reset_event_names)}`.",
+            "- Reset-event initial thickness log nm: "
+            f"`{[np.asarray(best_values[name]).tolist() for name in thickness_names[1:]]}`.",
+            "- Reset-event tile log offsets: "
+            f"`{[np.asarray(best_values[name]).tolist() for name in offset_names]}`.",
             (
                 f"- Incidence angle deg: `{float(np.asarray(best_values['incidence_angle_deg']))}`."
                 if "incidence_angle_deg" in best_values
@@ -676,8 +705,6 @@ def run_emcee(
             ),
             f"- Start/end rate nm/day: `{np.exp(best_rate_start).tolist()}` / "
             f"`{np.exp(best_rate_end).tolist()}`.",
-            "- Post-reset tile log offset: "
-            f"`{np.asarray(best_values['post_reset_tile_log_offset']).tolist()}`.",
             "- HgCdTe n/k log scales: "
             f"`{np.asarray(best_values['absolute_hgcdte_n_log_scale']).tolist()}` / "
             f"`{np.asarray(best_values['absolute_hgcdte_k_log_scale']).tolist()}`.",

@@ -223,7 +223,7 @@ def build(args):
         )
         history_group = history_file["v3_rank1_deposition_candidate"]
         time_hours = np.asarray(history_group["time_hours"], dtype=float)
-        episode = np.asarray(history_group["episode"], dtype=np.int8)
+        episode = np.asarray(history_group["episode"], dtype=np.int32)
         blocks = np.asarray(history_group["blocks"], dtype=float)
         multipliers = np.asarray(history_group["multipliers"], dtype=float)
         tau_h = np.asarray(history_group["tau_h"], dtype=float)

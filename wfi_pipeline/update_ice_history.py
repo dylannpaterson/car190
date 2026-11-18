@@ -631,6 +631,7 @@ def lookup_tile_history(
     offset_names = production.reset_site_names(data)[1]
     return history, rates, node_history, update_records, {
         "led_log_offsets": led_offsets,
+        "reset_event_log_offsets": np.asarray(base_reset_offsets, dtype=float),
         **{
             name: float(base_reset_offsets[index])
             for index, name in enumerate(offset_names)
@@ -1099,6 +1100,14 @@ def write_lookup_fit_archive(
 def write_group_predictions(path, detector, tile_id, data, history, curves, fit_values):
     led_offsets = np.asarray(fit_values["led_log_offsets"], dtype=float).reshape(-1)
     first_by_led = np.asarray(data["first_by_led"], dtype=int)
+    offset_names = production.reset_site_names(data)[1]
+    event_offsets = fit_values.get("reset_event_log_offsets")
+    if event_offsets is None:
+        event_offsets = [fit_values[name] for name in offset_names]
+    event_offsets = np.asarray(event_offsets, dtype=float).reshape(-1)
+    reset_days = production.reset_days_for_data(data)
+    if event_offsets.size != reset_days.size:
+        raise ValueError("Fit reset offsets do not match the configured reset events")
     baseline_ice = np.asarray(history, dtype=float)[first_by_led]
     baseline = np.asarray(
         [np.interp(baseline_ice[led], curves["thickness_nm"], curves["log_response"][led])
@@ -1106,8 +1115,6 @@ def write_group_predictions(path, detector, tile_id, data, history, curves, fit_
         dtype=float,
     )
     rows = []
-    reset_day = float(data["reset_day"])
-    third_day = data.get("third_decon_day")
     for index, group in enumerate(data["groups"]):
         led = int(data["led"][index]) - 1
         predicted = (
@@ -1120,10 +1127,9 @@ def write_group_predictions(path, detector, tile_id, data, history, curves, fit_
             + led_offsets[led]
         )
         observed = float(data["sums"][0, index] / data["counts"][0, index])
-        if data["days"][index] >= reset_day:
-            observed += float(fit_values["post_reset_tile_log_offset"])
-        if third_day is not None and data["days"][index] >= float(third_day):
-            observed += float(fit_values["post_third_decon_tile_log_offset"])
+        observed += float(
+            np.sum(event_offsets[np.asarray(data["days"][index]) >= reset_days])
+        )
         rows.append(
             {
                 "detector": str(detector).upper(),
@@ -1154,19 +1160,19 @@ def write_group_predictions(path, detector, tile_id, data, history, curves, fit_
 def write_tile_rate_summary(path, detector, tile_id, data, rates):
     days = np.asarray(data["days"], dtype=float)
     rates = np.asarray(rates, dtype=float)
-    reset_day = float(data["reset_day"])
-    third_day = data.get("third_decon_day")
-    segments = [(float(days.min()), reset_day)]
-    if third_day is None:
-        segments.append((reset_day, float(days.max())))
-    else:
-        segments.extend(
-            ((reset_day, float(third_day)), (float(third_day), float(days.max())))
-        )
-    means = []
-    for left, right in segments:
-        selected = (days >= left) & (days <= right) & np.isfinite(rates)
-        means.append(float(np.mean(rates[selected])) if np.any(selected) else 0.0)
+    reset_days = production.reset_days_for_data(data)
+    reset_names = tuple(data["reset_event_names"])
+    episodes = np.searchsorted(reset_days, days, side="right")
+    episode_means = [
+        float(np.mean(rates[(episodes == episode) & np.isfinite(rates)]))
+        if np.any((episodes == episode) & np.isfinite(rates))
+        else np.nan
+        for episode in range(reset_days.size + 1)
+    ]
+    finite_episode_means = [value for value in episode_means if np.isfinite(value)]
+    overall_mean_rate = (
+        float(np.mean(finite_episode_means)) if finite_episode_means else 0.0
+    )
     first = float(rates[np.flatnonzero(np.isfinite(rates))[0]])
     last = float(rates[np.flatnonzero(np.isfinite(rates))[-1]])
     metadata = data["metadata"][int(tile_id)]
@@ -1191,10 +1197,19 @@ def write_tile_rate_summary(path, detector, tile_id, data, rates):
         "final_rate_nm_day_p16": last,
         "final_rate_nm_day_median": last,
         "final_rate_nm_day_p84": last,
-        "mean_rate_nm_day_p16": float(np.mean(means)),
-        "mean_rate_nm_day_median": float(np.mean(means)),
-        "mean_rate_nm_day_p84": float(np.mean(means)),
+        "mean_rate_nm_day_p16": overall_mean_rate,
+        "mean_rate_nm_day_median": overall_mean_rate,
+        "mean_rate_nm_day_p84": overall_mean_rate,
     }
+    for episode, mean_rate in enumerate(episode_means):
+        episode_label = (
+            f"before_{reset_names[0]}"
+            if episode == 0
+            else f"after_{reset_names[episode - 1]}"
+        )
+        field = f"mean_rate_{episode_label}_nm_day"
+        row[field] = mean_rate
+        fields += (field,)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as handle:
@@ -1647,15 +1662,17 @@ def make_history_products(base_model, base_h5, output_root, modulated_bundle_pat
     statistics_reference_mjd = float(np.median(parsed_mjd - bundle_days))
     history_days = parsed_mjd - new_reference_mjd
     history_hours = history_days * 24.0
-    reset_days = np.asarray(
-        bundle.get(
-            "reset_event_days",
-            [float(np.asarray(bundle["ice_reset_day"]).reshape(-1)[0])]
-            + ([float(np.asarray(bundle["third_decon_day"]).reshape(-1)[0])]
-               if "third_decon_day" in bundle else []),
-        ),
-        dtype=float,
-    ).reshape(-1)
+    if "reset_event_days" in bundle:
+        reset_day_values = bundle["reset_event_days"]
+    else:
+        reset_day_values = [
+            float(np.asarray(bundle["ice_reset_day"]).reshape(-1)[0])
+        ]
+        if "third_decon_day" in bundle:
+            reset_day_values.append(
+                float(np.asarray(bundle["third_decon_day"]).reshape(-1)[0])
+            )
+    reset_days = np.asarray(reset_day_values, dtype=float).reshape(-1)
     gray_hours = (
         statistics_reference_mjd
         + reset_days
@@ -1665,7 +1682,7 @@ def make_history_products(base_model, base_h5, output_root, modulated_bundle_pat
         float(Time(base_model.t0_utc, format="isot", scale="utc").mjd)
         - new_reference_mjd
     ) * 24.0
-    episodes = np.searchsorted(gray_hours, history_hours, side="right").astype(np.int8)
+    episodes = np.searchsorted(gray_hours, history_hours, side="right").astype(np.int32)
     factorization = deposition_factorizations_on_blocks(
         history_days,
         episodes,
@@ -1708,7 +1725,7 @@ def make_history_products(base_model, base_h5, output_root, modulated_bundle_pat
         _write_dataset(observation, "time_days_from_reference", history_days)
         _write_dataset(observation, "time_hours_from_reference", history_hours)
         observation.create_dataset("timestamp_utc", data=np.asarray(timestamps, dtype=string_type))
-        _write_dataset(observation, "episode", episodes.astype(np.int8))
+        _write_dataset(observation, "episode", episodes.astype(np.int32))
         _write_dataset(observation, "tile_thickness_nm", thickness.astype(np.float32))
         _write_dataset(
             observation,
@@ -1719,7 +1736,7 @@ def make_history_products(base_model, base_h5, output_root, modulated_bundle_pat
         rank1 = h5.create_group("v3_rank1_deposition_candidate")
         candidate = factorization["rank1"]
         _write_dataset(rank1, "time_hours", factorization["time_hours"])
-        _write_dataset(rank1, "episode", factorization["episodes"].astype(np.int8))
+        _write_dataset(rank1, "episode", factorization["episodes"].astype(np.int32))
         _write_dataset(rank1, "blocks", factorization["blocks"])
         _write_dataset(rank1, "multipliers", candidate["multipliers"])
         _write_dataset(rank1, "tau_h", np.empty(0, dtype=float))
@@ -1783,7 +1800,7 @@ def update_reader_h5(base_h5, output_h5, base_model, bundle, factorization, time
         )
         deposition.attrs["ice_history_update_method"] = "H5 six-LED lookup"
         _write_dataset(deposition, "time_hours", factorization["time_hours"])
-        _write_dataset(deposition, "episode", factorization["episodes"].astype(np.int8))
+        _write_dataset(deposition, "episode", factorization["episodes"].astype(np.int32))
         deposition.create_dataset(
             "timestamp_utc", data=np.asarray(timestamps, dtype="S32")
         )
@@ -1842,16 +1859,26 @@ def update_reader_h5(base_h5, output_h5, base_model, bundle, factorization, time
             utc = np.asarray(timestamps, dtype="S32")
             for prefix, index_fn in (("first", np.min), ("last", np.max)):
                 if f"episode_{prefix}_hours" in time_group:
-                    values = np.asarray([
-                        index_fn(factorization["time_hours"][episodes == episode])
-                        for episode in range(gray_hours.size + 1)
-                    ], dtype=float)
+                    values = np.asarray(
+                        [
+                            index_fn(factorization["time_hours"][episodes == episode])
+                            if np.any(episodes == episode)
+                            else np.nan
+                            for episode in range(gray_hours.size + 1)
+                        ],
+                        dtype=float,
+                    )
                     _write_dataset(time_group, f"episode_{prefix}_hours", values)
                 if f"episode_{prefix}_utc" in time_group:
                     values = []
                     for episode in range(gray_hours.size + 1):
                         selected = np.flatnonzero(episodes == episode)
-                        values.append(utc[selected[0] if prefix == "first" else selected[-1]])
+                        if selected.size:
+                            values.append(
+                                utc[selected[0] if prefix == "first" else selected[-1]]
+                            )
+                        else:
+                            values.append(b"")
                     _write_dataset(
                         time_group, f"episode_{prefix}_utc", np.asarray(values, dtype="S32")
                     )
@@ -1916,14 +1943,14 @@ def write_history_reference(
         _write_dataset(observation, "time_days_from_reference", times_days)
         _write_dataset(observation, "time_hours_from_reference", times_days * 24.0)
         observation.create_dataset("timestamp_utc", data=np.asarray(timestamps, dtype=string_type))
-        _write_dataset(observation, "episode", factorization["episodes"].astype(np.int8))
+        _write_dataset(observation, "episode", factorization["episodes"].astype(np.int32))
         _write_dataset(observation, "tile_thickness_nm", histories.astype(np.float32))
         _write_dataset(observation, "tile_rate_nm_per_day", rates.astype(np.float32))
 
         rank1 = h5.create_group("v3_rank1_deposition_candidate")
         candidate = factorization["rank1"]
         _write_dataset(rank1, "time_hours", factorization["time_hours"])
-        _write_dataset(rank1, "episode", factorization["episodes"].astype(np.int8))
+        _write_dataset(rank1, "episode", factorization["episodes"].astype(np.int32))
         _write_dataset(rank1, "blocks", factorization["blocks"])
         _write_dataset(rank1, "multipliers", candidate["multipliers"])
         _write_dataset(rank1, "tau_h", np.empty(0, dtype=float))
@@ -2375,12 +2402,15 @@ def _legacy_main_streaming(argv=None):
                         "repeat": np.asarray(data["repeat"], dtype=int),
                         "program": np.asarray(data["program"], dtype=int),
                         "groups": np.asarray(data["groups"], dtype=int),
+                        "reset_event_days": production.reset_days_for_data(data),
+                        "reset_event_names": tuple(data["reset_event_names"]),
+                        "reset_event_log_offsets": fit_values["reset_event_log_offsets"],
                         "post_reset_tile_log_offset": fit_values[
                             "post_reset_tile_log_offset"
                         ],
-                        "post_third_decon_tile_log_offset": fit_values[
+                        "post_third_decon_tile_log_offset": fit_values.get(
                             "post_third_decon_tile_log_offset"
-                        ],
+                        ),
                     }
                     for record in _tile_lookup_records(records, detector, tile_id):
                         lookup_writer.writerow(record)
@@ -2720,12 +2750,15 @@ def _legacy_main(argv=None):
                     "repeat": np.asarray(data["repeat"], dtype=int),
                     "program": np.asarray(data["program"], dtype=int),
                     "groups": np.asarray(data["groups"], dtype=int),
+                    "reset_event_days": production.reset_days_for_data(data),
+                    "reset_event_names": tuple(data["reset_event_names"]),
+                    "reset_event_log_offsets": fit_values["reset_event_log_offsets"],
                     "post_reset_tile_log_offset": fit_values[
                         "post_reset_tile_log_offset"
                     ],
-                    "post_third_decon_tile_log_offset": fit_values[
+                    "post_third_decon_tile_log_offset": fit_values.get(
                         "post_third_decon_tile_log_offset"
-                    ],
+                    ),
                 }
                 lookup_summaries.extend(
                     {"detector": detector, "tile_id": int(tile_id), **record}
@@ -3600,12 +3633,15 @@ def _unused_duplicate_main(argv=None):
                     "repeat": np.asarray(data["repeat"], dtype=int),
                     "program": np.asarray(data["program"], dtype=int),
                     "groups": np.asarray(data["groups"], dtype=int),
+                    "reset_event_days": production.reset_days_for_data(data),
+                    "reset_event_names": tuple(data["reset_event_names"]),
+                    "reset_event_log_offsets": reset_offsets,
                     "post_reset_tile_log_offset": fit_values[
                         "post_reset_tile_log_offset"
                     ],
-                    "post_third_decon_tile_log_offset": fit_values[
+                    "post_third_decon_tile_log_offset": fit_values.get(
                         "post_third_decon_tile_log_offset"
-                    ],
+                    ),
                 }
                 lookup_summaries.extend(
                     {

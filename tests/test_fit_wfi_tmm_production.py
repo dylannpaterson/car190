@@ -55,6 +55,57 @@ def _two_reset_trajectory_data():
 
 
 class FixedProductionSettingsTests(unittest.TestCase):
+    def test_model_builds_segment_state_for_arbitrary_reset_count(self):
+        import jax
+        from numpyro.handlers import seed, trace
+
+        jax.config.update("jax_enable_x64", True)
+        days = np.repeat(np.arange(9, dtype=float), 6)
+        led = np.tile(np.arange(1, 7, dtype=int), 9)
+        reset_events = (
+            {"name": "second_decon", "day": 2.0},
+            {"name": "third_decon", "day": 4.0},
+            {"name": "fourth_decon", "day": 6.0},
+        )
+        data = {
+            "counts": np.ones((1, days.size)),
+            "sums": np.zeros((1, days.size)),
+            "sum_squared": np.ones((1, days.size)),
+            "days": days,
+            "node_days": np.arange(9, dtype=float),
+            "led": led,
+            "first_by_led": np.arange(6),
+            "repeat": np.repeat(np.arange(9), 6),
+            "reset_days": np.asarray([event["day"] for event in reset_events]),
+            "reset_event_names": tuple(event["name"] for event in reset_events),
+            "reset_events": reset_events,
+            "reset_day": 2.0,
+            "n_scas": 1,
+            "n_tiles": 1,
+            "tile_ids": np.asarray([0]),
+            "sca_index": np.asarray([0]),
+            "sca_names": np.asarray(["WFI01"]),
+            "groups": np.arange(days.size),
+            "metadata": {0: {"tile_row": 0, "tile_col": 0}},
+        }
+        context = {
+            "wavelengths": np.asarray([1000.0]),
+            "model_weights": np.ones((1, days.size, 1)),
+            "outside_output": np.zeros((1, days.size)),
+            "clean_output": np.ones((1, days.size)),
+            "hgcdte_n": np.asarray([3.6]),
+            "hgcdte_k": np.asarray([0.7]),
+            "absolute_substrate_power": True,
+        }
+
+        sites = trace(seed(production.build_model(
+            data, context, fit_incidence_angle=False
+        ), jax.random.PRNGKey(211))).get_trace()
+
+        assert sites["tile_reset_episode_mean_rate_nm_day"]["value"].shape == (1, 1, 4)
+        assert "reset_event_3_initial_thickness_log_nm" in sites
+        assert "post_reset_event_3_tile_log_offset" in sites
+
     def test_settings_are_fixed_to_the_production_contract(self):
         config = production.ProductionConfig(Path("stats.csv"), Path("output"))
 

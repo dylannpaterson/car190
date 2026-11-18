@@ -4,6 +4,8 @@ import numpy as np
 import pytest
 
 from wfi_pipeline.plot_joint_modulated_ice_trends import (
+    _episode_metric_specs,
+    _episode_start_thickness,
     extract_detector_history,
     load_joint_modulated_plot_bundle,
     validate_joint_modulated_bundle,
@@ -90,3 +92,22 @@ def test_plot_bundle_loader_reads_trajectory_fields_only(tmp_path):
     assert bundle["metadata"]["modulation_fit_family"] == "joint-car190-amber-2day"
     assert bundle["clean_reflectance_modulation_included"]
     assert "clean_power" not in bundle
+
+
+def test_episode_diagnostics_cover_every_configured_reset():
+    days = np.asarray([0.0, 2.0, 4.0, 6.0, 8.0])
+    history = np.asarray([[5.0, 10.0, 15.0, 20.0, 25.0]])
+    reset_days = np.asarray([1.0, 3.0, 5.0, 7.0])
+    reset_names = (
+        "second_decon",
+        "third_decon",
+        "fourth_decon",
+        "fifth_decon",
+    )
+
+    starts = _episode_start_thickness(days, history, reset_days)
+    metrics = _episode_metric_specs(reset_names, "initial_thickness")
+
+    np.testing.assert_array_equal(starts, [[5.0, 10.0, 15.0, 20.0, 25.0]])
+    assert len(metrics) == len(reset_days) + 1
+    assert metrics[-1] == ("After Fifth decon", "reset_event_4_initial_thickness_nm")
