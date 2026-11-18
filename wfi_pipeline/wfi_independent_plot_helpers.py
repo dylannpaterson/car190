@@ -13,6 +13,7 @@ from wfi_production_plot_annotations import (
     event_legend_handles,
     non_annotation_legend_handles,
     split_time_series_at_reset,
+    split_time_series_at_resets,
 )
 
 
@@ -36,7 +37,20 @@ def npz_scalar(samples, key, default=None):
     return value.reshape(-1)[0].item()
 
 
-def save_np_node_plot(path, samples, days, repeats, time_annotations=None):
+def save_np_node_plot(
+    path,
+    samples,
+    days,
+    repeats,
+    time_annotations=None,
+    reset_days=None,
+    source_label=None,
+    node_title=None,
+    thickness_title=None,
+    percentile_label="16th-84th percentile",
+    rate_y_limit=None,
+    date_tick_interval_days=1,
+):
     if "np_node_multipliers" not in samples:
         return
     repeat_values = np.asarray(sorted(set(repeats.tolist())), dtype=int)
@@ -55,12 +69,12 @@ def save_np_node_plot(path, samples, days, repeats, time_annotations=None):
         )
         node_value_quantiles = np.percentile(node_values, [16, 50, 84], axis=0)
         node_ylabel = "Instantaneous rate (nm/day)"
-        node_title = "Fully non-parametric observation-epoch-node rate"
+        default_node_title = "Fully non-parametric observation-epoch-node rate"
     else:
         multipliers = np.asarray(samples["np_node_multipliers"], dtype=float)
         node_value_quantiles = np.percentile(multipliers, [16, 50, 84], axis=0)
         node_ylabel = "NP instantaneous-rate multiplier"
-        node_title = "Observation-epoch-node rate modulation"
+        default_node_title = "Observation-epoch-node rate modulation"
 
     thickness_quantiles = None
     if "np_node_thickness" in samples:
@@ -68,22 +82,24 @@ def save_np_node_plot(path, samples, days, repeats, time_annotations=None):
         if thickness.ndim == 3:
             thickness = np.mean(thickness, axis=1)
         thickness_quantiles = np.percentile(thickness, [16, 50, 84], axis=0)
-    reset_day = (
-        None if time_annotations is None else time_annotations.physical_reset_day
-    )
+    if reset_days is None:
+        reset_day = (
+            None if time_annotations is None else time_annotations.physical_reset_day
+        )
+        reset_days = None if reset_day is None else (reset_day,)
     if thickness_quantiles is None:
-        node_days, node_value_quantiles = split_time_series_at_reset(
+        node_days, node_value_quantiles = split_time_series_at_resets(
             node_days,
             node_value_quantiles,
-            reset_day=reset_day,
+            reset_days=reset_days,
         )
     else:
         node_days, node_value_quantiles, thickness_quantiles = (
-            split_time_series_at_reset(
+            split_time_series_at_resets(
                 node_days,
                 node_value_quantiles,
                 thickness_quantiles,
-                reset_day=reset_day,
+                reset_days=reset_days,
             )
         )
 
@@ -94,7 +110,7 @@ def save_np_node_plot(path, samples, days, repeats, time_annotations=None):
         node_value_quantiles[2],
         color="#56B4E9",
         alpha=0.35,
-        label="16th-84th percentile",
+        label=percentile_label,
     )
     axes[0].plot(
         node_days,
@@ -118,8 +134,12 @@ def save_np_node_plot(path, samples, days, repeats, time_annotations=None):
     else:
         axes[0].axhline(1.0, color="black", linewidth=0.8, linestyle="--")
     axes[0].set_ylabel(node_ylabel)
-    axes[0].set_title(node_title)
+    axes[0].set_title(
+        node_title or default_node_title
+    )
     axes[0].grid(alpha=0.2)
+    if rate_y_limit is not None:
+        axes[0].set_ylim(top=float(rate_y_limit))
 
     if thickness_quantiles is not None:
         axes[1].fill_between(
@@ -128,7 +148,7 @@ def save_np_node_plot(path, samples, days, repeats, time_annotations=None):
             thickness_quantiles[2],
             color="#E69F00",
             alpha=0.35,
-            label="16th-84th percentile",
+            label=percentile_label,
         )
         axes[1].plot(
             node_days,
@@ -138,22 +158,36 @@ def save_np_node_plot(path, samples, days, repeats, time_annotations=None):
             label="Median",
         )
         axes[1].set_ylabel("Ice thickness (nm)")
-        axes[1].set_title("Ice thickness at observation-epoch nodes")
+        axes[1].set_title(
+            thickness_title or "Ice thickness at observation-epoch nodes"
+        )
     axes[1].set_xlabel("Days since first exposure")
     axes[1].grid(alpha=0.2)
     if time_annotations is not None:
-        annotate_time_axis(axes[0], time_annotations)
-        annotate_time_axis(axes[1], time_annotations)
+        annotate_time_axis(
+            axes[0],
+            time_annotations,
+            date_tick_interval_days=date_tick_interval_days,
+        )
+        annotate_time_axis(
+            axes[1],
+            time_annotations,
+            date_tick_interval_days=date_tick_interval_days,
+        )
     for axis in axes:
         handles, labels = non_annotation_legend_handles(axis, time_annotations)
         if handles:
             axis.legend(handles, labels, frameon=False, fontsize=8)
     figure.suptitle(
-        f"{scope_label(samples['sca_names'])} "
-        + (
-            "fully non-parametric ice trajectory"
-            if fully_np_trajectory
-            else "non-parametric rate modulation"
+        (
+            f"{scope_label(samples['sca_names'])} {source_label}"
+            if source_label
+            else f"{scope_label(samples['sca_names'])} "
+            + (
+                "fully non-parametric ice trajectory"
+                if fully_np_trajectory
+                else "non-parametric rate modulation"
+            )
         ),
         y=0.98,
     )

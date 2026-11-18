@@ -154,6 +154,43 @@ def test_48h_rate_knots_keep_resets_and_batch_size_adapts_to_cadence():
     assert h5_fit_batch_size(unthinned, knots) < 256
 
 
+def test_extended_rate_knot_grid_keeps_regular_spacing_and_passes_data_end():
+    data = {
+        "node_days": np.asarray([0.5, 4.7]),
+        "reset_days": np.asarray([2.0]),
+    }
+
+    knots = rate_spline_knot_days(
+        data,
+        spacing_days=1.0,
+        extend_past_end=True,
+    )
+
+    np.testing.assert_array_equal(
+        knots,
+        np.asarray([0.5, 1.5, 2.0, 2.5, 3.5, 4.5, 5.5]),
+    )
+    assert 4.7 not in knots
+    assert knots[-1] > data["node_days"][-1]
+    assert np.max(np.diff(knots)) <= 1.0 + 1.0e-12
+
+
+def test_extended_rate_knot_grid_adds_one_extra_step_when_endpoint_aligns():
+    data = {
+        "node_days": np.asarray([0.5, 4.5]),
+        "reset_days": np.asarray([2.0]),
+    }
+
+    knots = rate_spline_knot_days(
+        data,
+        spacing_days=1.0,
+        extend_past_end=True,
+    )
+
+    assert 4.5 in knots
+    assert knots[-1] == 5.5
+
+
 def test_bundle_root_uses_h5_provenance_when_h5_was_copied(tmp_path):
     original_bundle_root = tmp_path / "run" / "production" / "wavelength_response_bundle"
     original_bundle_root.mkdir(parents=True)

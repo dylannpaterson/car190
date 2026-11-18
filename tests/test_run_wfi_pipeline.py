@@ -76,7 +76,7 @@ class WfiPipelineTests(unittest.TestCase):
             config_index = command.index("--reset-config")
             self.assertEqual(command[config_index + 1], str(reset_config["path"]))
 
-    def test_main_pipeline_dispatches_global_rate_plots(self):
+    def test_main_pipeline_dispatches_joint_modulated_trend_plots(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             run = pipeline.PipelineRun(
@@ -85,13 +85,35 @@ class WfiPipelineTests(unittest.TestCase):
                 FULL_TMM,
             )
             with patch.object(run, "_run_command") as run_command:
-                run._run_global_rate_plots(root / "corrected_statistics_4h_thinned")
+                bundle = root / "wavelength_response_bundle" / "modulated.npz"
+                summary = run._run_joint_modulated_trend_plots(
+                    root / "corrected_statistics_4h_thinned", bundle
+                )
             command = run_command.call_args.args[1]
-            assert str(Path("run_wfi_global_rate_plots.py")) in " ".join(command)
-            assert command[command.index("--route") + 1] == FULL_TMM
+            assert str(Path("plot_joint_modulated_ice_trends.py")) in " ".join(command)
+            assert command[command.index("--bundle-path") + 1] == str(bundle)
+            assert command[command.index("--statistics-dir") + 1] == str(
+                root / "corrected_statistics_4h_thinned"
+            )
             outputs = run_command.call_args.kwargs["outputs"]
-            assert any(path.name == "wfi_full_focal_plane_rate_maps.png" for path in outputs)
-            assert any(path.name == "wfi_all_detector_ice_rate_trajectories.png" for path in outputs)
+            assert outputs == [summary]
+            assert summary.name == "joint_modulated_ice_trend_plots.json"
+
+    def test_relative_route_fit_plots_do_not_claim_joint_history_trends(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = pipeline.PipelineRun(
+                root / "corrected_statistics_4h_thinned",
+                root / "production_run",
+                RELATIVE_RESPONSE,
+            )
+            fit_root = root / "production_run" / "production" / "wfi01" / "relative_response"
+            with patch.object(run, "_run_command") as run_command:
+                run._run_tmm_plots(root / "corrected_statistics_4h_thinned", "WFI01", fit_root)
+            command = run_command.call_args.args[1]
+            assert "--fit-diagnostics-only" in command
+            outputs = run_command.call_args.kwargs["outputs"]
+            assert not any("trajectory" in path.name or "rate_maps" in path.name for path in outputs)
 
     def test_central_full_tmm_defaults_match_fit_runners(self):
         self.assertEqual(FULL_TMM_EMCEE_WALKERS, emcee_warmup.EMCEE_WALKERS)

@@ -364,8 +364,11 @@ def _utc_number_to_days(numbers, start_utc):
     return mapped.reshape(values.shape)
 
 
-def annotate_time_axis(axis, annotations):
+def annotate_time_axis(axis, annotations, date_tick_interval_days=1):
     """Add CAR216 shading, event lines, and a UTC secondary axis."""
+    date_tick_interval_days = int(date_tick_interval_days)
+    if date_tick_interval_days <= 0:
+        raise ValueError("date_tick_interval_days must be positive")
     for index, (start_day, end_day) in enumerate(annotations.car216_intervals):
         axis.axvspan(
             start_day,
@@ -392,7 +395,7 @@ def annotate_time_axis(axis, annotations):
             lambda values: _utc_number_to_days(values, annotations.start_utc),
         ),
     )
-    locator = mdates.DayLocator(tz=UTC)
+    locator = mdates.DayLocator(interval=date_tick_interval_days, tz=UTC)
     utc_axis.xaxis.set_major_locator(locator)
     utc_axis.xaxis.set_major_formatter(FuncFormatter(_utc_tick_label))
     utc_axis.set_xlabel("UTC date (midnight)", labelpad=7)

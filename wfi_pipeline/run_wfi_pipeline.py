@@ -1197,16 +1197,19 @@ class PipelineRun:
                 )
                 self._run_tmm_plots(statistics_dir, detector, fit_roots[detector])
 
-            self._run_global_rate_plots(statistics_dir)
             base_bundle = self._build_base_bundle()
             self._run_joint_fits(statistics_dir, fit_roots, six_led_roots)
             modulated_bundle, final_h5 = self._run_bundle_and_h5(base_bundle)
+            joint_trend_summary = self._run_joint_modulated_trend_plots(
+                statistics_dir, modulated_bundle
+            )
             self._run_plots(final_h5)
             artifact_paths = {
                 "base_bundle": base_bundle,
                 "modulated_bundle": modulated_bundle,
                 "final_h5": final_h5,
                 "final_h5_validation": final_h5.with_suffix(".validation.json"),
+                "joint_modulated_ice_trend_plots": joint_trend_summary,
             }
             self.manifest["output_artifacts"] = {
                 name: {"path": str(path.resolve()), "sha256": _sha256(path)}
@@ -1253,11 +1256,7 @@ class PipelineRun:
         plot_outputs = [
             fit_root / name
             for name in (
-                "numpyro_ice_trajectory.png",
-                "numpyro_rate_histogram_pre_post_reset.png",
-                "numpyro_np_trajectory.png",
                 "numpyro_tile_ar_maps.png",
-                f"numpyro_tile_rate_maps_{detector}.png",
                 "numpyro_tile_fit.png",
                 "numpyro_tile_data_model_vs_time.png",
                 "numpyro_tile_fit_scatter.png",
@@ -1272,35 +1271,28 @@ class PipelineRun:
             "--fit-root", str(fit_root),
             "--statistics-path", str(_corrected_stats_file(statistics_dir, detector)),
             "--tile-size", str(TILE_SIZE_PIXELS),
+            "--fit-diagnostics-only",
         ]
         self._run_command(
             "tmm_diagnostics", command, detector=detector,
             outputs=plot_outputs,
         )
 
-    def _run_global_rate_plots(self, statistics_dir):
-        plot_root = self.paths["plots"]
-        focal_plane = plot_root / "focal_plane"
-        trajectories = plot_root / "trajectories"
-        recent_trajectories = plot_root / "trajectories_last_7d"
-        outputs = [
-            focal_plane / "wfi_full_focal_plane_rate_maps.png",
-            focal_plane / "wfi_full_focal_plane_aom_rate_jump_percent.png",
-            trajectories / "wfi_all_detector_ice_rate_trajectories.png",
-            recent_trajectories
-            / "wfi_all_detector_ice_rate_trajectories_last_7d.png",
-        ]
+    def _run_joint_modulated_trend_plots(self, statistics_dir, modulated_bundle):
+        plot_root = self.paths["plots"] / "joint_modulated"
+        summary_path = plot_root / "joint_modulated_ice_trend_plots.json"
         command = [
             sys.executable,
-            str(ROOT / "wfi_pipeline" / "run_wfi_global_rate_plots.py"),
+            str(ROOT / "wfi_pipeline" / "plot_joint_modulated_ice_trends.py"),
+            "--bundle-path", str(modulated_bundle),
             "--statistics-dir", str(statistics_dir),
-            "--production-root", str(self.paths["production"]),
-            "--route", str(self.profile.name),
             "--output-dir", str(plot_root),
+            "--tile-size", str(TILE_SIZE_PIXELS),
         ]
         self._run_command(
-            "global_rate_diagnostics", command, outputs=outputs
+            "joint_modulated_ice_trend_plots", command, outputs=[summary_path]
         )
+        return summary_path
 
 
 def main_for_route(route, argv=None):

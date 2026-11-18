@@ -26,6 +26,14 @@ this same generator; their plotting implementations are not duplicated.
 | 5 — CAR201 data and model predictions | `plot_car201_model_data` |
 | 6 — Ice-free complex reflection | `plot_complex_reflectance` |
 
+Figure 4 generation also writes `wfi02_rcs_likelihood_by_led.csv`; Figure 5
+generation writes `wfi02_car201_residual_metrics.csv`. These summarize the saved
+fits over all 256 WFI02 tiles and the full WFI02 stellar sample, respectively.
+In both files, the log-likelihood difference is Joint RCS + stellar minus
+RCS-only TMM and a positive value favors Joint RCS + stellar; the CAR201 value
+is per measurement and the RCS value is per LED/tile/observation group. The CAR201 mean Student-$t$ NLL
+columns omit additive constants that cancel in the likelihood difference.
+
 Rebuild the manuscript PDF with the checked-in Pandoc/XeLaTeX command:
 
 ```bash

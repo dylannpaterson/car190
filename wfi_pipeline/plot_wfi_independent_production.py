@@ -225,7 +225,14 @@ def production_plot_data(data):
 
 
 def save_independent_trajectory_plot(
-    path, data, reset_day=None, time_annotations=None, reset_days=None
+    path,
+    data,
+    reset_day=None,
+    time_annotations=None,
+    reset_days=None,
+    source_label="independent per-tile TMM fits",
+    rate_y_limit=None,
+    date_tick_interval_days=1,
 ):
     days = data["days"]
     order = np.argsort(days, kind="stable")
@@ -283,7 +290,11 @@ def save_independent_trajectory_plot(
     )
     for index, axis in enumerate(axes):
         if time_annotations is not None:
-            annotate_time_axis(axis, time_annotations)
+            annotate_time_axis(
+                axis,
+                time_annotations,
+                date_tick_interval_days=date_tick_interval_days,
+            )
         for reset_index, reset_boundary in enumerate(reset_days):
             axis.axvline(
                 reset_boundary,
@@ -308,7 +319,9 @@ def save_independent_trajectory_plot(
     axes[0].set_title(f"Per-tile ice trajectories ({tile_count} tiles)")
     axes[1].set_ylabel("Instantaneous accumulation rate (nm/day)")
     axes[1].set_title(f"Per-tile instantaneous rates ({tile_count} tiles)")
-    figure.suptitle(f"{data['detector']} independent per-tile TMM fits", y=0.98)
+    if rate_y_limit is not None:
+        axes[1].set_ylim(top=float(rate_y_limit))
+    figure.suptitle(f"{data['detector']} {source_label}", y=0.98)
     if time_annotations is not None:
         figure.legend(
             handles=event_legend_handles(time_annotations),
@@ -323,7 +336,7 @@ def save_independent_trajectory_plot(
     plt.close(figure)
 
 
-def save_rate_histogram(path, data, reset_day):
+def save_rate_histogram(path, data, reset_day, source_label="independent per-tile TMM fits"):
     days = np.asarray(data["days"], dtype=float)
     rates = np.asarray(data["rates"], dtype=float)
     pre_mask = days < reset_day
@@ -377,7 +390,7 @@ def save_rate_histogram(path, data, reset_day):
     axis.set_xlabel("Instantaneous ice accumulation rate (nm/day)")
     axis.set_ylabel("Probability density")
     axis.set_title(
-        f"{data['detector']} instantaneous ice accumulation rates by Decon2 epoch\n"
+        f"{data['detector']} {source_label} accumulation rates by Decon2 epoch\n"
         f"Decon2 day {reset_day:.3f}; current epoch day {days[latest_index]:.3f}"
     )
     axis.grid(alpha=0.2)
@@ -414,6 +427,7 @@ def save_detector_plots(
     statistics_path=None,
     tile_size=DEFAULT_TILE_SIZE,
     reset_days=None,
+    include_trend_plots=True,
 ):
     output_root = (
         detector_root(detector, root, tile_size)
@@ -437,44 +451,45 @@ def save_detector_plots(
         (data["modeled"], data["modeled"], data["modeled"])
     )
 
-    save_independent_trajectory_plot(
-        output_root / "numpyro_ice_trajectory.png",
-        data,
-        reset_day=(float(reset_days[0]) if len(reset_days) else reset_day),
-        time_annotations=time_annotations,
-        reset_days=reset_days,
-    )
-    save_rate_histogram(
-        output_root / "numpyro_rate_histogram_pre_post_reset.png",
-        data,
-        reset_day=reset_day,
-    )
-    node_samples = {
-        "sca_names": np.asarray([detector]),
-        "fully_np_trajectory": np.asarray(1),
-        "node_instantaneous_rate_nm_day": np.mean(
-            data["node_rates"], axis=0, keepdims=True
-        ),
-        "np_node_thickness": np.mean(
-            data["node_thickness"], axis=0, keepdims=True
-        ),
-        "np_node_multipliers": np.mean(
-            data["node_multipliers"], axis=0, keepdims=True
-        ),
-        "trajectory_rate_prior_mean_nm_day": np.asarray(5.0),
-    }
-    save_np_node_plot(
-        output_root / "numpyro_np_trajectory.png",
-        node_samples,
-        data["days"],
-        data["repeats"],
-        time_annotations=time_annotations,
-    )
+    if include_trend_plots:
+        save_independent_trajectory_plot(
+            output_root / "numpyro_ice_trajectory.png",
+            data,
+            reset_day=(float(reset_days[0]) if len(reset_days) else reset_day),
+            time_annotations=time_annotations,
+            reset_days=reset_days,
+        )
+        save_rate_histogram(
+            output_root / "numpyro_rate_histogram_pre_post_reset.png",
+            data,
+            reset_day=reset_day,
+        )
+        node_samples = {
+            "sca_names": np.asarray([detector]),
+            "fully_np_trajectory": np.asarray(1),
+            "node_instantaneous_rate_nm_day": np.mean(
+                data["node_rates"], axis=0, keepdims=True
+            ),
+            "np_node_thickness": np.mean(
+                data["node_thickness"], axis=0, keepdims=True
+            ),
+            "np_node_multipliers": np.mean(
+                data["node_multipliers"], axis=0, keepdims=True
+            ),
+            "trajectory_rate_prior_mean_nm_day": np.asarray(5.0),
+        }
+        save_np_node_plot(
+            output_root / "numpyro_np_trajectory.png",
+            node_samples,
+            data["days"],
+            data["repeats"],
+            time_annotations=time_annotations,
+        )
+        save_tile_rate_map_plot(
+            output_root / f"numpyro_tile_rate_maps_{detector}.png",
+            read_csv_rows(output_root / "tile_rate_posterior.csv"),
+        )
     save_tile_map_plot(output_root / "numpyro_tile_ar_maps.png", data["ar_rows"])
-    save_tile_rate_map_plot(
-        output_root / f"numpyro_tile_rate_maps_{detector}.png",
-        read_csv_rows(output_root / "tile_rate_posterior.csv"),
-    )
     save_tile_fit_plot(
         output_root / "numpyro_tile_fit.png",
         plot_data,
@@ -525,6 +540,11 @@ def parse_args():
         help="Statistics CSV used for event annotations with --fit-root.",
     )
     parser.add_argument(
+        "--fit-diagnostics-only",
+        action="store_true",
+        help="Skip ice/rate trend plots; use when a downstream fitted bundle supplies the histories.",
+    )
+    parser.add_argument(
         "--tile-size",
         type=positive_integer,
         default=DEFAULT_TILE_SIZE,
@@ -550,6 +570,7 @@ def main():
             output_root=args.fit_root,
             statistics_path=args.statistics_path,
             tile_size=args.tile_size,
+            include_trend_plots=not args.fit_diagnostics_only,
         )
         print(f"Wrote plots under {output_root}", flush=True)
 

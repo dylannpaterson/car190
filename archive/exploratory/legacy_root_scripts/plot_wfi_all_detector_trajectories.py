@@ -480,6 +480,8 @@ def plot_all_detector_trajectories(
     time_annotations=None,
     observation_label="unknown",
     xlim_days=None,
+    rate_ylim_top=30.0,
+    date_tick_interval_days=1,
 ):
     figure, axes = plt.subplots(2, 1, figsize=(13, 10), sharex=True)
     colors = plt.get_cmap("tab20", len(trajectories))
@@ -530,7 +532,11 @@ def plot_all_detector_trajectories(
 
     for axis in axes:
         if time_annotations is not None:
-            annotate_time_axis(axis, time_annotations)
+            annotate_time_axis(
+                axis,
+                time_annotations,
+                date_tick_interval_days=date_tick_interval_days,
+            )
         if plot_reset_day is not None:
             axis.axvline(
                 plot_reset_day,
@@ -561,8 +567,12 @@ def plot_all_detector_trajectories(
                 upper = float(np.max(finite))
                 padding = max((upper - lower) * 0.06, 0.1)
                 axis.set_ylim(lower - padding, upper + padding)
-    if xlim_days is None:
-        axes[1].set_ylim(top=30.0)
+    if rate_ylim_top is not None:
+        rate_lower, _rate_upper = axes[1].get_ylim()
+        axes[1].set_ylim(
+            bottom=min(float(rate_lower), 0.0),
+            top=float(rate_ylim_top),
+        )
     title = "Ice trajectories and accumulation rates"
     if observation_label != "unknown":
         title = f"{title}\n{observation_label}"

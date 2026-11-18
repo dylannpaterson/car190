@@ -1,9 +1,9 @@
 """Fast H5-only, batched independent MAP update of WFI ice histories.
 
 The unchanged Eric core evaluates each tile's six-LED response from the H5.
-Corrected statistics then fit independent 48-hour log-rate splines with knots
-at resets, plus initial/reset thicknesses and LED offsets using the production
-likelihood and priors. No TMM or CAR190/Amber joint optimizer is run.
+Corrected statistics then fit independent log-rate splines with 24-hour knots
+and exact reset knots, plus initial/reset thicknesses and LED offsets using the
+production likelihood and priors. No TMM or CAR190/Amber joint optimizer is run.
 """
 
 from __future__ import annotations
@@ -1276,17 +1276,32 @@ def initialize_tile_from_h5(model, detector, tile_id, data, values):
     return values, thickness_seed, rate_seed
 
 
-def rate_spline_knot_days(data, spacing_days=2.0):
-    """Create the shared 48-hour rate-control grid with exact reset knots."""
+def rate_spline_knot_days(data, spacing_days=2.0, extend_past_end=False):
+    """Create regular rate-control knots, exact reset knots, and optional end extension.
+
+    With ``extend_past_end=True``, the regular grid remains anchored at the
+    first data node, no special knot is inserted at the data endpoint, and the
+    next regular knot strictly after the endpoint is included. A regular knot
+    coincident with the endpoint is retained when it falls on the grid.
+    """
     spacing_days = float(spacing_days)
     if not np.isfinite(spacing_days) or spacing_days <= 0.0:
         raise ValueError("Rate-spline knot spacing must be positive and finite")
     node_days = np.asarray(data["node_days"], dtype=float)
     left = float(node_days[0])
     right = float(node_days[-1])
-    regular = np.arange(left + spacing_days, right, spacing_days, dtype=float)
+    whole_steps = int(np.floor((right - left) / spacing_days))
+    regular = left + spacing_days * np.arange(1, whole_steps + 1, dtype=float)
     resets = production.reset_days_for_data(data)
     resets = resets[(resets > left) & (resets < right)]
+    if extend_past_end:
+        final_regular_step = whole_steps + 1
+        final_regular_knot = left + final_regular_step * spacing_days
+        while final_regular_knot <= right:
+            final_regular_step += 1
+            final_regular_knot = left + final_regular_step * spacing_days
+        return np.unique(np.r_[left, regular, resets, final_regular_knot])
+    regular = regular[regular < right]
     return np.unique(np.r_[left, regular, resets, right])
 
 
@@ -2857,6 +2872,37 @@ def parse_args(argv=None):
     )
     parser.add_argument("--output-path", type=Path, required=True)
     parser.add_argument(
+        "--detector",
+        dest="detectors",
+        action="append",
+        choices=DETECTORS,
+        required=True,
+        help="Detector to fit; repeat explicitly for each detector.",
+    )
+    parser.add_argument(
+        "--rate-knot-spacing-hours",
+        type=float,
+        default=H5_RATE_KNOT_SPACING_HOURS,
+        help="Regular log-rate control spacing in hours (default: 24).",
+    )
+    parser.add_argument(
+        "--extend-final-rate-knot",
+        action="store_true",
+        help="Keep the regular knot grid and extend it by one knot strictly beyond the data endpoint.",
+    )
+    parser.add_argument(
+        "--fit-only",
+        action="store_true",
+        help="Write selected detector fits and diagnostics without updating bundles or the H5.",
+    )
+    parser.add_argument(
+        "--reuse-lookup-cache-from",
+        type=Path,
+        action="append",
+        default=[],
+        help="Existing run root whose matching fixed-optics lookup caches may be reused.",
+    )
+    parser.add_argument(
         "--reset-config", type=Path, default=DEFAULT_RESET_CONFIG,
         help="Shared YAML reset/decon events and prior settings.",
     )
@@ -2864,10 +2910,30 @@ def parse_args(argv=None):
     args.input_path = args.input_path.expanduser().resolve()
     args.base_h5 = args.base_h5.expanduser().resolve()
     args.output_path = args.output_path.expanduser().resolve()
+    args.detectors = tuple(args.detectors)
+    args.reuse_lookup_cache_from = tuple(
+        path.expanduser().resolve() for path in args.reuse_lookup_cache_from
+    )
+    if len(set(args.detectors)) != len(args.detectors):
+        parser.error("--detector selections must be unique")
+    if not np.isfinite(args.rate_knot_spacing_hours) or args.rate_knot_spacing_hours <= 0.0:
+        parser.error("--rate-knot-spacing-hours must be positive and finite")
+    if args.extend_final_rate_knot and not args.fit_only:
+        parser.error("--extend-final-rate-knot is restricted to --fit-only trial runs")
+    if not args.fit_only and set(args.detectors) != set(DETECTORS):
+        parser.error(
+            "bundle/H5 updates require explicitly selecting all detectors; use --fit-only for a subset"
+        )
     if not args.input_path.exists():
         parser.error(f"Input path does not exist: {args.input_path}")
     if not args.base_h5.is_file():
         parser.error(f"Base H5 does not exist: {args.base_h5}")
+    missing_cache_roots = [path for path in args.reuse_lookup_cache_from if not path.is_dir()]
+    if missing_cache_roots:
+        parser.error(
+            "Lookup-cache source roots do not exist: "
+            + ", ".join(str(path) for path in missing_cache_roots)
+        )
     return args
 
 
@@ -2879,10 +2945,10 @@ def main_streaming(argv=None):
     base_h5 = args.base_h5
     statistics_dir = resolve_statistics_input(args.input_path)
     output_root = args.output_path.resolve()
-    detectors = DETECTORS
+    detectors = args.detectors
     batch_size = H5_UPDATE_BATCH_SIZE
     optimizer_iterations = H5_UPDATE_MAX_ITERATIONS
-    rate_knot_spacing_hours = H5_RATE_KNOT_SPACING_HOURS
+    rate_knot_spacing_hours = float(args.rate_knot_spacing_hours)
     run_started = time.perf_counter()
     base_h5_sha256 = sha256_file(base_h5)
 
@@ -2935,9 +3001,11 @@ def main_streaming(argv=None):
             data["statistics_path"] = str(tile_stats_path)
             detector_data[detector][int(tile_id)] = data
 
-    reference_data = detector_data["WFI01"][0]
+    reference_data = detector_data[detectors[0]][0]
     rate_control_days = rate_spline_knot_days(
-        reference_data, spacing_days=rate_knot_spacing_hours / 24.0
+        reference_data,
+        spacing_days=rate_knot_spacing_hours / 24.0,
+        extend_past_end=args.extend_final_rate_knot,
     )
     batch_size = h5_fit_batch_size(reference_data, rate_control_days)
     for detector in detectors:
@@ -3039,6 +3107,7 @@ def main_streaming(argv=None):
                         detector,
                         tile_id,
                         thickness_grid,
+                        source_cache_roots=args.reuse_lookup_cache_from,
                     )
                     lookup_seconds += time.perf_counter() - lookup_started
                     curve_entries.append(
@@ -3187,6 +3256,45 @@ def main_streaming(argv=None):
                 )
                 detector_plot_seconds += time.perf_counter() - detector_plot_started
 
+    if args.fit_only:
+        trial_summary = {
+            "method": "H5-only response lookup with independent batched rate-spline MAP fits",
+            "fit_only": True,
+            "detectors": list(detectors),
+            "base_h5": str(base_h5),
+            "base_h5_sha256": base_h5_sha256,
+            "statistics_dir": str(statistics_dir),
+            "rate_knot_spacing_hours": rate_knot_spacing_hours,
+            "extend_final_rate_knot": bool(args.extend_final_rate_knot),
+            "final_data_day": float(reference_data["node_days"][-1]),
+            "rate_control_days": rate_control_days.tolist(),
+            "final_rate_knot_day": float(rate_control_days[-1]),
+            "final_knot_days_after_data": float(
+                rate_control_days[-1] - reference_data["node_days"][-1]
+            ),
+            "rate_control_knot_count": int(rate_control_days.size),
+            "optimizer_iterations": int(optimizer_iterations),
+            "optimizer_batch_size": int(batch_size),
+            "lookup_cache_reuse_roots": [str(path) for path in args.reuse_lookup_cache_from],
+            "h5_lookup_seconds": float(lookup_seconds),
+            "optimizer_seconds": float(optimizer_seconds),
+            "per_detector_plot_seconds": float(detector_plot_seconds),
+            "total_run_seconds": float(time.perf_counter() - run_started),
+            "detector_fit_roots": {
+                detector: str(path.resolve()) for detector, path in output_fit_roots.items()
+            },
+        }
+        summary_path = paths["logs"] / "rate_knot_endpoint_extension_trial.json"
+        summary_path.write_text(
+            json.dumps(trial_summary, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        print(
+            json.dumps({**trial_summary, "trial_summary": str(summary_path.resolve())}, indent=2),
+            flush=True,
+        )
+        return
+
     global_plot_started = time.perf_counter()
     global_plot_outputs = _run_focal_plane_and_ice_trend_plots(
         statistics_dir,
@@ -3214,6 +3322,7 @@ def main_streaming(argv=None):
         "optimizer_jacobian_memory_budget_bytes": H5_UPDATE_JACOBIAN_BUDGET_BYTES,
         "rate_spline_knot_spacing_hours": float(rate_knot_spacing_hours),
         "rate_spline_knot_count": int(rate_control_days.size),
+        "rate_spline_final_knot_extended": bool(args.extend_final_rate_knot),
         "rate_prior_mean_nm_day": DEFAULT_RATE_MEAN_NM_DAY,
         "rate_prior_sigma_log": DEFAULT_RATE_SIGMA_LOG,
         "led_offsets": "fit from corrected statistics with log sigma 0.01",
@@ -3273,6 +3382,7 @@ def main_streaming(argv=None):
         "optimizer_jacobian_memory_budget_bytes": H5_UPDATE_JACOBIAN_BUDGET_BYTES,
         "rate_spline_knot_spacing_hours": float(rate_knot_spacing_hours),
         "rate_spline_knot_count": int(rate_control_days.size),
+        "rate_spline_final_knot_extended": bool(args.extend_final_rate_knot),
         "h5_lookup_seconds": float(lookup_seconds),
         "optimizer_seconds": float(optimizer_seconds),
         "per_detector_plot_seconds": float(detector_plot_seconds),
