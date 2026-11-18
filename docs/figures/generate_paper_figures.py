@@ -232,11 +232,11 @@ def plot_ice_history() -> tuple[Path, Path]:
 
     production = STATS / "production/wfi02"
     warm_path = production / "relative_response_constant_rate_warmup_start40/fits/tile_135/constant_rate_map.npz"
-    rapid_path = production / "relative_response/fits/tile_135/posterior_samples.npz"
+    rcs_only_path = production / "relative_response/fits/tile_135/posterior_samples.npz"
     joint_path = production / "relative_response/experiments/car190_amber_joint_2day_reader_compatible_current_gray_v2/joint_weekly_ice_fit.npz"
     warm_days, warm_d, warm_r, resets = load_tile_history(warm_path, constant_rate=True)
-    rapid_days, rapid_d, rapid_r, rapid_resets = load_tile_history(rapid_path)
-    np.testing.assert_allclose(rapid_resets, resets, rtol=0, atol=1e-10)
+    rcs_only_days, rcs_only_d, rcs_only_r, rcs_only_resets = load_tile_history(rcs_only_path)
+    np.testing.assert_allclose(rcs_only_resets, resets, rtol=0, atol=1e-10)
     with np.load(joint_path, allow_pickle=False) as archive:
         joint_days = np.asarray(archive["times"], dtype=float)
         joint_d = np.asarray(archive["fitted_thickness_nm"], dtype=float)[TILE]
@@ -251,13 +251,12 @@ def plot_ice_history() -> tuple[Path, Path]:
     def dates(days):
         return mdates.date2num([origin + timedelta(days=float(day)) for day in days])
 
-    colors = {"initial": "#cb78a5", "rapid": "#177db5", "joint": "#db5b00"}
+    colors = {"initial": "#cb78a5", "rcs_only": "#177db5", "joint": "#db5b00"}
     series = [
         (warm_days, warm_d, warm_r, colors["initial"], "--",
-         "Constant ice-deposition-rate initialization"),
-        (rapid_days, rapid_d, rapid_r, colors["rapid"], "-", "Rapid RCS update"),
-        (joint_days, joint_d, joint_r, colors["joint"], "-",
-         "Joint RCS + stellar photometry fit"),
+         "Constant-rate preliminary fit"),
+        (rcs_only_days, rcs_only_d, rcs_only_r, colors["rcs_only"], "-", "RCS-only TMM"),
+        (joint_days, joint_d, joint_r, colors["joint"], "-", "Joint RCS + stellar"),
     ]
     figure, axes = plt.subplots(2, 1, figsize=(FIGURE_WIDTH_IN, 3.9), sharex=True,
                                 gridspec_kw={"height_ratios": [1.0, 0.9], "hspace": 0.08})
@@ -279,7 +278,7 @@ def plot_ice_history() -> tuple[Path, Path]:
     axes[0].set_ylim(-5, 255)
     axes[1].set_ylabel("Rate (nm/day)")
     axes[1].set_xlabel("UTC date")
-    axes[1].set_ylim(6, max(warm_r.max(), rapid_r.max(), joint_r.max()) + 1)
+    axes[1].set_ylim(6, max(warm_r.max(), rcs_only_r.max(), joint_r.max()) + 1)
     handles, legend_labels = axes[0].get_legend_handles_labels()
     handles.extend([
         Line2D([0], [0], color="#263c63", linestyle=":", linewidth=0.9, label="Decon2 reset"),
@@ -301,6 +300,7 @@ def plot_ice_history() -> tuple[Path, Path]:
 
 def plot_rcs_model_data() -> tuple[Path, Path]:
     from astropy.time import Time
+    import h5py
 
     sys.path[:0] = [str(ROOT / "wfi_pipeline"),
                     str(ROOT / "archive/exploratory/legacy_root_scripts")]
@@ -312,7 +312,7 @@ def plot_rcs_model_data() -> tuple[Path, Path]:
     relative_root = STATS / "production/wfi02/relative_response"
     warm_root = STATS / "production/wfi02/relative_response_constant_rate_warmup_start40"
     warm_path = warm_root / "fits/tile_135/constant_rate_map.npz"
-    rapid_path = relative_root / "fits/tile_135/tile_group_predictions.csv"
+    rcs_only_path = relative_root / "fits/tile_135/tile_group_predictions.csv"
     joint_root = relative_root / "experiments/car190_amber_joint_2day_reader_compatible_current_gray_v2"
     with np.load(warm_path, allow_pickle=False) as warm:
         warm_days = np.asarray(warm["observation_days"], dtype=float)
@@ -325,9 +325,9 @@ def plot_rcs_model_data() -> tuple[Path, Path]:
         offsets = (np.asarray(warm["led_log_offsets"], dtype=float).reshape(-1)
                    if bool(np.asarray(warm["fit_led_log_offsets"]).item())
                    else np.zeros(6, dtype=float))
-    rapid = pd.read_csv(rapid_path).sort_values("group")
-    np.testing.assert_array_equal(rapid["led"].to_numpy(int), warm_led)
-    np.testing.assert_allclose(rapid["days"], warm_days, rtol=0, atol=1e-10)
+    rcs_only = pd.read_csv(rcs_only_path).sort_values("group")
+    np.testing.assert_array_equal(rcs_only["led"].to_numpy(int), warm_led)
+    np.testing.assert_allclose(rcs_only["days"], warm_days, rtol=0, atol=1e-10)
     warm_prediction = np.empty_like(warm_thickness)
     for led in range(1, 7):
         indexes = np.flatnonzero(warm_led == led)
@@ -344,21 +344,79 @@ def plot_rcs_model_data() -> tuple[Path, Path]:
         times = np.asarray(joint["times"], dtype=float)
         thickness = np.asarray(joint["fitted_thickness_nm"], dtype=float)
         theta = np.asarray(joint["shared_parameters"], dtype=float)
+        saved_joint_chi2 = float(np.asarray(joint["car190_chi2"]).item())
     area_path = ROOT / "external_reference_data/roman_effarea_v8_20240301/" \
         "Roman_effarea_v8_SCA02_20240301.ecsv"
+    joint_summary = json.loads((joint_root / "summary.json").read_text())
+    led_quadrature_path = STATS / "production/wavelength_response_bundle/eric_v3_reference/ice_response_model_v3.h5"
+    with h5py.File(led_quadrature_path, "r") as archive:
+        led_wavelength_nm = np.asarray(archive["led_bands/wavelength_nm"][()], dtype=float)
+        led_weights = np.asarray(archive["led_bands/weight"][()], dtype=float)
     led_model = LedModel(
         effective_area_support(area_path), detector=DETECTOR,
         relative_response_root=relative_root,
-        optical_cache_root=Path(json.loads((joint_root / "summary.json").read_text())["optical_cache_root"]),
+        optical_cache_root=Path(joint_summary["optical_cache_root"]),
+        led_wavelength_nm=led_wavelength_nm, led_weights=led_weights,
     )
-    joint_rows, _ = plotter.predict_car190(led_model, theta, times, thickness)
+    joint_rows, joint_residual = plotter.predict_car190(led_model, theta, times, thickness)
+    np.testing.assert_allclose(
+        np.sum(joint_residual**2), saved_joint_chi2, rtol=2e-7, atol=2e-4
+    )
+    likelihood_rows = []
+    for led_number, tile_items in enumerate(led_model.bands, start=1):
+        rcs_chi2 = 0.0
+        joint_model_chi2 = 0.0
+        group_count = 0
+        for tile, item in enumerate(tile_items):
+            observed_groups = np.asarray(item[7], dtype=float)
+            errors = np.asarray(item[8], dtype=float)
+            days = np.asarray(item[9], dtype=float)
+            rcs_prediction = np.asarray(item[6], dtype=float)
+            rows = joint_rows.loc[
+                (joint_rows["led"] == led_number) & (joint_rows["tile"] == tile)
+            ].sort_values("day")
+            np.testing.assert_allclose(rows["day"].to_numpy(float), days, rtol=0, atol=1e-10)
+            np.testing.assert_allclose(rows["observed"].to_numpy(float), observed_groups, rtol=0, atol=1e-10)
+            joint_prediction = rows["predicted"].to_numpy(float)
+            rcs_chi2 += float(np.sum(((rcs_prediction - observed_groups) / errors) ** 2))
+            joint_model_chi2 += float(np.sum(((joint_prediction - observed_groups) / errors) ** 2))
+            group_count += len(days)
+        likelihood_rows.append({
+            "led": led_number,
+            "filter": LED_FILTERS[led_number - 1],
+            "n_tile_groups": group_count,
+            "rcs_only_weighted_chi2_per_group": rcs_chi2 / group_count,
+            "joint_weighted_chi2_per_group": joint_model_chi2 / group_count,
+            "delta_mean_log_likelihood_joint_minus_rcs_only_per_group": (
+                0.5 * (rcs_chi2 - joint_model_chi2) / group_count
+            ),
+        })
+    np.testing.assert_allclose(
+        sum(row["joint_weighted_chi2_per_group"] * row["n_tile_groups"] for row in likelihood_rows),
+        saved_joint_chi2, rtol=2e-7, atol=2e-4,
+    )
+    likelihood_frame = pd.DataFrame(likelihood_rows)
+    likelihood_path = FIGURES / "wfi02_rcs_likelihood_by_led.csv"
+    likelihood_frame.to_csv(likelihood_path, index=False, float_format="%.8g")
+    rcs_only_total_chi2 = float(sum(
+        row["rcs_only_weighted_chi2_per_group"] * row["n_tile_groups"]
+        for row in likelihood_rows
+    ))
+    print(
+        "Total WFI02 RCS weighted chi-square and joint-minus-RCS-only log likelihood:",
+        rcs_only_total_chi2, saved_joint_chi2,
+        0.5 * (rcs_only_total_chi2 - saved_joint_chi2),
+    )
+    print("WFI02 per-LED RCS likelihood comparison, summed over 256 tiles:")
+    print(likelihood_frame.to_string(index=False, float_format=lambda value: f"{value:.5g}"))
+    print("Wrote", likelihood_path)
     joint_tile = joint_rows.loc[joint_rows["tile"] == TILE]
     joint_prediction = np.empty_like(warm_thickness)
-    observed = rapid["observed_log_change"].to_numpy(float)
+    observed = rcs_only["observed_log_change"].to_numpy(float)
     sigma = np.empty_like(observed)
     for led in range(1, 7):
         rows = joint_tile.loc[joint_tile["led"] == led].sort_values("day")
-        use = rapid["led"].to_numpy(int) == led
+        use = rcs_only["led"].to_numpy(int) == led
         np.testing.assert_allclose(rows["day"], warm_days[use], rtol=0, atol=1e-10)
         joint_prediction[use] = rows["predicted"].to_numpy(float)
         sigma[use] = np.asarray(led_model.bands[led - 1][TILE][8], dtype=float)
@@ -369,14 +427,14 @@ def plot_rcs_model_data() -> tuple[Path, Path]:
     def dates(days):
         return mdates.date2num(Time(reference + np.asarray(days), format="mjd", scale="utc").to_datetime())
 
-    colors = {"warm": "#cb78a5", "rapid": "#177db5", "joint": "#db5b00"}
+    colors = {"warm": "#cb78a5", "rcs_only": "#177db5", "joint": "#db5b00"}
     figure, axes = plt.subplots(2, 3, figsize=(FIGURE_WIDTH_IN, 4.2), sharex=True, sharey=True,
                                 gridspec_kw={"hspace": 0.35, "wspace": 0.20})
-    values = np.concatenate([observed, warm_prediction, rapid["model_log_change"].to_numpy(float), joint_prediction]) * 1000.0
+    values = np.concatenate([observed, warm_prediction, rcs_only["model_log_change"].to_numpy(float), joint_prediction]) * 1000.0
     low, high = float(values.min()), float(values.max())
     margin = 0.05 * max(high-low, 1.0)
     for led, axis in enumerate(axes.flat, start=1):
-        use = rapid["led"].to_numpy(int) == led
+        use = rcs_only["led"].to_numpy(int) == led
         days = warm_days[use]
         axis.errorbar(dates(days), observed[use]*1000, yerr=sigma[use]*1000,
                       fmt="o", color="0.12", markersize=2.8, elinewidth=0.65,
@@ -387,13 +445,13 @@ def plot_rcs_model_data() -> tuple[Path, Path]:
                 continue
             axis.plot(dates(days[mask]), warm_prediction[use][mask]*1000,
                       color=colors["warm"], linestyle="--", linewidth=1.0,
-                      label="Constant ice-deposition-rate initialization" if led == 1 and segment == 0 else None)
-            axis.plot(dates(days[mask]), rapid.loc[use, "model_log_change"].to_numpy()[mask]*1000,
-                      color=colors["rapid"], linewidth=1.0,
-                      label="Rapid RCS update" if led == 1 and segment == 0 else None)
+                      label="Constant-rate preliminary fit" if led == 1 and segment == 0 else None)
+            axis.plot(dates(days[mask]), rcs_only.loc[use, "model_log_change"].to_numpy()[mask]*1000,
+                      color=colors["rcs_only"], linewidth=1.0,
+                      label="RCS-only TMM" if led == 1 and segment == 0 else None)
             axis.plot(dates(days[mask]), joint_prediction[use][mask]*1000,
                       color=colors["joint"], linewidth=1.0,
-                      label="Joint RCS + stellar-photometry fit" if led == 1 and segment == 0 else None)
+                      label="Joint RCS + stellar" if led == 1 and segment == 0 else None)
         for reset_index, reset in enumerate(RESET_DAYS):
             style = ":" if reset_index == 0 else "-."
             axis.axvline(dates([reset])[0], color="#263c63", linestyle=style, linewidth=0.8)
@@ -428,7 +486,7 @@ def plot_car201_model_data() -> tuple[Path, Path]:
     # post-roll offsets. Figure 5 moves that roll term to the observed series.
     sys.path.insert(0, str(ROOT / "wfi_pipeline"))
     from astropy.time import Time
-    from fit_amber_wfi01_student_t import profile_student_locations
+    from fit_amber_wfi01_student_t import NU, profile_student_locations
     from reader_compatible_joint_forward import ReaderCompatiblePhotometryForward
     import run_amber_student_t_detectors as run
     import run_joint_car190_amber_inverse_wavelength_maxent as joint_fit
@@ -502,6 +560,7 @@ def plot_car201_model_data() -> tuple[Path, Path]:
         location=np.zeros(len(residual))
         location[active]=profile_student_locations(residual[active],group_scales[active],group_valid[active])[0]
         return location.reshape(magnitude.shape[:2])
+    no_ice_location=profile(np.zeros_like(joint_no_roll))
     joint_location=profile(joint_no_roll)
 
     model.reader_gray_log_by_tile=np.asarray(summary["reader_gray_log_offsets_by_tile"],float)[:,np.searchsorted(reset_days,pass_days,side="right")]
@@ -574,6 +633,50 @@ def plot_car201_model_data() -> tuple[Path, Path]:
     base_location=profile(base_visit)
     base_plot=baseline_curve+base_location[:,:,None]
     joint_plot=joint_curve+joint_location[:,:,None]
+    no_ice_residual=roll_adjusted_data-no_ice_location[:,:,None]
+    base_residual=roll_adjusted_data-base_visit-base_location[:,:,None]
+    joint_residual=roll_adjusted_data-joint_no_roll-joint_location[:,:,None]
+    def robust_nmad(values):
+        center=float(np.median(values))
+        return float(1.4826*np.median(np.abs(values-center)))
+    def student_nll_per_measurement(residual,filter_index):
+        use=valid[:,filter_index,:]
+        values=residual[:,filter_index,:][use]
+        sigma=scales[:,filter_index,:][use]
+        nll=np.log(sigma)+.5*(NU+1.)*np.log1p(values**2/(NU*sigma**2))
+        return float(np.mean(nll))
+    photometry_metrics=[]
+    for fi,band in enumerate(run.FILTERS):
+        use=valid[:,fi,:]
+        n_measurements=int(use.sum())
+        photometry_metrics.append({
+            "filter":band,
+            "n_stars":int(np.count_nonzero(use.any(axis=1))),
+            "n_measurements":n_measurements,
+            "nmad_no_ice_mmag":robust_nmad(no_ice_residual[:,fi,:][use]),
+            "nmad_rcs_only_tmm_mmag":robust_nmad(base_residual[:,fi,:][use]),
+            "nmad_joint_mmag":robust_nmad(joint_residual[:,fi,:][use]),
+            "mean_student_nll_no_ice":student_nll_per_measurement(no_ice_residual,fi),
+            "mean_student_nll_rcs_only":student_nll_per_measurement(base_residual,fi),
+            "mean_student_nll_joint":student_nll_per_measurement(joint_residual,fi),
+        })
+    for row in photometry_metrics:
+        row["delta_mean_log_likelihood_joint_minus_rcs_only_per_measurement"]=(
+            row["mean_student_nll_rcs_only"]-row["mean_student_nll_joint"]
+        )
+    photometry_metrics_frame=pd.DataFrame(photometry_metrics)
+    photometry_metrics_path=Path(__file__).resolve().parent/"wfi02_car201_residual_metrics.csv"
+    photometry_metrics_frame.to_csv(photometry_metrics_path,index=False,float_format="%.8g")
+    print("WFI02 CAR201 residual metrics (mmag NMAD; mean Student-t NLL per measurement):")
+    print(photometry_metrics_frame.to_string(index=False,float_format=lambda value:f"{value:.5g}"))
+    total_photometry_delta_loglike=float(np.sum(
+        photometry_metrics_frame[
+            "delta_mean_log_likelihood_joint_minus_rcs_only_per_measurement"
+        ]
+        * photometry_metrics_frame["n_measurements"]
+    ))
+    print("Total WFI02 CAR201 joint-minus-RCS-only log likelihood:",total_photometry_delta_loglike)
+    print("Wrote",photometry_metrics_path)
     # Figure styling and layout mirror the original paper panel: two columns,
     # four filter rows, shared axes, one shared y label, and full history span.
     reset_dates=mdates.date2num(Time(reference_mjd+reset_days,format="mjd",scale="utc").to_datetime())
@@ -645,8 +748,8 @@ def plot_car201_model_data() -> tuple[Path, Path]:
     figure.supxlabel("UTC date", fontsize=PLOT_FONT_SIZE, y=0.035)
     handles=[
         Line2D([0],[0],marker="o",linestyle="none",color="black",markersize=3,label="Observed CAR201"),
-        Line2D([0],[0],color=blue,linestyle="--",linewidth=1.0,label="Base TMM + RCS-only ice"),
-        Line2D([0],[0],color=orange,linewidth=1.0,label="Joint fit (16–84% band)"),
+        Line2D([0],[0],color=blue,linestyle="--",linewidth=1.0,label="RCS-only TMM"),
+        Line2D([0],[0],color=orange,linewidth=1.0,label="Joint RCS + stellar (16–84% band)"),
         Line2D([0],[0],color="0.35",linestyle=":",linewidth=.8,label="Decon2 reset"),
         Line2D([0],[0],color="0.35",linestyle="-.",linewidth=.8,label="Decon3 reset"),
         Line2D([0],[0],color="0.45",linestyle="--",linewidth=.8,label="Post-roll transition"),
@@ -698,9 +801,9 @@ def plot_complex_reflectance() -> tuple[Path, Path]:
         gridspec_kw={"height_ratios": [1.0, 0.9], "hspace": 0.08},
     )
     axes[0].plot(reciprocal_wave[order], np.abs(base[0, order]), color="#1f77b4",
-                 linestyle="--", linewidth=1.1, label="Unmodulated ice-free TMM")
+                 linestyle="--", linewidth=1.1, label="RCS-only TMM")
     axes[0].plot(reciprocal_wave[order], np.abs(joint[0, order]), color="#d95f02",
-                 linewidth=1.1, label="Modulated ice-free reflection")
+                 linewidth=1.1, label="Joint RCS + stellar")
     axes[1].plot(reciprocal_wave[order], base_phase[order], color="#1f77b4",
                  linestyle="--", linewidth=1.1)
     axes[1].plot(reciprocal_wave[order], joint_phase[order], color="#d95f02", linewidth=1.1)

@@ -16,10 +16,9 @@ providing complementary wavelength information between and around the LED
 bands. Together, these observations can constrain both the time evolution of
 ice and the detector's broader spectral response.
 
-This paper first describes the measurements and their reduction, then develops
-the optical and ice-deposition model used with RCS data. It next explains the
-RCS-only ice-thickness histories and how broad-band stellar photometry extends
-that physical model. Results and limitations follow.
+This paper describes the observations and their reduction, develops the optical
+and ice-deposition model, and presents RCS-only TMM and Joint RCS + stellar fits.
+The results compare the fits and discuss their limitations.
 
 ## 2. Observational Data and Reduction
 
@@ -187,14 +186,14 @@ arcsecond, have no other 2MASS candidate within two arcseconds, and not be
 shared with another Gaia source. 2MASS quality flags are used to exclude
 individual band measurements.
 
-For the stellar SED fits, a catalog measurement must have a finite magnitude
-and finite positive uncertainty. The photometry catalogue retains
-single-detection Pan-STARRS measurements and does not impose an upper cut on
-ordinary magnitude errors. A 2MASS band is used only with an accepted quality
+For the stellar SED fits, a photometric measurement must have a finite magnitude
+and finite positive uncertainty. The photometry catalog retains single-detection
+Pan-STARRS measurements and does not impose an upper cut on ordinary photometric
+uncertainties. A 2MASS band is used only with an accepted quality
 flag, valid uncertainty, and no contamination flag. The poor-profile-fit `E`
 flag is retained but recorded. Upper-limit `U` measurements are not used as
 detections, and `F` or `X` values do not supply a usable measurement and error.
-A 2MASS error value of 8 mag or larger is treated as a catalogue flag rather
+A 2MASS uncertainty value of 8 mag or larger is treated as a catalogue flag rather
 than a statistical uncertainty. These checks exclude individual bands; they
 do not remove the source from the SED sample.
 
@@ -202,7 +201,7 @@ For the joint ice fit, measurements are matched by source, filter, and visit.
 The first eleven visits through 31 October 2026 are used. Observations with
 the Roman `DO_NOT_USE` bit (mask value 1) or `SATURATED` bit (mask value 2)
 set are excluded. A source is excluded entirely if any of its measurements is
-saturated; other DQ bits do not trigger exclusion. Retained rows must have finite magnitudes and positive finite errors.
+saturated; other DQ bits do not trigger exclusion. Retained rows must have finite magnitudes and positive finite photometric uncertainties.
 Each source/filter group must have at least two visits, and each star must
 have a successful spectral-energy distribution (SED)
 estimate as described below.
@@ -261,21 +260,22 @@ The SED fits use nested sampling (`dynesty`), which maintains 80 active samples
 (called live points) and stops when the estimated remaining log evidence is
 below 1 ($\mathrm{dlogz}=1$). The resulting posterior draws are approximate. Each
 fitted star has 128 draws. A draw is a complete extincted spectrum, retaining
-correlations between wavelengths. Catalog magnitude uncertainties have a
-0.03 mag floor to account for calibration and model error. After magnitudes
-are converted to fluxes, measurement errors are treated as independent and
-Gaussian.
+correlations between wavelengths. A 0.03 mag floor is applied to photometric
+magnitude uncertainties to account for calibration and model error. After
+magnitudes are converted to fluxes, photometric uncertainties are treated as
+independent and Gaussian.
 
 The SED posterior conditions on the Fitzpatrick extinction law and selected
 atmosphere-model family, with uncertainty represented through the fitted
-stellar parameters. Of 52,173 fitted stars, 50,445 contribute zero usable
-2MASS bands and 1,441 contribute one or two. Their infrared SED constraints
-therefore depend strongly on the adopted atmosphere and extinction models.
-
-<span style="color: #b45309;"><strong>Amber follow-up — SED treatment:</strong>
-Please state how the 128 posterior spectra enter the CAR201 prediction and
-whether SED posterior uncertainty is propagated in the reported fit.
-</span>
+stellar parameters. For each star, the joint forward model reconstructs one
+photon spectrum from the posterior-median parameters and the BT-Settl grid. The
+128 posterior draws are used to obtain those medians, but predictions are not
+averaged over the draws; SED-parameter uncertainty is not propagated into the
+photometric likelihood. The likelihood does include the reported photometric
+uncertainties and fitted detector-level excess scatter. Of 52,173 fitted stars,
+50,445 contribute zero usable 2MASS bands and 1,441 contribute one or two. Their
+infrared SED constraints therefore depend strongly on the adopted atmosphere
+and extinction models.
 
 ## 3. Physical Model of Ice Deposition
 
@@ -345,8 +345,8 @@ and divided by the corresponding ice-free power. This gives one relative
 response per LED and ice thickness. Its logarithm is differenced from the first
 observation of that LED before comparison with the data.
 
-The modeled optical response depends on the AR coating, HgCdTe substrate, and
-deposited ice. We parameterize their optical properties separately below.
+The optical properties of the AR coating, HgCdTe substrate, and deposited ice
+are parameterized separately.
 
 #### Antireflection-Layer Parameters
 
@@ -363,7 +363,7 @@ The coating prior is centered on a three-layer starting design at `1050 nm`,
 with optical thickness near one quarter of that wavelength and a geometric
 sequence of indices based on nominal HgCdTe $n=3.6$. Thicknesses and indices
 are mapped to bounded fit coordinates; prior widths and physical bounds are
-given with the RCS-only fitting procedure.
+given with the RCS-only TMM fitting procedure.
 
 #### HgCdTe Parameters
 
@@ -380,7 +380,7 @@ $$
 
 Here $\alpha_n$ and $\alpha_k$ are constant log scales, and $\delta_n(\lambda)$
 and $\delta_k(\lambda)$ are smooth spectral adjustments. The corresponding
-priors are given with the RCS-only fitting procedure. These are effective
+priors are given for RCS-only TMM. These are effective
 optical-model parameters describing uncertainty in the adopted material model.
 
 #### Spectral Corrections to Optical Constants
@@ -399,14 +399,14 @@ coefficient priors are described in Section 4.
 
 #### Ice Optical Index and Incidence
 
-The baseline ice refractive index is $n=1.25+i0$. The initial full-TMM fit
-estimates one positive wavelength-independent scale per tile; later
-ice-thickness-history fits hold that state fixed. Ice is modeled as lossless,
-with $k=0$, at normal incidence.
+The baseline ice refractive index is $n=1.25+i0$. RCS-only TMM fits one
+positive wavelength-independent ice-index scale per tile. Joint RCS + stellar
+holds the RCS-only TMM optical state fixed. Ice is modeled as lossless, with
+$k=0$, at normal incidence.
 
 The optical model gives the detector response for a specified ice thickness.
-To predict how the RCS response evolves, we combine it with a time-dependent
-model of ice deposition onto the detector.
+This response is combined with a time-dependent ice-deposition model to predict
+its evolution in the RCS observations.
 
 ### Tile Ice-Deposition Rate and Thickness-History Model
 
@@ -420,8 +420,8 @@ $$
 $$
 
 The log ice-deposition rate is interpolated linearly between time nodes. Within
-reset segment $s$, integrating this rate gives the RCS-only ice-thickness
-history:
+reset segment $s$, integrating this rate gives the ice-thickness history in
+RCS-only TMM:
 
 $$
 d_{k,s}(t)=d_{0,k,s}+\int_{t_s}^{t}\exp[\widetilde q_{k,s}(u)]\,du,
@@ -471,10 +471,11 @@ $$
 
 The first group for each LED is the reference. The forward model predicts a
 relative log change by comparing the current and reference response for the
-same LED. Small fitted LED offsets, when used in the rapid update, apply only
-to non-reference groups.
+same LED. Small fitted LED offsets in the RCS-only TMM model apply only to
+non-reference groups.
 
-The parameter-dependent RCS Gaussian loss is
+The parameter-dependent part of the RCS negative log-likelihood (Gaussian
+loss), omitting terms constant across model predictions, is
 
 $$
 \mathcal{L}_{\mathrm{RCS}}=
@@ -486,13 +487,13 @@ Here $k$ indexes tiles, $g$ indexes LED/observation groups, $y_{kg}=S_{kg}/n_{kg
 is the corrected observed mean, and $m_{kg}$ is the predicted log change from
 that LED's first observation. The log-response noise scale is
 $\sigma_{\log}=0.005$. The weights $w_{kg}$ set the relative influence of each
-group. For the initial full-TMM fit and rapid update,
+group. In RCS-only TMM,
 $w_{kg}=1/(N_{\mathrm{tile}}\widetilde n)$, where $N_{\mathrm{tile}}$ is the
 number of fitted tiles and $\widetilde n$ is the median valid-pixel count
-across all groups. The joint-fit likelihood uses the alternative per-tile
+across all groups. The Joint RCS + stellar likelihood uses the alternative per-tile
 median-count weights defined in Section 5.
 
-The RCS-only MAP objective adds Gaussian prior penalties:
+The RCS-only TMM MAP objective adds Gaussian prior penalties:
 
 $$
 \mathcal{J}_{\mathrm{RCS-only}}(\theta)=
@@ -504,67 +505,39 @@ Here $\eta_j$ is a fitted parameter in its prior coordinate, with prior center
 $\mu_j$ and standard deviation $s_j$. The exact SSE separates into the
 data-only within-group scatter $Q-S^2/n$ and the model-dependent residual term.
 
-## 4. RCS Ice-Thickness-History Fitting
+## 4. RCS-only TMM Model
 
-The physical model relates changes in the RCS response to the ice thickness on
-each detector tile. Fitting that model to the observed six-LED time series
-estimates both the detector's optical properties and its ice-thickness history.
-The fitting procedure begins with a full-TMM fit, followed by rapid updates
-that hold the fitted optical state fixed.
+The RCS-only model uses the six LED time series to fit the full optical stack
+and each tile's ice-thickness history. It estimates the AR and HgCdTe properties,
+ice-index scale, spectral adjustments, and per-tile deposition trajectories
+together. The EMCEE search and constant-rate initialization below are fitting
+stages of this model.
 
-### Full-TMM Optical Fit and Initialization
+After fitting the optical state, the time-history evaluation uses precomputed
+per-LED TMM response curves as functions of ice thickness instead of repeatedly
+evaluating the full optical stack at each trajectory step.
 
-The full-TMM fit estimates the antireflection-layer parameters, HgCdTe
-optical-constant scales and smooth spectral corrections, the ice-index scale,
-and each tile's ice-thickness history. The initial MCMC search uses a
-constant-in-time ice-deposition rate. This reduces the number of trajectory
-parameters while the sampler explores the nonlinear posterior over optical
-parameters, ice thicknesses, and ice-deposition rate. Its high-posterior states
-identify promising likelihood basins for deterministic MAP refinement. The
-search supplies an optical-parameter starting region for the final fit. The
-resulting full-TMM optical state supplies the fixed response model used by rapid
-RCS updates.
+### RCS-only TMM Priors and Bounds
 
-### Rapid RCS Update with Precomputed Responses
+The model's parameterization, priors, and fixed conventions are:
 
-For a fast update, the optical parameters from the full transfer-matrix fit
-are held fixed. Repeated transfer-matrix and SED evaluations are replaced
-by six per-LED log-response curves as functions of ice thickness, evaluated on
-a grid from $0$ to $400\,\mathrm{nm}$ with spacing $\Delta d=0.25\,\mathrm{nm}$
-and interpolated during the fit. The fixed optical quantities are:
-
-- the three-layer AR parameters;
-- HgCdTe $n$ and $k$ scales;
-- ice-index state;
-- anchored AR/HgCdTe spectral modulation;
-- normal incidence.
-
-The rapid fit estimates each tile's ice-thickness history, reset response
-offsets, small per-LED log offsets, and node-wise ice-deposition rates.
-
-### RCS-Only Parameter Priors and Bounds
-
-The two RCS-only stages use independent per-tile ice-thickness histories and
-ice-deposition-rate trajectories. The rapid update holds the full-TMM optical
-state fixed and fits small LED offsets.
-
-| Quantity | Full-TMM RCS fit | Rapid RCS update |
-| --- | --- | --- |
-| AR thickness and real $n$ | Fit per tile within the physical bounds above; broad Gaussian around the 1050 nm quarter-wave design, standard deviation `10` in bounded coordinates | Fixed at full-TMM values |
-| AR absorption $k$ | Fixed at zero | Fixed at zero |
-| HgCdTe $n$ and $k$ scales | Independent positive scales per tile; zero-centered normal priors in log scale, standard deviation `0.25` | Fixed at full-TMM values |
-| AR $n$ and HgCdTe $n,k$ spectral adjustments | Six broad Gaussian wavelength modes anchored at 1050 nm; zero-centered normal priors in log scale, standard deviation `0.10` | Fixed at full-TMM values |
-| Ice real-index scale | Positive, wavelength-independent scale per tile; zero-centered normal prior in log scale, standard deviation `0.01` | Fixed at full-TMM value |
-| Ice absorption $k$ and incidence | Ice $k=0$; normal incidence | Ice $k=0$; normal incidence |
-| Initial and ordinary reset ice thickness | Positive per tile and reset segment; lognormal with median `10 nm` and log standard deviation `1.5` | Same parameterization and prior |
-| Post-Decon3 starting ice thickness | Positive per tile; lognormal with median `10 nm` and log standard deviation `1.5` | Centered per tile on the constant ice-deposition-rate preliminary estimate, with log standard deviation `0.10` |
-| Ice deposition rate | Positive, independent trajectory per tile; lognormal with median `12 nm/day` and log standard deviation `1.5` | Same parameterization and prior |
-| Post-reset response offset | One wavelength-independent log offset per tile and reset; zero-centered normal prior, standard deviation `0.1` | Same parameterization and prior |
-| Per-LED log offset | Fixed at zero | One additive offset per detector and LED; zero-centered normal prior, standard deviation `0.01` |
+| Quantity | RCS-only TMM parameterization, prior, or fixed convention |
+| --- | --- |
+| AR thickness and real $n$ | Fit per tile within the physical bounds above; broad Gaussian around the 1050 nm quarter-wave design, standard deviation `10` in bounded coordinates |
+| AR absorption $k$ | Fixed at zero |
+| HgCdTe $n$ and $k$ scales | Independent positive scales per tile; zero-centered normal priors in log scale, standard deviation `0.25` |
+| AR $n$ and HgCdTe $n,k$ spectral adjustments | Six broad Gaussian wavelength modes anchored at 1050 nm; zero-centered normal priors in log scale, standard deviation `0.10` |
+| Ice real-index scale | Positive, wavelength-independent scale per tile; zero-centered normal prior in log scale, standard deviation `0.01` |
+| Ice absorption $k$ and incidence | Ice $k=0$; normal incidence |
+| Initial and ordinary reset ice thickness | Positive per tile and reset segment; lognormal with median `10 nm` and log standard deviation `1.5` |
+| Post-Decon3 starting ice thickness | Positive per tile; lognormal with median `10 nm` and log standard deviation `1.5` |
+| Ice deposition rate | Positive, independent trajectory per tile; lognormal with median `12 nm/day` and log standard deviation `1.5` |
+| Post-reset response offset | One wavelength-independent log offset per tile and reset; zero-centered normal prior, standard deviation `0.1` |
+| Per-LED log offset | Fixed at zero |
 
 The AR prior width is specified in bounded fit coordinates.
 
-### Regularization and Optimization
+### EMCEE Search and MAP Optimization
 
 For observed data $D$ and model parameters $\theta$, the maximum a posteriori
 (MAP) estimate maximizes the posterior density, balancing agreement with the
@@ -576,30 +549,16 @@ $$
 =\arg\max_{\theta}p(D\mid\theta)\,p(\theta).
 $$
 
-Starting from the high-posterior region identified by MCMC, the fit proceeds in
-three stages:
+The EMCEE ensemble search begins with a constant-in-time ice-deposition rate,
+reducing the trajectory dimension while it explores the posterior over the
+optical stack, ice thicknesses, and deposition rate. High-posterior states
+identify promising likelihood basins. The best scalar rate is copied to every
+time node to initialize the non-parametric trajectory. The deterministic MAP
+fit then optimizes the full optical state and independent per-tile ice histories
+together against the RCS likelihood, with priors regularizing weakly constrained
+parameters.
 
-1. **Refine the full-TMM MAP fit.** The best constant-rate MCMC state initializes
-   the deterministic fit. Its scalar ice-deposition rate is copied to each time
-   node before those rates are allowed to vary independently. The MAP fit then
-   refines the optical parameters and per-node ice-deposition rates against the
-   RCS likelihood, with the priors regularizing parameters that the data
-   constrain weakly.
-2. **Estimate post-Decon3 starting thickness for the rapid fit.** The
-   post-Decon3 ice thickness is not determined by the event itself. Over the
-   observed post-event interval, a thicker residual film with slower subsequent
-    ice deposition can produce a response similar to a thinner starting film
-    with faster ice deposition. A constant ice-deposition-rate preliminary fit
-    estimates each tile's post-Decon3 starting ice thickness and provides
-    initial rate values for the rapid fit. Its thickness estimate centers the
-    rapid-fit prior for the post-Decon3 segment.
-3. **Fit the rapid time-varying ice-thickness history.** With the full-TMM
-   optical state held fixed, precomputed per-LED response curves are combined
-   with the RCS data to estimate independent ice-deposition rates at the time
-   nodes. Integrating those rates gives each tile's final ice-thickness history,
-   subject to the priors in the table above.
-
-The full-TMM MAP fit uses bounded trust-region reflective nonlinear least
+The RCS-only TMM MAP fit uses bounded trust-region reflective nonlinear least
 squares. Parameters are scaled by their prior widths so optical, thickness, and
 deposition-rate coordinates enter the optimization on comparable scales.
 Convergence is assessed from objective-change and parameter-step criteria; the
@@ -607,21 +566,21 @@ scaled-gradient norm is reported separately. Instrumental corrections enter
 through the corrected sufficient statistics, and each tile's ice-thickness
 history is estimated independently.
 
-## 5. Joint RCS and Stellar Photometry Model
+## 5. Joint RCS + stellar
 
-### Motivation for the Joint Model
+### Motivation
 
 The RCS measurements provide high-cadence constraints on ice evolution, but
 their spectral coverage is limited to six LED bands. Stellar photometry from
 CAR201 provides complementary measurements across eight broad filters, allowing
 the wavelength-dependent detector response to be constrained between and beyond
-the LED bands. Using the fixed full-TMM optical state as its baseline, the joint
-model extends the RCS-only fit by adding a smooth spectral modulation of the
-ice-free complex reflection and refining the RCS-derived ice-thickness
-histories. The fitted reflection modulation is propagated through the ice layer
-when predicting the measured counts.
+the LED bands. The joint model starts from the optical state and ice histories
+fitted by the RCS-only model. It adds a smooth spectral modulation of the ice-free
+complex reflection and refines the ice histories jointly against both data sets.
+The modulation is propagated through the ice layer when predicting measured
+counts.
 
-### Joint ice-free-reflection and photometric forward model
+### Joint RCS + stellar forward model
 
 For detector $d$, tile $k$, and wavelength $\lambda$, the modulated ice-free
 reflection is
@@ -783,21 +742,25 @@ group. For this data set the reference group contains EP3 passes 1--6 and EP4
 pass 1; the fitted post-roll offsets apply to
 EP4 passes 2--5. Each offset is fitted within bounds `+/-0.25`.
 
-Photometric residuals use a Student-t likelihood with four degrees of freedom.
-One additional scale $s_d$ is fitted for each detector and combined with the
-catalog uncertainty $\sigma_i$ as
+Photometric residuals use a Student-$t$ likelihood with four degrees of freedom.
+Let $\sigma_{i,\mathrm{phot}}$ be the reported photometric measurement
+uncertainty for measurement $i$, in millimagnitudes. Each detector $d$ also has
+one fitted detector-level excess photometric scatter term
+$\sigma_{\mathrm{det},d}$, in millimagnitudes. Their combination gives the
+effective width used for each measurement:
 
 $$
-\sigma_{i,\mathrm{eff}}=\sqrt{\sigma_{i,\mathrm{catalog}}^2+s_d^2}.
+\sigma_{i,\mathrm{eff}}=
+\sqrt{\sigma_{i,\mathrm{phot}}^2+\sigma_{\mathrm{det},d}^2}.
 $$
 
-The joint model uses a single fitted scale $s_d$ per detector, shared
-across its valid photometry rows. This gives large residuals less weight than a
-Gaussian likelihood while retaining the catalog errors for well-fitting
-observations. The detector's modulation coefficients and tile ice-thickness histories
-are fitted against both data sets.
+The fitted $\sigma_{\mathrm{det},d}$ is shared across all valid photometry rows
+on detector $d$. The Student-$t$ likelihood gives large residuals less weight
+than a Gaussian likelihood while retaining the reported photometric uncertainty
+for well-fitting observations. The detector's modulation coefficients and tile
+ice-thickness histories are fitted against both data sets.
 
-#### Joint Ice-Thickness-History Refinement
+#### Joint RCS + stellar Ice-History Refinement
 
 Each tile begins with the ice-thickness history fitted to RCS measurements
 alone. That history is evaluated at all RCS and stellar observation times and
@@ -809,7 +772,7 @@ Reset times stay fixed and the post-reset response offsets are retained.
 
 The log deposition-rate factors and reset-segment starting-thickness
 adjustments are centered on the starting RCS-derived ice-thickness history.
-Their prior widths and bounds are listed in the joint-model parameter table
+Their prior widths and bounds are listed in the Joint RCS + stellar parameter table
 below. Each tile has an independent thickness history.
 
 The numerical construction is interval-based. The starting ice-thickness
@@ -823,11 +786,11 @@ spaced from its first to last baseline time. Segment starts are scaled by a
 positive exponential adjustment, with controls evaluated within each segment.
 
 The RCS LED measurements provide the starting histories and also enter the
-joint likelihood, so the RCS comparison is in-sample. The two-day adjustment
+Joint RCS + stellar likelihood, so the RCS comparison is in-sample. The two-day adjustment
 spacing, observation cadence, measurement sensitivity, and priors limit the
 temporal detail the fit can resolve.
 
-#### Joint-Model Priors and Bounds
+#### Joint RCS + stellar: Priors and Bounds
 
 | Quantity | Parameterization | Prior, bounds, or fixed convention |
 | --- | --- | --- |
@@ -838,12 +801,12 @@ temporal detail the fit can resolve.
 | Post-reset response offsets | Fixed from the starting RCS-derived ice-thickness history; one per tile and reset | Retained at their RCS-only MAP values |
 | Post-roll offset $\zeta_f$ | One log-response offset per filter; zero in the pre-roll group | Fitted within bounds `+/-0.25` |
 | Star/filter location $\mu_{sf}$ | Robust residual location profiled separately for every star/filter group | Profiled under the Student-$t$ likelihood |
-| Extra scale $s_d$ | One positive Student-$t$ scale per detector, added in quadrature to catalog error | Fitted within bounds $10^{-4}$--$100$ mmag |
+| Detector-level excess photometric scatter $\sigma_{\mathrm{det},d}$ | One positive scatter term per detector, added in quadrature to reported photometric uncertainty | Fitted within bounds $10^{-4}$--$100$ mmag |
 
-#### Joint Objective
+#### Joint RCS + stellar Objective
 
-The joint objective combines the RCS and stellar-photometry data terms with
-the joint-fit penalties:
+The Joint RCS + stellar objective combines the RCS and stellar-photometry data
+terms with its regularization penalties:
 
 $$
 \mathcal{J}_{\mathrm{joint}}=
@@ -855,7 +818,7 @@ $$
 \mathcal{P}_{\mathrm{phase}}.
 $$
 
-The joint fit uses the same group-mean Gaussian RCS loss defined in the RCS
+Joint RCS + stellar uses the same group-mean Gaussian RCS loss defined in the RCS
 Sufficient Statistics and Likelihood section, with joint-fit weight
 $w_{kg}=1/\widetilde n_k$ and
 $\widetilde n_k=\operatorname{median}_g(n_{kg})$ for each tile. Thus each
@@ -882,31 +845,36 @@ $$
 The nuisance brightness $\mu_{sf}$ is profiled separately for each
 star/filter group under the Student-$t$ likelihood.
 
-Its Student-t scale is
+The effective Student-$t$ width is
 
 $$
-s_i=\sqrt{\sigma_{i,\mathrm{catalog}}^2+s_d^2},
+\sigma_{i,\mathrm{eff}}=
+\sqrt{\sigma_{i,\mathrm{phot}}^2+\sigma_{\mathrm{det},d}^2},
 $$
 
-where $s_d$ is the fitted extra scale for that detector. With fixed
-degrees-of-freedom $\nu=4$, the photometry term is
+where $\sigma_{i,\mathrm{phot}}$ is the reported photometric measurement
+uncertainty and $\sigma_{\mathrm{det},d}$ is the fitted detector-level excess
+photometric scatter. With fixed degrees-of-freedom $\nu=4$, the photometry term
+is
 
 $$
 \mathcal{L}_{\mathrm{phot}}=
 \sum_{i\in\mathrm{valid}}
 \left[
-\ln s_i+\frac{\nu+1}{2}
-\ln\!\left(1+\frac{e_i^2}{\nu s_i^2}\right)
+\ln\sigma_{i,\mathrm{eff}}+\frac{\nu+1}{2}
+\ln\!\left(1+\frac{e_i^2}{\nu\sigma_{i,\mathrm{eff}}^2}\right)
 \right].
 $$
 
-The fitted extra scale uses the bounds in the joint-model parameter table.
+The expression above is the parameter-dependent Student-$t$ negative
+log-likelihood (NLL); terms constant across model predictions are omitted. The
+detector-level excess photometric scatter uses the bounds in the Joint RCS +
+stellar parameter table.
 
 Let $a_{k,s}$ be the log adjustment to the starting ice thickness for tile $k$
 and reset segment $s$, and let $q_{k,s,j}$ be the log ice-deposition-rate
 multiplier at its two-day control point $j$. With prior widths $\tau_s$ and
-$\sigma_q$ from the
-joint-model parameter table, their prior penalty is
+$\sigma_q$ from the Joint RCS + stellar parameter table, their prior penalty is
 
 $$
 \mathcal{P}_{\mathrm{ice}}=
@@ -977,46 +945,48 @@ fixed-ice sensitivity tests of its effect on predicted photometry and then
 applied uniformly. The phase strength `100` sets the coefficient-shrinkage
 penalty; these three values control the regularization terms.
 
-The final joint objective is minimized directly as a scalar function using
+The final Joint RCS + stellar objective is minimized directly as a scalar function using
 bounded L-BFGS-B.
 
 ## 6. Results and Discussion
 
-The results compare RCS-only and joint-fit ice-thickness histories, their
-agreement with RCS and CAR201 stellar photometry, and the spectral change from
-modulation, using WFI02 tile 135 and the full WFI02 photometry sample.
+For WFI02, the joint fit improves in-sample agreement with RCS and reduces
+CAR201 residual scatter, most strongly in F062 and F213. The results first
+compare ice-thickness histories and RCS predictions, then examine CAR201
+photometry and spectral modulation. Appendix A extends these detector-level
+comparisons to all 18 detectors.
 
 ### RCS ice-thickness histories and fit agreement
 
-![Figure 3. RCS and joint-fit ice-thickness history and ice-deposition rate for representative WFI02 tile 135.](./figures/wfi02_representative_ice_history.png)
+![Figure 3. RCS-only TMM and Joint RCS + stellar ice-thickness histories and rates for representative WFI02 tile 135.](./figures/wfi02_representative_ice_history.png)
 
 **Figure 3. Ice-thickness history and ice-deposition rate for representative
-WFI02 tile 135.** The upper panel compares the constant ice-deposition-rate
-initialization (dashed purple), rapid RCS update (blue), and final joint RCS +
-stellar-photometry fit (orange). The lower panel shows the corresponding ice-deposition
-rates; the joint-fit ice-deposition rate is the derivative of its fitted
+WFI02 tile 135.** The upper panel compares the constant-rate preliminary fit (dashed
+purple), RCS-only TMM (blue), and Joint RCS + stellar (orange). The lower panel
+shows the corresponding ice-deposition rates; the Joint RCS + stellar rate is
+the derivative of its fitted
 ice-thickness history evaluated on a dense date grid.
 Dotted and dash-dot vertical lines mark Decon2 and Decon3, respectively; model
 curves are drawn separately across each reset. The displayed trajectories are MAP estimates.
 
-![Figure 4. Corrected RCS data and RCS-only and joint-modulated fits for WFI02 tile 135.](./figures/wfi02_tile135_rcs_model_data.png)
+![Figure 4. Corrected RCS data and the RCS-only TMM and Joint RCS + stellar fits for WFI02 tile 135.](./figures/wfi02_tile135_rcs_model_data.png)
 
 **Figure 4. RCS data and fits for WFI02 tile 135.** Each panel shows one LED.
-Black points with error bars are corrected group-mean log responses; purple
-dashed and blue curves show the constant ice-deposition-rate initialization and
-rapid RCS update.
-The orange curve is the final joint-modulated RCS prediction, using the fitted
+Black points with error bars are corrected group-mean log responses; the purple
+dashed curve shows the constant-rate preliminary fit and the blue curve shows RCS-only
+TMM. The orange curve shows Joint RCS + stellar, using the fitted
 complex-reflection adjustment and jointly refined tile ice-thickness history.
-It is an in-sample prediction because the same RCS observations enter the joint fit.
+It is an in-sample prediction because the same RCS observations enter Joint
+RCS + stellar.
 Model curves are evaluated on a denser date grid and split at the Decon2 and
 Decon3 resets.
 
-### CAR201 joint-fit data and predictions
+### CAR201 data and predictions
 
-The RCS examples are followed by the joint model's predictions across the eight
-CAR201 filters.
+The RCS examples are followed by Joint RCS + stellar predictions across the
+eight CAR201 filters.
 
-![Figure 5. Full WFI02 CAR201 data compared with base and joint-modulated model predictions.](./figures/wfi02_full_car201_model_data.png)
+![Figure 5. Full WFI02 CAR201 data compared with RCS-only TMM and Joint RCS + stellar predictions.](./figures/wfi02_full_car201_model_data.png)
 
 **Figure 5. CAR201 data and model predictions for WFI02.** The panels show
 all eight filters and all 33,645 valid measurements from 604 stars in the WFI02
@@ -1026,9 +996,10 @@ changes across stars; model summaries at each visit use the same observed-star
 cohort. For this display, the fitted post-roll offset is
 transferred from the model predictions to the observed values with the
 compensating sign, preserving the comparison residuals. The blue dashed curve
-is the unmodulated TMM prediction using RCS-only ice-thickness histories; the
-orange curve and band show the joint-modulated prediction using the jointly
-refined ice-thickness histories. The model curves omit the post-roll term.
+is the RCS-only TMM prediction using the RCS-derived ice-thickness histories;
+the orange curve and band show Joint RCS + stellar using the
+jointly refined histories and fitted spectral modulation. The model curves omit
+the post-roll term.
 Star/filter locations are profiled separately for each model. Dotted and dash-dot
 vertical lines mark Decon2 and Decon3, respectively; the dashed line marks the
 post-roll transition.
@@ -1036,15 +1007,72 @@ Between visits, model curves are evaluated on a 0.25-day grid using the nearest
 available pass for each source's tile assignment and split at the Decon2 and
 Decon3 resets.
 
-![Figure 6. Effect of joint spectral modulation on the ice-free WFI02 tile-135 complex reflection.](./figures/wfi02_tile135_complex_reflectance.png)
+For likelihood comparisons, define
+$\Delta\bar{\ell}_{J-R}=\bar{\ell}_{\mathrm{joint}}-\bar{\ell}_{\mathrm{RCS-only}}$.
+Positive values favor Joint RCS + stellar. CAR201 differences are per valid
+measurement and use the Student-$t$ data likelihood with the same reported
+photometric uncertainties and joint-fit detector scatter for both predictions;
+star/filter locations are profiled separately for each prediction. RCS
+differences are per LED/tile/observation group and equal half the RCS-only minus
+joint weighted $\chi^2$. These are data-likelihood comparisons, not differences
+in the full MAP objective including priors and regularization.
 
-**Figure 6. Effect of joint spectral modulation on the ice-free complex
+| Filter | $N$ | No-ice-correction reference NMAD (mmag) | RCS-only TMM NMAD (mmag) | Joint NMAD (mmag) | $\Delta\bar{\ell}_{J-R}$/obs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| F062 | 4,211 | 12.92 | 7.72 | 6.15 | +0.210 |
+| F087 | 4,206 | 14.76 | 4.82 | 4.32 | +0.095 |
+| F106 | 4,207 | 7.74 | 3.96 | 3.92 | +0.006 |
+| F129 | 4,204 | 20.32 | 3.58 | 3.49 | +0.010 |
+| F158 | 4,207 | 6.63 | 3.59 | 3.52 | +0.012 |
+| F184 | 4,201 | 10.96 | 4.39 | 4.24 | +0.025 |
+| F146 | 4,204 | 3.68 | 2.47 | 2.47 | -0.0001 |
+| F213 | 4,205 | 11.22 | 7.98 | 6.69 | +0.226 |
+
+**Table 1. WFI02 CAR201 residual metrics.** The no-ice-correction reference
+applies no modeled ice-response correction, so its predicted reference-relative
+change is zero; physical ice is present on the detector.
+NMAD (mmag) is $1.4826$ times the
+median absolute deviation after profiling per-star/filter locations.
+$\Delta\bar{\ell}_{J-R}$/observation is Joint RCS + stellar minus RCS-only TMM
+$\nu=4$ Student-$t$ data log likelihood; positive favors Joint RCS + stellar.
+Both predictions use the same
+roll-adjusted photometry and reported photometric uncertainties, with the
+detector-level excess photometric scatter held at its joint-fit estimate.
+Locations are profiled separately for each model. These are in-sample results.
+
+| LED/filter | Groups | RCS-only TMM $\chi^2$/group | Joint $\chi^2$/group | $\Delta\bar{\ell}_{J-R}$/group |
+| --- | ---: | ---: | ---: | ---: |
+| 1/F062 | 34,816 | 0.05679 | 0.04371 | +0.006542 |
+| 2/F087 | 34,816 | 0.05076 | 0.04219 | +0.004285 |
+| 3/F106 | 34,816 | 0.01280 | 0.01054 | +0.001127 |
+| 4/F129 | 34,816 | 0.01935 | 0.01909 | +0.000130 |
+| 5/F158 | 34,816 | 0.01771 | 0.01522 | +0.001247 |
+| 6/F184 | 34,560 | 0.01098 | 0.00880 | +0.001093 |
+
+**Table 2. WFI02 RCS likelihood by LED.** Values are production-weighted
+$\chi^2$/group across 256 tiles. $\Delta\bar{\ell}_{J-R}$ is the joint minus
+RCS-only TMM log likelihood per group, equal to half the RCS-only TMM minus
+Joint RCS + stellar $\chi^2$ per group; positive favors Joint RCS + stellar.
+These are in-sample.
+
+Across 208,640 RCS groups, weighted $\chi^2$ falls from 5,860.2 to 4,856.3
+($\Delta\log L_{J-R}=+501.9$). Across 33,645 CAR201 measurements, the joint
+photometric log-likelihood gain is $+2,457.3$. Relative to the no-ice-correction
+reference, the RCS-only fit lowers NMAD in all eight filters. The joint fit adds
+the largest reductions at F062 (20\%) and F213 (16\%); F146 is essentially
+unchanged. These in-sample metrics summarize the improvement and remaining
+residual scatter for WFI02; the 2.47–6.69 mmag NMAD is not a calibrated
+prediction interval.
+
+![Figure 6. Effect of Joint RCS + stellar spectral modulation on the ice-free WFI02 tile-135 complex reflection.](./figures/wfi02_tile135_complex_reflectance.png)
+
+**Figure 6. Effect of Joint RCS + stellar spectral modulation on the ice-free complex
 reflection.** The panels show the amplitude and unwrapped phase of the ice-free
-reflection for representative WFI02 tile 135, before modulation (blue dashed,
-the unmodulated ice-free reference) and after the final joint-fit modulation
-(orange, the modulated ice-free reflection). The same fixed full-TMM tile state
-is used for both curves; the fitted detector-wide modulation multiplies the
-unmodulated ice-free reflection by $\exp[g(\lambda)+i\phi(\lambda)]$. The
+reflection for representative WFI02 tile 135, for RCS-only TMM (blue dashed)
+and Joint RCS + stellar after spectral modulation (orange). Both use the
+optical state fitted by RCS-only TMM. The Joint RCS + stellar modulation
+multiplies the unmodulated ice-free reflection by
+$\exp[g(\lambda)+i\phi(\lambda)]$. The
 horizontal axes show reciprocal wavelength and wavelength over the 470--2335 nm
 effective-area support. The phase branches are aligned at the longest
 wavelength, retaining the fitted phase shift. Both curves are MAP spectra of
@@ -1065,6 +1093,305 @@ intrinsic spectra to a maximum fractional difference below
 $4\times10^{-10}$. This comparison provides a qualitative cross-check of the
 fitted stellar spectra.
 
+## Appendix A. Detector Comparison: RCS-only TMM and Joint RCS + stellar
+
+The likelihood convention defined above applies throughout this appendix; a
+positive $\Delta\bar{\ell}_{J-R}$ favors the joint fit. Across all detectors,
+the joint fit has higher total CAR201 and RCS data log likelihood than
+RCS-only TMM. CAR201 NMAD is lower in 127 of 144 detector/filter combinations,
+with at least five improved filters on every detector. RCS weighted $\chi^2$
+is lower in 93 of 108 detector/LED groups.
+
+The no-ice-correction reference sets the modeled ice-response correction to
+zero while physical ice is present. Relative to this reference,
+the RCS-only fit lowers NMAD in all 144 detector/filter combinations. Across
+detectors, median relative decreases are largest at F129 (80.0%) and F087
+(73.5%). Relative to RCS-only TMM, the joint fit lowers NMAD in 127/144
+combinations, with the largest median decreases at the bluest filter F062
+(21.5%) and reddest filter F213 (16.5%). Pooled mean log-likelihood gains per
+CAR201 measurement are also largest at F062 (+0.225) and F213 (+0.201); F087
+is next (+0.116).
+WFI02 illustrates the overall direction: its CAR201 NMAD is lower in seven of
+eight filters, all six RCS LED weighted $\chi^2$ values improve, and its CAR201
+log-likelihood gain is close to the detector median. Its RCS log-likelihood
+gain is the largest per-group gain among the 18 detectors, about 2.4 times the
+cross-detector median.
+
+| Detector | Filter | $N$ | No-ice-correction NMAD (mmag) | RCS-only TMM NMAD (mmag) | Joint NMAD (mmag) | $\Delta\bar{\ell}_{J-R}$/obs |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| WFI01 | F062 | 4,597 | 14.96 | 9.32 | 7.62 | +0.18572 |
+|  | F087 | 4,601 | 33.74 | 5.49 | 5.03 | +0.05818 |
+|  | F106 | 4,603 | 5.73 | 4.51 | 4.48 | +0.00982 |
+|  | F129 | 4,605 | 17.54 | 4.47 | 4.36 | +0.01685 |
+|  | F146 | 4,601 | 7.20 | 2.98 | 2.97 | +0.00824 |
+|  | F158 | 4,604 | 12.07 | 4.18 | 4.11 | +0.01398 |
+|  | F184 | 4,604 | 8.49 | 5.36 | 5.45 | -0.00699 |
+|  | F213 | 4,604 | 16.08 | 7.84 | 6.75 | +0.13829 |
+| WFI02 | F062 | 4,211 | 12.92 | 7.72 | 6.15 | +0.20994 |
+|  | F087 | 4,206 | 14.76 | 4.82 | 4.32 | +0.09453 |
+|  | F106 | 4,207 | 7.74 | 3.96 | 3.92 | +0.00648 |
+|  | F129 | 4,204 | 20.32 | 3.58 | 3.49 | +0.01015 |
+|  | F146 | 4,204 | 3.68 | 2.47 | 2.47 | -0.00009 |
+|  | F158 | 4,207 | 6.63 | 3.59 | 3.52 | +0.01185 |
+|  | F184 | 4,201 | 10.96 | 4.39 | 4.24 | +0.02547 |
+|  | F213 | 4,205 | 11.22 | 7.98 | 6.69 | +0.22573 |
+| WFI03 | F062 | 4,576 | 8.96 | 7.06 | 5.65 | +0.20461 |
+|  | F087 | 4,574 | 12.01 | 4.96 | 3.89 | +0.23156 |
+|  | F106 | 4,566 | 4.44 | 3.38 | 3.32 | +0.00846 |
+|  | F129 | 4,562 | 15.32 | 3.31 | 3.16 | +0.03723 |
+|  | F146 | 4,552 | 3.06 | 2.22 | 2.15 | +0.03909 |
+|  | F158 | 4,556 | 4.90 | 3.06 | 3.05 | +0.00857 |
+|  | F184 | 4,564 | 9.97 | 4.46 | 3.98 | +0.11316 |
+|  | F213 | 4,573 | 8.85 | 8.02 | 6.39 | +0.27459 |
+| WFI04 | F062 | 4,568 | 12.81 | 8.25 | 5.92 | +0.27906 |
+|  | F087 | 4,564 | 23.55 | 4.37 | 4.17 | +0.04559 |
+|  | F106 | 4,564 | 7.81 | 3.66 | 3.39 | +0.05057 |
+|  | F129 | 4,568 | 17.46 | 3.49 | 3.26 | +0.03120 |
+|  | F146 | 4,549 | 3.35 | 2.30 | 2.20 | +0.03268 |
+|  | F158 | 4,560 | 6.58 | 3.30 | 3.18 | +0.02832 |
+|  | F184 | 4,560 | 10.14 | 3.94 | 3.93 | +0.00225 |
+|  | F213 | 4,556 | 12.77 | 6.77 | 5.55 | +0.20086 |
+| WFI05 | F062 | 4,240 | 10.67 | 7.11 | 5.54 | +0.22710 |
+|  | F087 | 4,247 | 21.08 | 3.94 | 3.67 | +0.06096 |
+|  | F106 | 4,250 | 6.26 | 3.45 | 3.46 | +0.00680 |
+|  | F129 | 4,248 | 16.82 | 3.11 | 3.04 | +0.00868 |
+|  | F146 | 4,245 | 3.38 | 2.03 | 2.03 | -0.00173 |
+|  | F158 | 4,250 | 6.01 | 2.96 | 2.88 | +0.01188 |
+|  | F184 | 4,246 | 9.26 | 4.05 | 3.88 | +0.01797 |
+|  | F213 | 4,249 | 11.59 | 6.83 | 5.64 | +0.22590 |
+| WFI06 | F062 | 4,468 | 9.78 | 7.52 | 5.50 | +0.29405 |
+|  | F087 | 4,482 | 11.57 | 5.33 | 3.80 | +0.31330 |
+|  | F106 | 4,485 | 4.43 | 3.41 | 3.26 | +0.02970 |
+|  | F129 | 4,493 | 16.97 | 3.55 | 3.17 | +0.08273 |
+|  | F146 | 4,492 | 3.77 | 2.44 | 2.20 | +0.12218 |
+|  | F158 | 4,498 | 5.01 | 3.05 | 2.94 | +0.02830 |
+|  | F184 | 4,492 | 12.18 | 4.18 | 3.84 | +0.05528 |
+|  | F213 | 4,492 | 9.94 | 7.79 | 5.85 | +0.35416 |
+| WFI07 | F062 | 3,800 | 11.22 | 7.13 | 5.94 | +0.18376 |
+|  | F087 | 3,818 | 23.90 | 4.12 | 3.86 | +0.04588 |
+|  | F106 | 3,806 | 5.63 | 3.39 | 3.30 | +0.02925 |
+|  | F129 | 3,787 | 15.26 | 3.17 | 3.04 | +0.01587 |
+|  | F146 | 3,779 | 3.56 | 2.02 | 2.00 | +0.00488 |
+|  | F158 | 3,771 | 6.97 | 3.03 | 2.98 | +0.01856 |
+|  | F184 | 3,792 | 7.46 | 3.98 | 3.81 | +0.02223 |
+|  | F213 | 3,805 | 11.70 | 6.57 | 5.17 | +0.23187 |
+| WFI08 | F062 | 4,454 | 9.42 | 7.10 | 5.27 | +0.28040 |
+|  | F087 | 4,462 | 15.50 | 3.97 | 3.78 | +0.03696 |
+|  | F106 | 4,463 | 5.52 | 3.32 | 3.29 | +0.01261 |
+|  | F129 | 4,463 | 16.77 | 3.12 | 3.08 | +0.01444 |
+|  | F146 | 4,459 | 3.52 | 2.04 | 2.04 | +0.00545 |
+|  | F158 | 4,460 | 6.25 | 2.94 | 2.88 | +0.01068 |
+|  | F184 | 4,460 | 10.83 | 3.83 | 3.79 | +0.01662 |
+|  | F213 | 4,460 | 12.48 | 7.07 | 5.29 | +0.32156 |
+| WFI09 | F062 | 3,157 | 10.52 | 6.71 | 5.31 | +0.18798 |
+|  | F087 | 3,156 | 18.56 | 4.57 | 3.61 | +0.18504 |
+|  | F106 | 3,155 | 4.89 | 3.21 | 3.26 | -0.00747 |
+|  | F129 | 3,159 | 14.51 | 3.17 | 3.01 | +0.04292 |
+|  | F146 | 3,153 | 3.70 | 2.09 | 1.92 | +0.08140 |
+|  | F158 | 3,152 | 6.43 | 2.86 | 2.81 | +0.02669 |
+|  | F184 | 3,144 | 8.57 | 3.82 | 3.80 | +0.00567 |
+|  | F213 | 3,155 | 9.69 | 6.48 | 5.44 | +0.20315 |
+| WFI10 | F062 | 4,436 | 12.67 | 8.67 | 6.68 | +0.24208 |
+|  | F087 | 4,441 | 24.53 | 5.03 | 4.74 | +0.02697 |
+|  | F106 | 4,439 | 7.89 | 4.46 | 4.35 | +0.01250 |
+|  | F129 | 4,435 | 20.13 | 4.17 | 4.12 | +0.00963 |
+|  | F146 | 4,440 | 4.62 | 3.03 | 2.94 | +0.01046 |
+|  | F158 | 4,440 | 7.79 | 4.10 | 4.05 | +0.01292 |
+|  | F184 | 4,442 | 13.36 | 5.47 | 5.23 | +0.02531 |
+|  | F213 | 4,448 | 17.33 | 6.76 | 6.19 | +0.06512 |
+| WFI11 | F062 | 4,111 | 11.26 | 7.33 | 5.98 | +0.19174 |
+|  | F087 | 4,111 | 16.96 | 4.67 | 4.26 | +0.05606 |
+|  | F106 | 4,109 | 6.04 | 3.59 | 3.63 | -0.00229 |
+|  | F129 | 4,114 | 18.72 | 3.40 | 3.34 | +0.01157 |
+|  | F146 | 4,112 | 3.34 | 2.35 | 2.36 | +0.00108 |
+|  | F158 | 4,110 | 5.93 | 3.31 | 3.26 | +0.01021 |
+|  | F184 | 4,107 | 12.81 | 4.28 | 4.28 | -0.00082 |
+|  | F213 | 4,104 | 12.31 | 7.44 | 5.82 | +0.24378 |
+| WFI12 | F062 | 4,448 | 9.94 | 7.35 | 5.45 | +0.29628 |
+|  | F087 | 4,448 | 18.00 | 5.14 | 3.76 | +0.34994 |
+|  | F106 | 4,450 | 5.79 | 3.19 | 3.25 | -0.00865 |
+|  | F129 | 4,452 | 15.02 | 3.06 | 2.98 | +0.02637 |
+|  | F146 | 4,453 | 2.94 | 2.10 | 2.06 | +0.02504 |
+|  | F158 | 4,457 | 5.49 | 2.91 | 2.83 | +0.01538 |
+|  | F184 | 4,457 | 9.74 | 3.68 | 3.66 | +0.02214 |
+|  | F213 | 4,455 | 10.20 | 6.30 | 5.12 | +0.19872 |
+| WFI13 | F062 | 4,137 | 11.79 | 7.56 | 5.65 | +0.25182 |
+|  | F087 | 4,134 | 14.60 | 4.23 | 3.93 | +0.04094 |
+|  | F106 | 4,118 | 5.77 | 3.41 | 3.36 | +0.00544 |
+|  | F129 | 4,122 | 21.10 | 3.39 | 3.34 | +0.01888 |
+|  | F146 | 4,110 | 3.61 | 2.28 | 2.26 | +0.00584 |
+|  | F158 | 4,123 | 5.63 | 3.33 | 3.21 | +0.02421 |
+|  | F184 | 4,125 | 13.57 | 3.99 | 4.00 | +0.00022 |
+|  | F213 | 4,124 | 15.12 | 6.15 | 5.27 | +0.13951 |
+| WFI14 | F062 | 4,174 | 11.50 | 7.60 | 5.59 | +0.26886 |
+|  | F087 | 4,174 | 14.75 | 4.61 | 3.79 | +0.15738 |
+|  | F106 | 4,179 | 7.26 | 3.49 | 3.46 | +0.00415 |
+|  | F129 | 4,178 | 19.36 | 3.05 | 3.02 | +0.00971 |
+|  | F146 | 4,174 | 2.99 | 1.99 | 2.01 | +0.00325 |
+|  | F158 | 4,178 | 5.84 | 3.06 | 2.98 | +0.01595 |
+|  | F184 | 4,187 | 12.13 | 4.13 | 4.12 | +0.00298 |
+|  | F213 | 4,182 | 13.46 | 5.77 | 5.10 | +0.12791 |
+| WFI15 | F062 | 4,352 | 8.35 | 6.65 | 5.45 | +0.16852 |
+|  | F087 | 4,349 | 14.34 | 4.10 | 3.78 | +0.07408 |
+|  | F106 | 4,350 | 4.77 | 3.22 | 3.17 | +0.00298 |
+|  | F129 | 4,335 | 17.31 | 3.09 | 2.96 | +0.03270 |
+|  | F146 | 4,331 | 3.82 | 2.02 | 2.01 | +0.00950 |
+|  | F158 | 4,334 | 4.63 | 2.87 | 2.78 | +0.01158 |
+|  | F184 | 4,324 | 13.39 | 3.84 | 3.85 | -0.00185 |
+|  | F213 | 4,326 | 11.89 | 5.98 | 4.97 | +0.18878 |
+| WFI16 | F062 | 4,435 | 10.37 | 6.73 | 4.93 | +0.27322 |
+|  | F087 | 4,424 | 19.02 | 3.61 | 3.44 | +0.03038 |
+|  | F106 | 4,431 | 4.33 | 3.29 | 3.20 | +0.01899 |
+|  | F129 | 4,430 | 19.16 | 2.99 | 2.83 | +0.02931 |
+|  | F146 | 4,430 | 4.13 | 2.01 | 1.94 | +0.03058 |
+|  | F158 | 4,430 | 5.37 | 3.06 | 2.81 | +0.05501 |
+|  | F184 | 4,424 | 12.94 | 3.71 | 3.74 | -0.00342 |
+|  | F213 | 4,422 | 15.01 | 6.12 | 5.18 | +0.17511 |
+| WFI17 | F062 | 3,926 | 9.50 | 6.81 | 6.01 | +0.12658 |
+|  | F087 | 3,923 | 16.53 | 4.53 | 4.23 | +0.10113 |
+|  | F106 | 3,925 | 4.23 | 3.87 | 4.03 | +0.03755 |
+|  | F129 | 3,925 | 18.65 | 3.74 | 3.59 | +0.09215 |
+|  | F146 | 3,917 | 4.91 | 2.54 | 2.76 | +0.04810 |
+|  | F158 | 3,925 | 6.28 | 3.63 | 3.61 | +0.02909 |
+|  | F184 | 3,927 | 10.39 | 4.65 | 5.02 | -0.00981 |
+|  | F213 | 3,923 | 13.54 | 6.39 | 5.80 | +0.14124 |
+| WFI18 | F062 | 3,575 | 11.46 | 6.64 | 5.83 | +0.13861 |
+|  | F087 | 3,573 | 28.26 | 4.65 | 3.89 | +0.17893 |
+|  | F106 | 3,572 | 5.47 | 3.71 | 3.68 | +0.05488 |
+|  | F129 | 3,562 | 9.48 | 3.63 | 3.34 | +0.10570 |
+|  | F146 | 3,558 | 3.50 | 2.32 | 2.34 | +0.11484 |
+|  | F158 | 3,557 | 8.39 | 3.37 | 3.23 | +0.07156 |
+|  | F184 | 3,557 | 6.45 | 4.39 | 4.69 | +0.00919 |
+|  | F213 | 3,551 | 11.30 | 6.16 | 5.54 | +0.14646 |
+
+**Table A1. CAR201 residual metrics by detector and filter.** Detector labels
+appear once at the start of each eight-filter block. The no-ice-correction
+reference applies zero modeled ice-response correction while physical ice is
+present. NMAD columns are in mmag; $N$ is the valid measurement count.
+$\Delta\bar{\ell}_{J-R}$/obs is Joint RCS + stellar minus RCS-only TMM Student-$t$
+log likelihood per measurement; positive favors Joint RCS + stellar. The same
+reported photometric uncertainties and detector-level excess scatter are used
+for both predictions, with star/filter locations profiled separately. These are
+in-sample comparisons.
+
+| Detector | LED | Filter | Groups | RCS-only TMM $\chi^2$/group | Joint $\chi^2$/group | $\Delta\bar{\ell}_{J-R}$/group |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| WFI01 | 1 | F062 | 34,816 | 0.07328 | 0.05840 | +0.007439 |
+|  | 2 | F087 | 34,816 | 0.02492 | 0.02654 | -0.000811 |
+|  | 3 | F106 | 34,816 | 0.01340 | 0.01292 | +0.000239 |
+|  | 4 | F129 | 34,816 | 0.01083 | 0.01006 | +0.000388 |
+|  | 5 | F158 | 34,816 | 0.00683 | 0.00638 | +0.000220 |
+|  | 6 | F184 | 34,560 | 0.01032 | 0.00728 | +0.001518 |
+| WFI02 | 1 | F062 | 34,816 | 0.05679 | 0.04371 | +0.006542 |
+|  | 2 | F087 | 34,816 | 0.05076 | 0.04219 | +0.004285 |
+|  | 3 | F106 | 34,816 | 0.01280 | 0.01054 | +0.001127 |
+|  | 4 | F129 | 34,816 | 0.01935 | 0.01909 | +0.000130 |
+|  | 5 | F158 | 34,816 | 0.01771 | 0.01522 | +0.001247 |
+|  | 6 | F184 | 34,560 | 0.01098 | 0.00880 | +0.001093 |
+| WFI03 | 1 | F062 | 34,816 | 0.03479 | 0.03355 | +0.000619 |
+|  | 2 | F087 | 34,816 | 0.03768 | 0.03263 | +0.002524 |
+|  | 3 | F106 | 34,816 | 0.00821 | 0.00597 | +0.001119 |
+|  | 4 | F129 | 34,816 | 0.01092 | 0.01174 | -0.000408 |
+|  | 5 | F158 | 34,816 | 0.01423 | 0.01212 | +0.001056 |
+|  | 6 | F184 | 34,560 | 0.01220 | 0.00941 | +0.001395 |
+| WFI04 | 1 | F062 | 34,816 | 0.06202 | 0.05668 | +0.002669 |
+|  | 2 | F087 | 34,816 | 0.05954 | 0.05466 | +0.002441 |
+|  | 3 | F106 | 34,816 | 0.01495 | 0.01411 | +0.000420 |
+|  | 4 | F129 | 34,816 | 0.03583 | 0.03135 | +0.002238 |
+|  | 5 | F158 | 34,816 | 0.01905 | 0.01791 | +0.000569 |
+|  | 6 | F184 | 34,560 | 0.00987 | 0.01023 | -0.000179 |
+| WFI05 | 1 | F062 | 34,816 | 0.03029 | 0.02664 | +0.001827 |
+|  | 2 | F087 | 34,816 | 0.03950 | 0.03522 | +0.002137 |
+|  | 3 | F106 | 34,816 | 0.01251 | 0.01212 | +0.000193 |
+|  | 4 | F129 | 34,816 | 0.01894 | 0.01812 | +0.000409 |
+|  | 5 | F158 | 34,816 | 0.01251 | 0.01138 | +0.000566 |
+|  | 6 | F184 | 34,560 | 0.00982 | 0.00896 | +0.000427 |
+| WFI06 | 1 | F062 | 34,816 | 0.08457 | 0.08019 | +0.002189 |
+|  | 2 | F087 | 34,816 | 0.04572 | 0.04356 | +0.001082 |
+|  | 3 | F106 | 34,816 | 0.01450 | 0.01007 | +0.002218 |
+|  | 4 | F129 | 34,816 | 0.02007 | 0.01918 | +0.000442 |
+|  | 5 | F158 | 34,816 | 0.01896 | 0.01702 | +0.000973 |
+|  | 6 | F184 | 34,560 | 0.01321 | 0.01009 | +0.001559 |
+| WFI07 | 1 | F062 | 34,816 | 0.03425 | 0.02859 | +0.002826 |
+|  | 2 | F087 | 34,816 | 0.02174 | 0.01785 | +0.001944 |
+|  | 3 | F106 | 34,816 | 0.01076 | 0.01185 | -0.000542 |
+|  | 4 | F129 | 34,816 | 0.01125 | 0.01162 | -0.000189 |
+|  | 5 | F158 | 34,816 | 0.00957 | 0.00918 | +0.000195 |
+|  | 6 | F184 | 34,560 | 0.01083 | 0.00955 | +0.000643 |
+| WFI08 | 1 | F062 | 34,816 | 0.02846 | 0.02507 | +0.001694 |
+|  | 2 | F087 | 34,816 | 0.02598 | 0.02227 | +0.001856 |
+|  | 3 | F106 | 34,816 | 0.01160 | 0.01204 | -0.000222 |
+|  | 4 | F129 | 34,816 | 0.02046 | 0.01987 | +0.000293 |
+|  | 5 | F158 | 34,816 | 0.01437 | 0.01294 | +0.000715 |
+|  | 6 | F184 | 34,560 | 0.01074 | 0.00957 | +0.000585 |
+| WFI09 | 1 | F062 | 34,816 | 0.03682 | 0.03099 | +0.002913 |
+|  | 2 | F087 | 34,816 | 0.03744 | 0.03553 | +0.000952 |
+|  | 3 | F106 | 34,816 | 0.00740 | 0.00643 | +0.000488 |
+|  | 4 | F129 | 34,816 | 0.01371 | 0.01286 | +0.000424 |
+|  | 5 | F158 | 34,816 | 0.01285 | 0.01208 | +0.000385 |
+|  | 6 | F184 | 34,560 | 0.00942 | 0.00832 | +0.000552 |
+| WFI10 | 1 | F062 | 34,816 | 0.03811 | 0.03203 | +0.003039 |
+|  | 2 | F087 | 34,816 | 0.02315 | 0.01797 | +0.002588 |
+|  | 3 | F106 | 34,816 | 0.01026 | 0.01046 | -0.000098 |
+|  | 4 | F129 | 34,816 | 0.01859 | 0.01812 | +0.000238 |
+|  | 5 | F158 | 34,816 | 0.00928 | 0.00821 | +0.000535 |
+|  | 6 | F184 | 34,560 | 0.00867 | 0.00698 | +0.000844 |
+| WFI11 | 1 | F062 | 34,816 | 0.02783 | 0.02623 | +0.000797 |
+|  | 2 | F087 | 34,816 | 0.03708 | 0.03117 | +0.002955 |
+|  | 3 | F106 | 34,816 | 0.00996 | 0.00930 | +0.000330 |
+|  | 4 | F129 | 34,816 | 0.01829 | 0.01773 | +0.000283 |
+|  | 5 | F158 | 34,816 | 0.01298 | 0.01107 | +0.000958 |
+|  | 6 | F184 | 34,560 | 0.01205 | 0.00980 | +0.001124 |
+| WFI12 | 1 | F062 | 34,816 | 0.05605 | 0.05364 | +0.001205 |
+|  | 2 | F087 | 34,816 | 0.04763 | 0.04453 | +0.001549 |
+|  | 3 | F106 | 34,816 | 0.01363 | 0.01243 | +0.000602 |
+|  | 4 | F129 | 34,816 | 0.03369 | 0.03240 | +0.000642 |
+|  | 5 | F158 | 34,816 | 0.02179 | 0.02090 | +0.000441 |
+|  | 6 | F184 | 34,560 | 0.01244 | 0.01211 | +0.000169 |
+| WFI13 | 1 | F062 | 34,816 | 0.03488 | 0.02992 | +0.002480 |
+|  | 2 | F087 | 34,816 | 0.03824 | 0.02954 | +0.004347 |
+|  | 3 | F106 | 34,816 | 0.01080 | 0.00932 | +0.000739 |
+|  | 4 | F129 | 34,816 | 0.01697 | 0.01665 | +0.000163 |
+|  | 5 | F158 | 34,816 | 0.01552 | 0.01289 | +0.001314 |
+|  | 6 | F184 | 34,560 | 0.01196 | 0.00871 | +0.001623 |
+| WFI14 | 1 | F062 | 34,816 | 0.05026 | 0.04236 | +0.003950 |
+|  | 2 | F087 | 34,816 | 0.05224 | 0.04298 | +0.004630 |
+|  | 3 | F106 | 34,816 | 0.01209 | 0.01039 | +0.000851 |
+|  | 4 | F129 | 34,816 | 0.01652 | 0.01646 | +0.000030 |
+|  | 5 | F158 | 34,816 | 0.01663 | 0.01404 | +0.001294 |
+|  | 6 | F184 | 34,560 | 0.01213 | 0.00940 | +0.001365 |
+| WFI15 | 1 | F062 | 34,816 | 0.02864 | 0.02728 | +0.000679 |
+|  | 2 | F087 | 34,816 | 0.02747 | 0.02630 | +0.000586 |
+|  | 3 | F106 | 34,816 | 0.00795 | 0.00677 | +0.000590 |
+|  | 4 | F129 | 34,816 | 0.01405 | 0.01443 | -0.000187 |
+|  | 5 | F158 | 34,816 | 0.01613 | 0.01361 | +0.001259 |
+|  | 6 | F184 | 34,560 | 0.01387 | 0.01022 | +0.001824 |
+| WFI16 | 1 | F062 | 34,816 | 0.03095 | 0.03277 | -0.000906 |
+|  | 2 | F087 | 34,816 | 0.02716 | 0.02330 | +0.001928 |
+|  | 3 | F106 | 34,816 | 0.00815 | 0.00686 | +0.000645 |
+|  | 4 | F129 | 34,816 | 0.01740 | 0.01777 | -0.000190 |
+|  | 5 | F158 | 34,816 | 0.01449 | 0.01365 | +0.000418 |
+|  | 6 | F184 | 34,560 | 0.01260 | 0.00944 | +0.001579 |
+| WFI17 | 1 | F062 | 34,816 | 0.03180 | 0.02676 | +0.002517 |
+|  | 2 | F087 | 34,816 | 0.01924 | 0.01719 | +0.001023 |
+|  | 3 | F106 | 34,816 | 0.00786 | 0.00742 | +0.000219 |
+|  | 4 | F129 | 34,816 | 0.01413 | 0.01432 | -0.000097 |
+|  | 5 | F158 | 34,816 | 0.01058 | 0.01061 | -0.000011 |
+|  | 6 | F184 | 34,560 | 0.00879 | 0.00806 | +0.000364 |
+| WFI18 | 1 | F062 | 34,816 | 0.05739 | 0.04868 | +0.004356 |
+|  | 2 | F087 | 34,816 | 0.10093 | 0.10111 | -0.000090 |
+|  | 3 | F106 | 34,816 | 0.06665 | 0.06658 | +0.000037 |
+|  | 4 | F129 | 34,816 | 0.06844 | 0.07119 | -0.001374 |
+|  | 5 | F158 | 34,816 | 0.06017 | 0.06237 | -0.001100 |
+|  | 6 | F184 | 34,560 | 0.06258 | 0.06079 | +0.000894 |
+
+**Table A2. RCS fit comparison by detector, LED, and filter.** The detector
+label appears once per six-LED block. Groups count tile/observation samples.
+The two $\chi^2$/group columns are production-weighted values for RCS-only TMM
+and Joint RCS + stellar. $\Delta\bar{\ell}_{J-R}$ is Joint RCS + stellar minus
+RCS-only TMM log likelihood per group, equal to half the RCS-only TMM minus
+Joint RCS + stellar weighted $\chi^2$ per group; positive favors Joint RCS +
+stellar. These are in-sample comparisons.
 
 ## References
 
