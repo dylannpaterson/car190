@@ -189,7 +189,7 @@ tile, or LED level as specified.
 
 | Correction group | What is corrected | Timing |
 | --- | --- | --- |
-| Photodiode scaling and side-swap | PD2 scaling removes LED-output changes using the first non-warm-up reading per LED. Separate image-count and photodiode factors correct the readout-side change with a continuous spline and log-step. | PD2 scaling is applied per exposure. Fitted side-swap boundaries span 2026-10-06 08:07--08:18 UTC across LEDs. |
+| Photodiode scaling and side-swap | PD2 scaling removes LED-output changes using the first non-warm-up reading per LED. Separate image-count and photodiode factors correct the readout-side change with a continuous spline and log-step. | PD2 scaling is applied per exposure. Fitted side-swap boundaries span 2026-10-06 08:07–08:18 UTC across LEDs. |
 | Temperature-dependent sensitivity | A fixed per-tile quadratic in five-minute `WFI_MCE_ADC_WTSM00` corrects pairwise log-count changes for temperature and is applied equally to all LEDs when telemetry is available. | Applied exposure by exposure and anchored at the reference temperature. |
 | ACM signal-level steps | Additive log-count offsets correct shared-grey or LED-specific changes. | Shared-grey steps: 2026-09-14 23:52 and 2026-09-23 08:49 UTC; per-LED steps: 2026-09-27 15:10 and 2026-10-04 04:54 UTC; shared-grey step: 2026-10-09 04:49 UTC. |
 
@@ -330,15 +330,16 @@ adopted atmosphere and extinction models.
 
 #### Independent Spectrum Checks
 
-As an external check of the SED reconstruction, three example stars from Pal's
-stellar-spectra catalogue were compared with their fitted BT-Settl spectra and
-Gaia and 2MASS measurements. Pal's comparison spectra were intrinsic, so the
-estimated extinction was applied before comparing with observed photometry.
-Pal's catalogue supplied Gaia-band extinction $A_G$, which was approximately
-converted to $A_V$ using a model spectrum and the Fitzpatrick law. The spectra
-were integrated through the corresponding bandpasses. The results were broadly
-similar, with differences in some bands. Two stars were also checked against
-linked BOSZ atmosphere models: their input flux, catalogued radius, and distance
+As an external check of the SED reconstruction, three example stars were
+compared with stellar spectra supplied by Tathagata Pal in private communication,
+their fitted BT-Settl spectra, and Gaia and 2MASS measurements. The comparison
+spectra were intrinsic, so the estimated extinction was applied before
+comparing with observed photometry. The supplied material included Gaia-band
+extinction $A_G$, which was approximately converted to $A_V$ using a model
+spectrum and the Fitzpatrick law. The spectra were integrated through the
+corresponding bandpasses. The results were broadly similar, with differences in
+some bands. Two stars were also checked against linked BOSZ atmosphere models
+(Bohlin et al. 2017): their input flux, catalogued radius, and distance
 reproduced the supplied intrinsic spectra to a maximum fractional difference
 below $4\times10^{-10}$. This is a qualitative cross-check of the fitted stellar
 spectra.
@@ -402,10 +403,12 @@ $$
 
 This monochromatic ratio connects the physical stack to the RCS measurement.
 The LED energy spectrum weights the response across its finite wavelength band.
-The six RCS LED spectral-energy distributions are external data; they come from
-the 2024-Oct-25 sRCS Personality Table, sheet “LED Spectrum”. Each band's
-relative output is normalized to its peak, and samples below five percent of
-that peak are excluded. For LED $\ell$, the band-integrated response is
+The six LEDP spectral-energy distributions are relative measured outputs
+transcribed from the 2024-Oct-25 `sRCS_PersonalityTable.xlsx` workbook, sheet
+“LED Spectrum.” The [public ECSV transcription](https://github.com/RomanSpaceTelescope/roman-technical-information/blob/ff3bcfea58b5693169d7c30fa71dc90fc8346ea3/roman_technical_information/data/WideFieldInstrument/RelativeCalibrationSystem/WFI_RCS_LEDP_spectral_energy_distribution.ecsv)
+is documented in Roman technical-information review [PR #93](https://github.com/RomanSpaceTelescope/roman-technical-information/pull/93).
+Each band's relative output is normalized to its peak, and samples below five
+percent of that peak are excluded. For LED $\ell$, the band-integrated response is
 
 $$
 \begin{aligned}
@@ -434,7 +437,7 @@ Each tile has two fitted parameters per antireflection layer: thickness and
 real refractive index. The bounds are:
 
 - Thickness coordinate: $0.01\le\tau_j\le10$; physical thickness is
-  $d_j=100\tau_j\,\mathrm{nm}$, for layers $j=1,2,3$.
+  $d_j=100\tau_j\,\text{ nm}$, for layers $j=1,2,3$.
 - Refractive index: $1\le n_1\le4$; for layers $j=2,3$,
   $n_{j-1}\le n_j\le4$.
 - Absorption index: $k_j=0$ for all three layers.
@@ -1056,12 +1059,17 @@ $$
 The joint objective combines this term with the curvature and entropy penalties
 and the two likelihood terms.
 
-The inverse-wavelength entropy strength `1890.6` was calibrated by matching
-its penalty to the earlier coefficient-wise MaxEnt penalty at the WFI01
-starting fit. The curvature strength `0.01` was selected through WFI01
-fixed-ice sensitivity tests of its effect on predicted photometry and then
-applied uniformly. The phase strength `100` sets the coefficient-shrinkage
-penalty; these three values control the regularization terms.
+The production regularization weights are fixed at `1890.6` for inverse-
+wavelength entropy, `0.01` for curvature, and `100` for phase-coefficient
+shrinkage. At the WFI01 starting state, the coefficient-wise MaxEnt penalty was
+2.91585 and the unweighted inverse-wavelength entropy integral was
+$1.5423\times10^{-3}$; their ratio sets the entropy weight. With the TMM state
+and ice histories fixed, a WFI01 curvature sweep tested weights `0.0001`,
+`0.001`, and `0.01`. The corresponding CAR201 prediction changes (RMS and
+95th-percentile absolute change, in mmag) were 0.12/0.31, 0.38/0.98, and
+0.61/1.40; CAR190 weighted $\chi^2$ was 4590.4, 4591.1, and 4591.1, compared
+with 4591.7 for the baseline without added curvature. We retained the upper
+tested weight, `0.01`. The same weights are used for all detectors.
 
 The final Joint RCS + stellar objective is minimized directly as a scalar function using
 bounded L-BFGS-B.
@@ -1075,7 +1083,8 @@ residual scatter, most strongly in F062 and F213.
 
 ### RCS likelihood scale and residual correlation
 
-The fixed log-response scale is $\sigma_{\log}=0.005$ (5.0 millilog units).
+The fixed log-response scale is $\sigma_{\log}=0.005$, equivalent to 5.0
+millilog units.
 It is an effective scale for the count-weighted likelihood, not the sampling
 error of an independent-pixel tile mean. In the corrected RCS statistics, the
 median within-group pixel standard deviation is $6.17\times10^{-3}$ in log
@@ -1580,8 +1589,9 @@ stellar. These are in-sample comparisons.
 ## References
 
 - Roman WFI calibrated image products and observation metadata: [MAST](https://mast.stsci.edu/).
+- Bohlin, R. C., Mészáros, S., Fleming, S. W., Gordon, K. D., Koekemoer, A. M., & Kovács, J. 2017, “A New Stellar Atmosphere Grid and Comparisons with HST/STIS CALSPEC Flux Distributions,” *The Astronomical Journal*, 153, 234 ([doi:10.3847/1538-3881/aa6ba9](https://doi.org/10.3847/1538-3881/aa6ba9)).
 - Updated pre-Decon2 CAR190 calibrated exposures are available from the public Roman CAR190 S3 data collection: `s3://roman-s3-romcom/activities/CAR190/`.
 - Decon2-and-later calibrated RCS exposures: Level-2 products listed in the MAST exposure catalogue.
 - CAR201/Program 1043 Level-2 WFI images and forced-aperture photometry inputs.
 - Detector-specific WFI effective areas: [Roman Space Telescope technical-information repository, revision `14a9b0c98b0da723d0f2e4c6277956183c1fdd06`](https://github.com/RomanSpaceTelescope/roman-technical-information/tree/14a9b0c98b0da723d0f2e4c6277956183c1fdd06).
-- RCS LED spectral-energy distributions: Roman Space Telescope WFI technical information, sourced from the 2024-Oct-25 sRCS Personality Table, “LED Spectrum” sheet ([public data review](https://github.com/RomanSpaceTelescope/roman-technical-information/pull/93)).
+- RCS LEDP spectral-energy distributions: relative output measurements transcribed from the 2024-Oct-25 `sRCS_PersonalityTable.xlsx`, “LED Spectrum” sheet, into the [public Roman WFI technical-information ECSV](https://github.com/RomanSpaceTelescope/roman-technical-information/blob/ff3bcfea58b5693169d7c30fa71dc90fc8346ea3/roman_technical_information/data/WideFieldInstrument/RelativeCalibrationSystem/WFI_RCS_LEDP_spectral_energy_distribution.ecsv) ([data review PR #93](https://github.com/RomanSpaceTelescope/roman-technical-information/pull/93)).
