@@ -1,11 +1,14 @@
 """Compute per-detector CAR201 and CAR190 comparisons from saved joint fits.
 
 Run from any directory with ``python docs/analyze_wfi_all_detector_metrics.py``.
-The script reads saved fits only; it does not rerun any optimization.
+To analyze a pipeline run, pass ``--run-root`` with its output directory (or
+the parent date directory). The script reads saved fits only; it does not rerun
+any optimization.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -17,11 +20,21 @@ from astropy.time import Time
 
 
 ROOT = Path(__file__).resolve().parents[1]
-STATS = ROOT / "20261111/corrected_statistics_4h_thinned"
+DEFAULT_STATS = ROOT / "20261111/corrected_statistics_4h_thinned"
+PINNED_LED_QUADRATURE = (
+    ROOT
+    / "20261111/corrected_statistics_4h_thinned/production/wavelength_response_bundle/"
+    "eric_v3_reference/ice_response_model_v3.h5"
+)
+STATS = DEFAULT_STATS
+PRODUCTION_ROOT = STATS / "production"
 FIT_NAME = "car190_amber_joint_2day_reader_compatible_current_gray_v2"
 EFFECTIVE_AREA_ROOT = ROOT / "external_reference_data/roman_effarea_v8_20240301"
-LED_H5 = STATS / "production/wavelength_response_bundle/eric_v3_reference/ice_response_model_v3.h5"
+LED_H5 = PINNED_LED_QUADRATURE
 LED_FILTERS = ("F062", "F087", "F106", "F129", "F158", "F184")
+
+sys.path.insert(0, str(ROOT))
+from docs.paper_run_paths import resolve_pipeline_run
 
 sys.path[:0] = [
     str(ROOT / "wfi_pipeline"),
@@ -89,14 +102,14 @@ def detector_effective_area(detector: str) -> Path:
 
 
 def detector_fit_root(detector: str) -> Path:
-    return STATS / f"production/{detector.lower()}/relative_response/experiments/{FIT_NAME}"
+    return PRODUCTION_ROOT / f"{detector.lower()}/relative_response/experiments/{FIT_NAME}"
 
 
 def compute_detector(detector: str, led_wavelength_nm, led_weights):
     fit_root = detector_fit_root(detector)
     if not fit_root.is_dir():
         raise FileNotFoundError(f"Missing saved joint fit for {detector}: {fit_root}")
-    relative_root = STATS / f"production/{detector.lower()}/relative_response"
+    relative_root = PRODUCTION_ROOT / f"{detector.lower()}/relative_response"
     summary = json.loads((fit_root / "summary.json").read_text())
     area_path = detector_effective_area(detector)
 
@@ -319,6 +332,53 @@ def compute_detector(detector: str, led_wavelength_nm, led_weights):
 
 
 def main() -> None:
+    global STATS, PRODUCTION_ROOT, LED_H5
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--run-root",
+        type=Path,
+        help="pipeline output root or date root; defaults to the validated 20261111 run",
+    )
+    parser.add_argument(
+        "--detector",
+        action="append",
+        choices=run.workflow.DETECTORS,
+        help="analyze this detector (repeatable); default analyzes all saved detectors",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="directory for the result CSVs (defaults to docs/ or <run-root>/analysis)",
+    )
+    args = parser.parse_args()
+
+    run_paths = None
+    if args.run_root is not None:
+        run_paths = resolve_pipeline_run(args.run_root)
+        STATS = run_paths.statistics_dir
+        PRODUCTION_ROOT = run_paths.production_dir
+        run_specific_led_h5 = (
+            PRODUCTION_ROOT
+            / "wavelength_response_bundle/eric_v3_reference/ice_response_model_v3.h5"
+        )
+        LED_H5 = run_specific_led_h5 if run_specific_led_h5.is_file() else PINNED_LED_QUADRATURE
+        print("Using pipeline run:", run_paths.run_root)
+
+    detectors = args.detector or list(run.workflow.DETECTORS)
+    output_dir = args.output_dir
+    if output_dir is None:
+        if run_paths is not None:
+            output_dir = run_paths.run_root / "analysis"
+        elif args.detector:
+            output_dir = ROOT / "docs/detector_analysis"
+        else:
+            output_dir = ROOT / "docs"
+    output_dir = output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not LED_H5.is_file():
+        raise FileNotFoundError(f"Missing LED quadrature reference: {LED_H5}")
     with h5py.File(LED_H5, "r") as archive:
         led_wavelength_nm = np.asarray(archive["led_bands/wavelength_nm"][()], dtype=float)
         led_weights = np.asarray(archive["led_bands/weight"][()], dtype=float)
@@ -326,7 +386,7 @@ def main() -> None:
     all_photometry_rows = []
     all_rcs_rows = []
     detector_summary = []
-    for detector in run.workflow.DETECTORS:
+    for detector in detectors:
         photometry_rows, rcs_rows, detector_rcs_summary = compute_detector(
             detector, led_wavelength_nm, led_weights
         )
@@ -374,9 +434,9 @@ def main() -> None:
     summary = pd.DataFrame(detector_summary).sort_values("detector")
     photometry = pd.DataFrame(all_photometry_rows).sort_values(["detector", "filter"])
     rcs = pd.DataFrame(all_rcs_rows).sort_values(["detector", "led"])
-    summary_path = ROOT / "docs/wfi_all_detector_model_comparison.csv"
-    photometry_path = ROOT / "docs/wfi_all_detector_car201_by_filter.csv"
-    rcs_path = ROOT / "docs/wfi_all_detector_rcs_by_led.csv"
+    summary_path = output_dir / "wfi_all_detector_model_comparison.csv"
+    photometry_path = output_dir / "wfi_all_detector_car201_by_filter.csv"
+    rcs_path = output_dir / "wfi_all_detector_rcs_by_led.csv"
     summary.to_csv(summary_path, index=False, float_format="%.8g")
     photometry.to_csv(photometry_path, index=False, float_format="%.8g")
     rcs.to_csv(rcs_path, index=False, float_format="%.8g")

@@ -17,6 +17,32 @@ To regenerate one figure, pass its number with `--figure` (for example,
 rerun any fits. The `plot_wfi02_*.py` files are per-figure entry points into
 this same generator; their plotting implementations are not duplicated.
 
+To regenerate the paper figures from a completed relative-response pipeline
+run, pass its pipeline output root (or its date root). For example:
+
+```bash
+python docs/figures/generate_paper_figures.py \
+  --run-root 20261117/production/pipeline_runs/relative_response \
+  --figure all
+```
+
+The run manifest supplies the raw/corrected statistics input root used by
+Figure 2. Figures 3--6 read production fits and the modulated bundle from the
+selected run. The command writes the six figure pairs to `docs/figures`; use
+`--output-dir` to direct a comparison run elsewhere. The per-figure wrapper
+scripts accept the same run-selection options.
+
+The all-detector metric analysis accepts the same pipeline output/date root and
+can restrict an in-progress run to completed detectors with repeatable
+`--detector` options:
+
+```bash
+python docs/analyze_wfi_all_detector_metrics.py \
+  --run-root 20261117/production/pipeline_runs/relative_response \
+  --detector WFI02 \
+  --output-dir 20261117/production/pipeline_runs/relative_response/analysis
+```
+
 | Figure | Source function |
 | --- | --- |
 | 1 — Spectral coverage | `plot_spectral_coverage` |

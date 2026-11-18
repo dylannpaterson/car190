@@ -51,12 +51,37 @@ plt.rcParams.update({
 ROOT = Path(__file__).resolve().parents[2]
 FIGURES = Path(__file__).resolve().parent
 STATS = ROOT / "20261111/corrected_statistics_4h_thinned"
+PRODUCTION_ROOT = STATS / "production"
+INPUT_ROOT = None
+PINNED_LED_QUADRATURE = (
+    ROOT
+    / "20261111/corrected_statistics_4h_thinned/production/wavelength_response_bundle/"
+    "eric_v3_reference/ice_response_model_v3.h5"
+)
+LED_QUADRATURE_H5 = PINNED_LED_QUADRATURE
+MODULATED_BUNDLE = PRODUCTION_ROOT / "wavelength_response_bundle/wfi_all_2nm_rank16_modulated.npz"
 TILE = 135
 DETECTOR = "WFI02"
 LED_FILTERS = ("F062", "F087", "F106", "F129", "F158", "F184")
 FILTERS = ("F062", "F087", "F106", "F129", "F158", "F184", "F146", "F213")
 RESET_DAYS = np.asarray([12.907397928240743, 38.79784510416666], dtype=float)
 RCS_ORIGIN_UTC = "2026-09-12T01:25:50.714+00:00"
+
+sys.path.insert(0, str(ROOT))
+from docs.paper_run_paths import resolve_pipeline_run
+
+
+def warmup_root(production_root: Path, detector: str) -> Path:
+    candidates = (
+        production_root / detector.lower() / "relative_response_constant_rate_warmup_start40",
+        production_root / detector.lower() / "relative_response_constant_rate_warmup_third_decon_start40",
+    )
+    for candidate in candidates:
+        if (candidate / "fits/tile_135/constant_rate_map.npz").is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"No completed start-40 constant-rate warmup found for {detector}: {candidates}"
+    )
 
 
 def save_figure(figure, stem: str, dpi: int = FIGURE_DPI) -> tuple[Path, Path]:
@@ -162,11 +187,82 @@ def plot_spectral_coverage() -> tuple[Path, Path]:
     return save_figure(figure, "wfi02_spectral_coverage")
 
 
+def raw_corrected_comparison_frame() -> pd.DataFrame:
+    if INPUT_ROOT is None:
+        path = ROOT / "20261111/correction_comparison/wfi02_tile135_raw_vs_corrected.csv"
+        return pd.read_csv(path)
+
+    raw_path = INPUT_ROOT / "raw_statistics/wfi02_tile_log_statistics_256.csv"
+    corrected_path = (
+        INPUT_ROOT
+        / "corrected_statistics/wfi02_tile_log_statistics_256_count_corrected.csv"
+    )
+    missing = [path for path in (raw_path, corrected_path) if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "Raw-versus-corrected Figure 2 needs both source statistics files; "
+            f"missing: {missing}"
+        )
+
+    columns = [
+        "led", "program", "repeat", "group", "file_set_name", "exposure_start_time",
+        "days", "tile_id", "n_pair_valid", "sum_log_change",
+    ]
+    raw = pd.read_csv(raw_path, usecols=columns)
+    corrected = pd.read_csv(corrected_path, usecols=columns)
+    raw = raw.loc[raw["tile_id"] == TILE].copy()
+    corrected = corrected.loc[corrected["tile_id"] == TILE].copy()
+    keys = ["led", "program", "repeat", "group", "file_set_name", "tile_id"]
+    frame = raw.merge(
+        corrected,
+        on=keys,
+        how="outer",
+        suffixes=("_raw", "_corrected"),
+        indicator=True,
+        validate="one_to_one",
+    )
+    if not frame["_merge"].eq("both").all():
+        raise ValueError("Raw and corrected source statistics do not have matching groups")
+    np.testing.assert_array_equal(
+        frame["exposure_start_time_raw"].to_numpy(),
+        frame["exposure_start_time_corrected"].to_numpy(),
+    )
+    np.testing.assert_allclose(
+        frame["days_raw"].to_numpy(float), frame["days_corrected"].to_numpy(float),
+        rtol=0, atol=1e-12,
+    )
+    np.testing.assert_array_equal(
+        frame["n_pair_valid_raw"].to_numpy(int),
+        frame["n_pair_valid_corrected"].to_numpy(int),
+    )
+    raw_mean = (
+        frame["sum_log_change_raw"].to_numpy(float)
+        / frame["n_pair_valid_raw"].to_numpy(float)
+    ) * 1000.0
+    corrected_mean = (
+        frame["sum_log_change_corrected"].to_numpy(float)
+        / frame["n_pair_valid_corrected"].to_numpy(float)
+    ) * 1000.0
+    return pd.DataFrame({
+        "group": frame["group"],
+        "file_set_name": frame["file_set_name"],
+        "program_corrected": frame["program"],
+        "repeat_corrected": frame["repeat"],
+        "led_corrected": frame["led"],
+        "exposure_start_time_corrected": frame["exposure_start_time_corrected"],
+        "days_corrected": frame["days_corrected"],
+        "n_pair_valid_raw": frame["n_pair_valid_raw"],
+        "raw_mean_milli": raw_mean,
+        "n_pair_valid_corrected": frame["n_pair_valid_corrected"],
+        "corrected_mean_milli": corrected_mean,
+        "correction_delta_milli": corrected_mean - raw_mean,
+    })
+
+
 def plot_raw_corrected() -> tuple[Path, Path]:
     from astropy.time import Time
 
-    path = ROOT / "20261111/correction_comparison/wfi02_tile135_raw_vs_corrected.csv"
-    frame = pd.read_csv(path)
+    frame = raw_corrected_comparison_frame()
     frame["utc"] = pd.to_datetime(
         frame["exposure_start_time_corrected"], utc=True, format="mixed"
     ).dt.tz_convert(None)
@@ -230,8 +326,8 @@ def load_tile_history(path: Path, constant_rate: bool = False):
 def plot_ice_history() -> tuple[Path, Path]:
     from datetime import datetime, timedelta
 
-    production = STATS / "production/wfi02"
-    warm_path = production / "relative_response_constant_rate_warmup_start40/fits/tile_135/constant_rate_map.npz"
+    production = PRODUCTION_ROOT / "wfi02"
+    warm_path = warmup_root(PRODUCTION_ROOT, DETECTOR) / "fits/tile_135/constant_rate_map.npz"
     rcs_only_path = production / "relative_response/fits/tile_135/posterior_samples.npz"
     joint_path = production / "relative_response/experiments/car190_amber_joint_2day_reader_compatible_current_gray_v2/joint_weekly_ice_fit.npz"
     warm_days, warm_d, warm_r, resets = load_tile_history(warm_path, constant_rate=True)
@@ -309,8 +405,8 @@ def plot_rcs_model_data() -> tuple[Path, Path]:
     from experiment_joint_wfi01_fixed_ice import LedModel
     from support_aligned_modulation import effective_area_support
 
-    relative_root = STATS / "production/wfi02/relative_response"
-    warm_root = STATS / "production/wfi02/relative_response_constant_rate_warmup_start40"
+    relative_root = PRODUCTION_ROOT / "wfi02/relative_response"
+    warm_root = warmup_root(PRODUCTION_ROOT, DETECTOR)
     warm_path = warm_root / "fits/tile_135/constant_rate_map.npz"
     rcs_only_path = relative_root / "fits/tile_135/tile_group_predictions.csv"
     joint_root = relative_root / "experiments/car190_amber_joint_2day_reader_compatible_current_gray_v2"
@@ -348,8 +444,7 @@ def plot_rcs_model_data() -> tuple[Path, Path]:
     area_path = ROOT / "external_reference_data/roman_effarea_v8_20240301/" \
         "Roman_effarea_v8_SCA02_20240301.ecsv"
     joint_summary = json.loads((joint_root / "summary.json").read_text())
-    led_quadrature_path = STATS / "production/wavelength_response_bundle/eric_v3_reference/ice_response_model_v3.h5"
-    with h5py.File(led_quadrature_path, "r") as archive:
+    with h5py.File(LED_QUADRATURE_H5, "r") as archive:
         led_wavelength_nm = np.asarray(archive["led_bands/wavelength_nm"][()], dtype=float)
         led_weights = np.asarray(archive["led_bands/weight"][()], dtype=float)
     led_model = LedModel(
@@ -491,7 +586,7 @@ def plot_car201_model_data() -> tuple[Path, Path]:
     import run_amber_student_t_detectors as run
     import run_joint_car190_amber_inverse_wavelength_maxent as joint_fit
 
-    fit_dir = STATS / "production/wfi02/relative_response/experiments/" \
+    fit_dir = PRODUCTION_ROOT / "wfi02/relative_response/experiments/" \
         "car190_amber_joint_2day_reader_compatible_current_gray_v2"
     source_ids, seds, raw_magnitude, raw_error, sample_valid, common, frames = joint_fit.raw_common_training_sample(DETECTOR)
     with np.load(fit_dir / "joint_fit.npz", allow_pickle=False) as archive:
@@ -665,7 +760,7 @@ def plot_car201_model_data() -> tuple[Path, Path]:
             row["mean_student_nll_rcs_only"]-row["mean_student_nll_joint"]
         )
     photometry_metrics_frame=pd.DataFrame(photometry_metrics)
-    photometry_metrics_path=Path(__file__).resolve().parent/"wfi02_car201_residual_metrics.csv"
+    photometry_metrics_path=FIGURES/"wfi02_car201_residual_metrics.csv"
     photometry_metrics_frame.to_csv(photometry_metrics_path,index=False,float_format="%.8g")
     print("WFI02 CAR201 residual metrics (mmag NMAD; mean Student-t NLL per measurement):")
     print(photometry_metrics_frame.to_string(index=False,float_format=lambda value:f"{value:.5g}"))
@@ -760,7 +855,7 @@ def plot_car201_model_data() -> tuple[Path, Path]:
     for axis in axes:
         axis.set_xticks(ticks); axis.set_xlim(ticks[0]-.5,ticks[-1]+2.); axis.xaxis.set_major_formatter(mdates.DateFormatter("%b %d",tz=timezone.utc))
     figure.subplots_adjust(left=.105,right=.985,top=.87,bottom=.09,hspace=.30,wspace=.16)
-    png=Path(__file__).resolve().parent/"wfi02_full_car201_model_data.png"; figure.savefig(png,dpi=FIGURE_DPI); figure.savefig(png.with_suffix(".pdf"),dpi=FIGURE_DPI); plt.close(figure)
+    png=FIGURES/"wfi02_full_car201_model_data.png"; figure.savefig(png,dpi=FIGURE_DPI); figure.savefig(png.with_suffix(".pdf"),dpi=FIGURE_DPI); plt.close(figure)
     first_postroll=int(np.flatnonzero(np.asarray(model.pass_zero_point_group_ids)>0)[0])
     print("F062 post-roll data shift (mmag):",float(-1000*roll_mag[0,0,first_postroll]))
     print("Joint fit roll-transfer residual check (mmag):",float(joint_error))
@@ -778,9 +873,11 @@ def plot_complex_reflectance() -> tuple[Path, Path]:
     import fit_car201_zane_star_reflectance_modulation as fitter
     import plot_joint_bundle_clean_complex_reflection as plotter
 
-    bundle = plotter.load_bundle(
-        STATS / "production/wavelength_response_bundle/wfi_all_2nm_rank16_modulated.npz"
-    )
+    if not MODULATED_BUNDLE.is_file():
+        raise FileNotFoundError(
+            f"Missing modulated response bundle for the selected run: {MODULATED_BUNDLE}"
+        )
+    bundle = plotter.load_bundle(MODULATED_BUNDLE)
     wavelengths = np.asarray(bundle["modulation_wavelengths_nm"], dtype=float)
     base_n, base_k = fitter.production.hgcdte_reference_optical_constants(wavelengths)
     spectral_basis = fitter.production.spectral_modulation_basis(wavelengths)
@@ -839,13 +936,79 @@ def plot_complex_reflectance() -> tuple[Path, Path]:
     return save_figure(figure, "wfi02_tile135_complex_reflectance")
 
 
-def main() -> None:
+def main(default_figure: str = "all") -> None:
+    global FIGURES, STATS, PRODUCTION_ROOT, INPUT_ROOT, LED_QUADRATURE_H5, MODULATED_BUNDLE
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--figure", choices=("all", "1", "2", "3", "4", "5", "6"),
-        default="all", help="Figure to regenerate; default regenerates all six",
+        default=default_figure, help="Figure to regenerate; default regenerates all six",
+    )
+    parser.add_argument(
+        "--run-root",
+        type=Path,
+        help="pipeline output root or date root; defaults to the validated 20261111 inputs",
+    )
+    parser.add_argument(
+        "--input-root",
+        type=Path,
+        help="date root containing raw_statistics/ and corrected_statistics/ for Figure 2",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="directory for generated figures and metric CSVs (defaults to docs/figures)",
+    )
+    parser.add_argument(
+        "--led-quadrature-h5",
+        type=Path,
+        help="override the pinned six-LED quadrature reference HDF5",
+    )
+    parser.add_argument(
+        "--modulated-bundle",
+        type=Path,
+        help="override the run's modulated wavelength-response bundle for Figure 6",
     )
     args = parser.parse_args()
+
+    if args.run_root is not None:
+        paths = resolve_pipeline_run(args.run_root)
+        STATS = paths.statistics_dir
+        PRODUCTION_ROOT = paths.production_dir
+        INPUT_ROOT = (
+            args.input_root.expanduser().resolve()
+            if args.input_root is not None
+            else paths.input_dir
+        )
+        print("Using pipeline run:", paths.run_root)
+    else:
+        STATS = ROOT / "20261111/corrected_statistics_4h_thinned"
+        PRODUCTION_ROOT = STATS / "production"
+        INPUT_ROOT = (
+            args.input_root.expanduser().resolve()
+            if args.input_root is not None
+            else None
+        )
+
+    reference_candidate = (
+        PRODUCTION_ROOT
+        / "wavelength_response_bundle/eric_v3_reference/ice_response_model_v3.h5"
+    )
+    LED_QUADRATURE_H5 = (
+        args.led_quadrature_h5.expanduser().resolve()
+        if args.led_quadrature_h5 is not None
+        else reference_candidate if reference_candidate.is_file() else PINNED_LED_QUADRATURE
+    )
+    MODULATED_BUNDLE = (
+        args.modulated_bundle.expanduser().resolve()
+        if args.modulated_bundle is not None
+        else PRODUCTION_ROOT / "wavelength_response_bundle/wfi_all_2nm_rank16_modulated.npz"
+    )
+    FIGURES = args.output_dir.expanduser().resolve() if args.output_dir else Path(__file__).resolve().parent
+    FIGURES.mkdir(parents=True, exist_ok=True)
+
+    if not LED_QUADRATURE_H5.is_file():
+        raise FileNotFoundError(f"Missing LED quadrature reference: {LED_QUADRATURE_H5}")
     generators = {
         "1": plot_spectral_coverage,
         "2": plot_raw_corrected,

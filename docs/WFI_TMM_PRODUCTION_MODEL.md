@@ -1,5 +1,32 @@
 # WFI Ice-Deposition Methodology from RCS and Stellar Photometry
 
+**Abstract.** Thin-film water ice accumulating on the Nancy Grace Roman Space
+Telescope Wide Field Instrument (WFI) detectors modulates their wavelength-
+dependent sensitivity through thin-film interference. We present a two-stage
+physical methodology that reconstructs per-tile ice-thickness histories and
+detector optical properties across all 18 WFI detectors during commissioning.
+First, calibrated flat-field exposures from the Relative Calibration System
+(RCS; Programs 1039 and 1063) in six narrow LED bands (624--1670 nm) are
+compressed into exact pixel-pair sufficient statistics, corrected for
+photodiode drift, readout side-swaps, detector temperature, and signal-level
+steps, and fit with a four-layer transfer-matrix method (TMM) optical stack
+(three antireflection layers and an ice film over an optically thick HgCdTe
+substrate). The fit includes non-parametric per-tile ice-deposition histories
+across decontamination resets. Second, multi-epoch forced-aperture stellar
+photometry from CAR201 (Program 1043) across eight broad WFI filters
+(F062--F213; 470--2335 nm) is combined with stellar spectral energy
+distributions based on Gaia DR3, Pan-STARRS DR2, and 2MASS photometry. Holding
+the baseline TMM optical state fixed, a regularized 15-mode complex-reflection
+modulation is jointly fit with the stellar photometry and used to refine the ice
+histories under a robust Student-$t$ likelihood. Across all 18 detectors, the
+RCS-only TMM model reduces photometric NMAD in all 144 detector/filter
+combinations, with median reductions of 80.0% in F129 and 73.6% in F087. The
+joint refinement lowers NMAD in 126 of 144 combinations and improves RCS
+weighted $\chi^2$ in 95 of 108 detector/LED groups; median reductions are
+largest in F062 (21.2%) and F213 (16.8%), where the stellar data extend
+constraints beyond the LED anchors. The methodology also motivates independent
+out-of-sample validation with CAR-192 (Program 1042) WFI prism spectrophotometry.
+
 ## 1. Introduction
 
 Ice deposited onto the Nancy Grace Roman Space Telescope Wide Field Instrument
@@ -20,8 +47,9 @@ evolution of ice and the detector's broader spectral response.
 This paper describes the observations and their reduction (Section 2), develops
 the transfer-matrix method (TMM) optical stack and ice-deposition model
 (Section 3), and presents the RCS-only TMM fit (Section 4) and Joint RCS + stellar
-photometry fit (Section 5). Section 6 compares the resulting reconstructions
-and discusses model limitations.
+photometry fit (Section 5). Section 6 compares the resulting in-sample
+reconstructions, discusses limitations, and outlines an independent validation
+test using slitless prism spectroscopy from CAR-192 (Program 1042).
 
 ## 2. Observational Data and Reduction
 
@@ -861,10 +889,14 @@ number of controls is $J_s=\max(2,\lceil T/2\rceil+1)$; their knots are evenly
 spaced from its first to last baseline time. Segment starts are scaled by a
 positive exponential adjustment, with controls evaluated within each segment.
 
-The RCS LED measurements provide the starting histories and also enter the
-Joint RCS + stellar likelihood, so the RCS comparison is in-sample. The two-day adjustment
-spacing, observation cadence, measurement sensitivity, and priors limit the
-temporal detail the fit can resolve.
+The RCS LED measurements both initialize the baseline trajectories and enter
+the Joint RCS + stellar likelihood; comparisons against RCS and CAR201 are
+therefore in-sample. The two-day control-point spacing, observation cadence,
+measurement sensitivity, and priors limit the temporal and spectral detail the
+joint fit can resolve. CAR-192 WFI Prism spectrophotometry (Program 1042), with
+continuous coverage of roughly 750--1800 nm, is a natural held-out test of the
+inter-LED spectral modulation and reconstructed ice histories; it is not used
+in the fits reported here.
 
 #### Joint RCS + stellar: Priors and Bounds
 
@@ -1056,17 +1088,17 @@ with shared pixel-level and time-dependent structure.
 The fit-residual summaries exclude each LED's first, reference observation.
 NMAD is $1.4826$ times the median absolute deviation about the residual median.
 Across the 18 detectors, the median detector-level RCS-only group-mean RMSE is
-$0.714\times10^{-3}$ and the median NMAD is $0.511\times10^{-3}$ (detector
-ranges $0.625$--$1.282$ and $0.433$--$0.893$, respectively, in units of
+$0.737\times10^{-3}$ and the median NMAD is $0.534\times10^{-3}$ (detector
+ranges $0.683$--$1.619$ and $0.459$--$0.893$, respectively, in units of
 $10^{-3}$ log response). For the joint fit, the corresponding medians are
-$0.671\times10^{-3}$ and $0.481\times10^{-3}$, with detector ranges
-$0.597$--$1.272$ and $0.422$--$0.886$. The weighted $\chi^2$ divided by the
-number of non-reference tile/LED observations has a median of 0.0203 for
-RCS-only TMM (detector range 0.0155--0.0699) and 0.0179 for the joint fit
-(0.0142--0.0690). These values are diagnostics, not reduced-$\chi^2$ estimates:
+$0.686\times10^{-3}$ and $0.501\times10^{-3}$, with detector ranges
+$0.648$--$1.526$ and $0.433$--$0.916$. The weighted $\chi^2$ divided by the
+number of non-reference tile/LED observations has a median of 0.0216 for
+RCS-only TMM (detector range 0.0186--0.1094) and 0.0188 for the joint fit
+(0.0167--0.0980). These values are diagnostics, not reduced-$\chi^2$ estimates:
 successive non-reference residuals within each tile/LED series are strongly
-autocorrelated, with a median lag-one correlation of 0.79 across detectors
-(detector medians 0.63--0.86).
+autocorrelated. The median of detector-level lag-one correlations is 0.80 for
+RCS-only and 0.79 for the joint fit (ranges 0.64--0.86 and 0.67--0.87).
 
 Thus, $\sigma_{\log}=0.005$ is comparable to the observed within-group pixel
 scatter while remaining several times larger than the post-fit residuals of
@@ -1118,8 +1150,8 @@ define $\Delta\bar{\ell}_{J-R}=\bar{\ell}_{\mathrm{joint}}-
 differences are per valid measurement and use the Student-$t$ likelihood with
 the same reported uncertainties and joint-fit detector scatter for both
 predictions; star/filter locations are profiled separately. RCS differences
-are per LED/tile/observation group and equal half the RCS-only minus joint
-weighted $\chi^2$. These are data-likelihood comparisons, not full MAP
+are per nonreference LED/tile/observation group and equal half the RCS-only
+minus joint weighted $\chi^2$. These are data-likelihood comparisons, not full MAP
 objectives including priors and regularization.
 
 ![Figure 5. Full WFI02 CAR201 data compared with RCS-only TMM and Joint RCS + stellar predictions.](./figures/wfi02_full_car201_model_data.png)
@@ -1145,14 +1177,14 @@ Decon3 resets.
 
 | Filter | $N$ | No-ice-correction reference NMAD (mmag) | RCS-only TMM NMAD (mmag) | Joint NMAD (mmag) | $\Delta\bar{\ell}_{J-R}$/obs |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| F062 | 4,211 | 12.92 | 7.72 | 6.15 | +0.210 |
-| F087 | 4,206 | 14.76 | 4.82 | 4.32 | +0.095 |
-| F106 | 4,207 | 7.74 | 3.96 | 3.92 | +0.006 |
-| F129 | 4,204 | 20.32 | 3.58 | 3.49 | +0.010 |
-| F158 | 4,207 | 6.63 | 3.59 | 3.52 | +0.012 |
-| F184 | 4,201 | 10.96 | 4.39 | 4.24 | +0.025 |
-| F146 | 4,204 | 3.68 | 2.47 | 2.47 | -0.0001 |
-| F213 | 4,205 | 11.22 | 7.98 | 6.69 | +0.226 |
+| F062 | 4,211 | 12.88 | 7.74 | 6.12 | +0.2110 |
+| F087 | 4,206 | 14.75 | 4.80 | 4.32 | +0.0944 |
+| F106 | 4,207 | 7.72 | 3.96 | 3.92 | +0.0071 |
+| F129 | 4,204 | 20.33 | 3.57 | 3.50 | +0.0104 |
+| F158 | 4,207 | 6.65 | 3.60 | 3.50 | +0.0128 |
+| F184 | 4,201 | 10.98 | 4.39 | 4.24 | +0.0250 |
+| F146 | 4,204 | 3.68 | 2.46 | 2.47 | +0.0003 |
+| F213 | 4,205 | 11.21 | 7.97 | 6.66 | +0.2266 |
 
 **Table 1. WFI02 CAR201 residual metrics.** The no-ice-correction reference
 applies no modeled ice-response correction, so its predicted reference-relative
@@ -1166,28 +1198,29 @@ roll-adjusted photometry and reported photometric uncertainties, with the
 detector-level excess photometric scatter held at its joint-fit estimate.
 Locations are profiled separately for each model. These are in-sample results.
 
-| LED/filter | Groups | RCS-only TMM $\chi^2$/group | Joint $\chi^2$/group | $\Delta\bar{\ell}_{J-R}$/group |
+| LED/filter | Nonreference groups | RCS-only TMM $\chi^2$/group | Joint $\chi^2$/group | $\Delta\bar{\ell}_{J-R}$/group |
 | --- | ---: | ---: | ---: | ---: |
-| 1/F062 | 34,816 | 0.05679 | 0.04371 | +0.006542 |
-| 2/F087 | 34,816 | 0.05076 | 0.04219 | +0.004285 |
-| 3/F106 | 34,816 | 0.01280 | 0.01054 | +0.001127 |
-| 4/F129 | 34,816 | 0.01935 | 0.01909 | +0.000130 |
-| 5/F158 | 34,816 | 0.01771 | 0.01522 | +0.001247 |
-| 6/F184 | 34,560 | 0.01098 | 0.00880 | +0.001093 |
+| 1/F062 | 36,352 | 0.05585 | 0.04303 | +0.006411 |
+| 2/F087 | 36,352 | 0.05787 | 0.04268 | +0.007596 |
+| 3/F106 | 36,352 | 0.01211 | 0.01052 | +0.000796 |
+| 4/F129 | 36,352 | 0.01916 | 0.01945 | -0.000145 |
+| 5/F158 | 36,352 | 0.01765 | 0.01568 | +0.000983 |
+| 6/F184 | 36,096 | 0.01280 | 0.00984 | +0.001480 |
 
 **Table 2. WFI02 RCS likelihood by LED.** Values are production-weighted
-$\chi^2$/group across 256 tiles. $\Delta\bar{\ell}_{J-R}$ is the joint minus
+$\chi^2$/group across 256 tiles, excluding each LED's first reference group.
+$\Delta\bar{\ell}_{J-R}$ is the joint minus
 RCS-only TMM log likelihood per group, equal to half the RCS-only TMM minus
 Joint RCS + stellar $\chi^2$ per group; positive favors Joint RCS + stellar.
 These are in-sample.
 
-Across 208,640 RCS groups, weighted $\chi^2$ falls from 5,860.2 to 4,856.3
-($\Delta\log L_{J-R}=+501.9$). Across 33,645 CAR201 measurements, the joint
-photometric log-likelihood gain is $+2,457.3$. Relative to the no-ice-correction
+Across 217,856 nonreference RCS groups, weighted $\chi^2$ falls from 6,374.2 to
+5,130.3 ($\Delta\log L_{J-R}=+622.0$). Across 33,645 CAR201 measurements, the joint
+photometric log-likelihood gain is $+2,472.0$. Relative to the no-ice-correction
 reference, the RCS-only fit lowers NMAD in all eight filters. The joint fit adds
-the largest reductions at F062 (20\%) and F213 (16\%); F146 is essentially
+the largest reductions at F062 (21\%) and F213 (17\%); F146 is essentially
 unchanged. These in-sample metrics summarize the improvement and remaining
-residual scatter for WFI02; the 2.47–6.69 mmag NMAD is not a calibrated
+residual scatter for WFI02; the 2.47--6.66 mmag NMAD is not a calibrated
 prediction interval.
 
 The wavelength pattern in Table 1 is consistent with Figure 6, where the joint
@@ -1214,176 +1247,205 @@ effective-area support. The phase branches are aligned at the longest
 wavelength, retaining the fitted phase shift. Both curves are MAP spectra of
 the ice-free reflection.
 
+### Summary and Operational Implications
+
+The two-stage analysis combines high-cadence RCS constraints on ice evolution
+with broad-band stellar constraints on detector response between and beyond the
+LED bands. The commissioning results have four main implications:
+
+1. **Baseline thin-film capture.** RCS-only TMM lowers CAR201 NMAD in all 144
+   detector/filter combinations relative to the no-ice-correction reference.
+   Median reductions across detectors are 80.0% in F129 and 73.6% in F087.
+2. **Broad-band extrapolation.** Joint RCS + stellar refinement lowers CAR201
+   NMAD in 126 of 144 detector/filter combinations and RCS weighted $\chi^2$ in
+   95 of 108 detector/LED groups. The largest median NMAD reductions are in
+   F062 (21.2%) and F213 (16.8%), whose bandpasses extend beyond the blue and red
+   LED anchors.
+3. **Non-uniform deposition.** The representative WFI02 tile 135 history shows
+   elevated fitted rates immediately after Decon2 and Decon3, followed by a
+   return toward the lower rate seen through much of each segment. Its third
+   segment also begins with roughly 30 nm of modeled ice. These features are
+   properties of the fitted history and are not by themselves evidence for a
+   particular physical cause.
+4. **Limitations and independent validation.** The reported RCS and CAR201
+   comparisons are in-sample. Stellar predictions use posterior-median SEDs
+   without propagating the full spectral-parameter covariance, and the remaining
+   millimagnitude residuals are not calibrated prediction intervals. CAR-192
+   (Program 1042) WFI slitless prism spectrophotometry, covering roughly
+   750--1800 nm, is a natural held-out test of the inter-LED spectral modulation
+   and reconstructed ice histories when those data are reduced; it does not
+   enter the fits presented here.
+
 ## Appendix A. Detector Comparison: RCS-only TMM and Joint RCS + stellar
 
 The likelihood convention defined above applies throughout this appendix; a
 positive $\Delta\bar{\ell}_{J-R}$ favors the joint fit. Across all detectors,
 the joint fit has higher total CAR201 and RCS data log likelihood than
-RCS-only TMM. CAR201 NMAD is lower in 127 of 144 detector/filter combinations,
+RCS-only TMM. CAR201 NMAD is lower in 126 of 144 detector/filter combinations,
 with at least five improved filters on every detector. RCS weighted $\chi^2$
-is lower in 93 of 108 detector/LED groups.
+is lower in 95 of 108 detector/LED groups.
 
 The no-ice-correction reference sets the modeled ice-response correction to
 zero while physical ice is present. Relative to this reference,
 the RCS-only fit lowers NMAD in all 144 detector/filter combinations. Across
 detectors, median relative decreases are largest at F129 (80.0%) and F087
-(73.5%). Relative to RCS-only TMM, the joint fit lowers NMAD in 127/144
+(73.6%). Relative to RCS-only TMM, the joint fit lowers NMAD in 126/144
 combinations, with the largest median decreases at the bluest filter F062
-(21.5%) and reddest filter F213 (16.5%). Pooled mean log-likelihood gains per
-CAR201 measurement are also largest at F062 (+0.225) and F213 (+0.201); F087
-is next (+0.116).
+(21.2%) and reddest filter F213 (16.8%). Pooled mean log-likelihood gains per
+CAR201 measurement are also largest at F062 (+0.225) and F213 (+0.203); F087
+is next (+0.112).
 WFI02 illustrates the overall direction: its CAR201 NMAD is lower in seven of
-eight filters, all six RCS LED weighted $\chi^2$ values improve, and its CAR201
-log-likelihood gain is close to the detector median. Its RCS log-likelihood
-gain is the largest per-group gain among the 18 detectors, about 2.4 times the
-cross-detector median.
+eight filters, five of six RCS LED weighted $\chi^2$ values improve, and its
+CAR201 log-likelihood gain is close to the detector median. Its RCS
+log-likelihood gain is about twice the cross-detector median, ranking third
+among the 18 detectors.
 
 | Detector | Filter | $N$ | No-ice-correction NMAD (mmag) | RCS-only TMM NMAD (mmag) | Joint NMAD (mmag) | $\Delta\bar{\ell}_{J-R}$/obs |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| WFI01 | F062 | 4,597 | 14.96 | 9.32 | 7.62 | +0.18572 |
-|  | F087 | 4,601 | 33.74 | 5.49 | 5.03 | +0.05818 |
-|  | F106 | 4,603 | 5.73 | 4.51 | 4.48 | +0.00982 |
-|  | F129 | 4,605 | 17.54 | 4.47 | 4.36 | +0.01685 |
-|  | F146 | 4,601 | 7.20 | 2.98 | 2.97 | +0.00824 |
-|  | F158 | 4,604 | 12.07 | 4.18 | 4.11 | +0.01398 |
-|  | F184 | 4,604 | 8.49 | 5.36 | 5.45 | -0.00699 |
-|  | F213 | 4,604 | 16.08 | 7.84 | 6.75 | +0.13829 |
-| WFI02 | F062 | 4,211 | 12.92 | 7.72 | 6.15 | +0.20994 |
-|  | F087 | 4,206 | 14.76 | 4.82 | 4.32 | +0.09453 |
-|  | F106 | 4,207 | 7.74 | 3.96 | 3.92 | +0.00648 |
-|  | F129 | 4,204 | 20.32 | 3.58 | 3.49 | +0.01015 |
-|  | F146 | 4,204 | 3.68 | 2.47 | 2.47 | -0.00009 |
-|  | F158 | 4,207 | 6.63 | 3.59 | 3.52 | +0.01185 |
-|  | F184 | 4,201 | 10.96 | 4.39 | 4.24 | +0.02547 |
-|  | F213 | 4,205 | 11.22 | 7.98 | 6.69 | +0.22573 |
-| WFI03 | F062 | 4,576 | 8.96 | 7.06 | 5.65 | +0.20461 |
-|  | F087 | 4,574 | 12.01 | 4.96 | 3.89 | +0.23156 |
-|  | F106 | 4,566 | 4.44 | 3.38 | 3.32 | +0.00846 |
-|  | F129 | 4,562 | 15.32 | 3.31 | 3.16 | +0.03723 |
-|  | F146 | 4,552 | 3.06 | 2.22 | 2.15 | +0.03909 |
-|  | F158 | 4,556 | 4.90 | 3.06 | 3.05 | +0.00857 |
-|  | F184 | 4,564 | 9.97 | 4.46 | 3.98 | +0.11316 |
-|  | F213 | 4,573 | 8.85 | 8.02 | 6.39 | +0.27459 |
-| WFI04 | F062 | 4,568 | 12.81 | 8.25 | 5.92 | +0.27906 |
-|  | F087 | 4,564 | 23.55 | 4.37 | 4.17 | +0.04559 |
-|  | F106 | 4,564 | 7.81 | 3.66 | 3.39 | +0.05057 |
-|  | F129 | 4,568 | 17.46 | 3.49 | 3.26 | +0.03120 |
-|  | F146 | 4,549 | 3.35 | 2.30 | 2.20 | +0.03268 |
-|  | F158 | 4,560 | 6.58 | 3.30 | 3.18 | +0.02832 |
-|  | F184 | 4,560 | 10.14 | 3.94 | 3.93 | +0.00225 |
-|  | F213 | 4,556 | 12.77 | 6.77 | 5.55 | +0.20086 |
-| WFI05 | F062 | 4,240 | 10.67 | 7.11 | 5.54 | +0.22710 |
-|  | F087 | 4,247 | 21.08 | 3.94 | 3.67 | +0.06096 |
-|  | F106 | 4,250 | 6.26 | 3.45 | 3.46 | +0.00680 |
-|  | F129 | 4,248 | 16.82 | 3.11 | 3.04 | +0.00868 |
-|  | F146 | 4,245 | 3.38 | 2.03 | 2.03 | -0.00173 |
-|  | F158 | 4,250 | 6.01 | 2.96 | 2.88 | +0.01188 |
-|  | F184 | 4,246 | 9.26 | 4.05 | 3.88 | +0.01797 |
-|  | F213 | 4,249 | 11.59 | 6.83 | 5.64 | +0.22590 |
-| WFI06 | F062 | 4,468 | 9.78 | 7.52 | 5.50 | +0.29405 |
-|  | F087 | 4,482 | 11.57 | 5.33 | 3.80 | +0.31330 |
-|  | F106 | 4,485 | 4.43 | 3.41 | 3.26 | +0.02970 |
-|  | F129 | 4,493 | 16.97 | 3.55 | 3.17 | +0.08273 |
-|  | F146 | 4,492 | 3.77 | 2.44 | 2.20 | +0.12218 |
-|  | F158 | 4,498 | 5.01 | 3.05 | 2.94 | +0.02830 |
-|  | F184 | 4,492 | 12.18 | 4.18 | 3.84 | +0.05528 |
-|  | F213 | 4,492 | 9.94 | 7.79 | 5.85 | +0.35416 |
-| WFI07 | F062 | 3,800 | 11.22 | 7.13 | 5.94 | +0.18376 |
-|  | F087 | 3,818 | 23.90 | 4.12 | 3.86 | +0.04588 |
-|  | F106 | 3,806 | 5.63 | 3.39 | 3.30 | +0.02925 |
-|  | F129 | 3,787 | 15.26 | 3.17 | 3.04 | +0.01587 |
-|  | F146 | 3,779 | 3.56 | 2.02 | 2.00 | +0.00488 |
-|  | F158 | 3,771 | 6.97 | 3.03 | 2.98 | +0.01856 |
-|  | F184 | 3,792 | 7.46 | 3.98 | 3.81 | +0.02223 |
-|  | F213 | 3,805 | 11.70 | 6.57 | 5.17 | +0.23187 |
-| WFI08 | F062 | 4,454 | 9.42 | 7.10 | 5.27 | +0.28040 |
-|  | F087 | 4,462 | 15.50 | 3.97 | 3.78 | +0.03696 |
-|  | F106 | 4,463 | 5.52 | 3.32 | 3.29 | +0.01261 |
-|  | F129 | 4,463 | 16.77 | 3.12 | 3.08 | +0.01444 |
-|  | F146 | 4,459 | 3.52 | 2.04 | 2.04 | +0.00545 |
-|  | F158 | 4,460 | 6.25 | 2.94 | 2.88 | +0.01068 |
-|  | F184 | 4,460 | 10.83 | 3.83 | 3.79 | +0.01662 |
-|  | F213 | 4,460 | 12.48 | 7.07 | 5.29 | +0.32156 |
-| WFI09 | F062 | 3,157 | 10.52 | 6.71 | 5.31 | +0.18798 |
-|  | F087 | 3,156 | 18.56 | 4.57 | 3.61 | +0.18504 |
-|  | F106 | 3,155 | 4.89 | 3.21 | 3.26 | -0.00747 |
-|  | F129 | 3,159 | 14.51 | 3.17 | 3.01 | +0.04292 |
-|  | F146 | 3,153 | 3.70 | 2.09 | 1.92 | +0.08140 |
-|  | F158 | 3,152 | 6.43 | 2.86 | 2.81 | +0.02669 |
-|  | F184 | 3,144 | 8.57 | 3.82 | 3.80 | +0.00567 |
-|  | F213 | 3,155 | 9.69 | 6.48 | 5.44 | +0.20315 |
-| WFI10 | F062 | 4,436 | 12.67 | 8.67 | 6.68 | +0.24208 |
-|  | F087 | 4,441 | 24.53 | 5.03 | 4.74 | +0.02697 |
-|  | F106 | 4,439 | 7.89 | 4.46 | 4.35 | +0.01250 |
-|  | F129 | 4,435 | 20.13 | 4.17 | 4.12 | +0.00963 |
-|  | F146 | 4,440 | 4.62 | 3.03 | 2.94 | +0.01046 |
-|  | F158 | 4,440 | 7.79 | 4.10 | 4.05 | +0.01292 |
-|  | F184 | 4,442 | 13.36 | 5.47 | 5.23 | +0.02531 |
-|  | F213 | 4,448 | 17.33 | 6.76 | 6.19 | +0.06512 |
-| WFI11 | F062 | 4,111 | 11.26 | 7.33 | 5.98 | +0.19174 |
-|  | F087 | 4,111 | 16.96 | 4.67 | 4.26 | +0.05606 |
-|  | F106 | 4,109 | 6.04 | 3.59 | 3.63 | -0.00229 |
-|  | F129 | 4,114 | 18.72 | 3.40 | 3.34 | +0.01157 |
-|  | F146 | 4,112 | 3.34 | 2.35 | 2.36 | +0.00108 |
-|  | F158 | 4,110 | 5.93 | 3.31 | 3.26 | +0.01021 |
-|  | F184 | 4,107 | 12.81 | 4.28 | 4.28 | -0.00082 |
-|  | F213 | 4,104 | 12.31 | 7.44 | 5.82 | +0.24378 |
-| WFI12 | F062 | 4,448 | 9.94 | 7.35 | 5.45 | +0.29628 |
-|  | F087 | 4,448 | 18.00 | 5.14 | 3.76 | +0.34994 |
-|  | F106 | 4,450 | 5.79 | 3.19 | 3.25 | -0.00865 |
-|  | F129 | 4,452 | 15.02 | 3.06 | 2.98 | +0.02637 |
-|  | F146 | 4,453 | 2.94 | 2.10 | 2.06 | +0.02504 |
-|  | F158 | 4,457 | 5.49 | 2.91 | 2.83 | +0.01538 |
-|  | F184 | 4,457 | 9.74 | 3.68 | 3.66 | +0.02214 |
-|  | F213 | 4,455 | 10.20 | 6.30 | 5.12 | +0.19872 |
-| WFI13 | F062 | 4,137 | 11.79 | 7.56 | 5.65 | +0.25182 |
-|  | F087 | 4,134 | 14.60 | 4.23 | 3.93 | +0.04094 |
-|  | F106 | 4,118 | 5.77 | 3.41 | 3.36 | +0.00544 |
-|  | F129 | 4,122 | 21.10 | 3.39 | 3.34 | +0.01888 |
-|  | F146 | 4,110 | 3.61 | 2.28 | 2.26 | +0.00584 |
-|  | F158 | 4,123 | 5.63 | 3.33 | 3.21 | +0.02421 |
-|  | F184 | 4,125 | 13.57 | 3.99 | 4.00 | +0.00022 |
-|  | F213 | 4,124 | 15.12 | 6.15 | 5.27 | +0.13951 |
-| WFI14 | F062 | 4,174 | 11.50 | 7.60 | 5.59 | +0.26886 |
-|  | F087 | 4,174 | 14.75 | 4.61 | 3.79 | +0.15738 |
-|  | F106 | 4,179 | 7.26 | 3.49 | 3.46 | +0.00415 |
-|  | F129 | 4,178 | 19.36 | 3.05 | 3.02 | +0.00971 |
-|  | F146 | 4,174 | 2.99 | 1.99 | 2.01 | +0.00325 |
-|  | F158 | 4,178 | 5.84 | 3.06 | 2.98 | +0.01595 |
-|  | F184 | 4,187 | 12.13 | 4.13 | 4.12 | +0.00298 |
-|  | F213 | 4,182 | 13.46 | 5.77 | 5.10 | +0.12791 |
-| WFI15 | F062 | 4,352 | 8.35 | 6.65 | 5.45 | +0.16852 |
-|  | F087 | 4,349 | 14.34 | 4.10 | 3.78 | +0.07408 |
-|  | F106 | 4,350 | 4.77 | 3.22 | 3.17 | +0.00298 |
-|  | F129 | 4,335 | 17.31 | 3.09 | 2.96 | +0.03270 |
-|  | F146 | 4,331 | 3.82 | 2.02 | 2.01 | +0.00950 |
-|  | F158 | 4,334 | 4.63 | 2.87 | 2.78 | +0.01158 |
-|  | F184 | 4,324 | 13.39 | 3.84 | 3.85 | -0.00185 |
-|  | F213 | 4,326 | 11.89 | 5.98 | 4.97 | +0.18878 |
-| WFI16 | F062 | 4,435 | 10.37 | 6.73 | 4.93 | +0.27322 |
-|  | F087 | 4,424 | 19.02 | 3.61 | 3.44 | +0.03038 |
-|  | F106 | 4,431 | 4.33 | 3.29 | 3.20 | +0.01899 |
-|  | F129 | 4,430 | 19.16 | 2.99 | 2.83 | +0.02931 |
-|  | F146 | 4,430 | 4.13 | 2.01 | 1.94 | +0.03058 |
-|  | F158 | 4,430 | 5.37 | 3.06 | 2.81 | +0.05501 |
-|  | F184 | 4,424 | 12.94 | 3.71 | 3.74 | -0.00342 |
-|  | F213 | 4,422 | 15.01 | 6.12 | 5.18 | +0.17511 |
-| WFI17 | F062 | 3,926 | 9.50 | 6.81 | 6.01 | +0.12658 |
-|  | F087 | 3,923 | 16.53 | 4.53 | 4.23 | +0.10113 |
-|  | F106 | 3,925 | 4.23 | 3.87 | 4.03 | +0.03755 |
-|  | F129 | 3,925 | 18.65 | 3.74 | 3.59 | +0.09215 |
-|  | F146 | 3,917 | 4.91 | 2.54 | 2.76 | +0.04810 |
-|  | F158 | 3,925 | 6.28 | 3.63 | 3.61 | +0.02909 |
-|  | F184 | 3,927 | 10.39 | 4.65 | 5.02 | -0.00981 |
-|  | F213 | 3,923 | 13.54 | 6.39 | 5.80 | +0.14124 |
-| WFI18 | F062 | 3,575 | 11.46 | 6.64 | 5.83 | +0.13861 |
-|  | F087 | 3,573 | 28.26 | 4.65 | 3.89 | +0.17893 |
-|  | F106 | 3,572 | 5.47 | 3.71 | 3.68 | +0.05488 |
-|  | F129 | 3,562 | 9.48 | 3.63 | 3.34 | +0.10570 |
-|  | F146 | 3,558 | 3.50 | 2.32 | 2.34 | +0.11484 |
-|  | F158 | 3,557 | 8.39 | 3.37 | 3.23 | +0.07156 |
-|  | F184 | 3,557 | 6.45 | 4.39 | 4.69 | +0.00919 |
-|  | F213 | 3,551 | 11.30 | 6.16 | 5.54 | +0.14646 |
+| WFI01 | F062 | 4,597 | 14.97 | 9.31 | 7.65 | +0.18342 |
+|  | F087 | 4,601 | 33.79 | 5.51 | 5.01 | +0.05890 |
+|  | F106 | 4,603 | 5.72 | 4.53 | 4.49 | +0.01015 |
+|  | F129 | 4,605 | 17.52 | 4.48 | 4.38 | +0.01858 |
+|  | F146 | 4,601 | 7.19 | 3.00 | 2.99 | +0.00812 |
+|  | F158 | 4,604 | 12.07 | 4.21 | 4.13 | +0.01381 |
+|  | F184 | 4,604 | 8.50 | 5.34 | 5.48 | -0.00881 |
+|  | F213 | 4,604 | 16.06 | 7.87 | 6.77 | +0.14186 |
+| WFI02 | F062 | 4,211 | 12.88 | 7.74 | 6.12 | +0.21100 |
+|  | F087 | 4,206 | 14.75 | 4.80 | 4.32 | +0.09436 |
+|  | F106 | 4,207 | 7.72 | 3.96 | 3.92 | +0.00713 |
+|  | F129 | 4,204 | 20.33 | 3.57 | 3.50 | +0.01045 |
+|  | F146 | 4,204 | 3.68 | 2.46 | 2.47 | +0.00029 |
+|  | F158 | 4,207 | 6.65 | 3.60 | 3.50 | +0.01278 |
+|  | F184 | 4,201 | 10.98 | 4.39 | 4.24 | +0.02495 |
+|  | F213 | 4,205 | 11.21 | 7.97 | 6.66 | +0.22660 |
+| WFI03 | F062 | 4,576 | 8.97 | 7.07 | 5.65 | +0.20567 |
+|  | F087 | 4,574 | 12.01 | 4.96 | 3.87 | +0.23195 |
+|  | F106 | 4,566 | 4.44 | 3.38 | 3.32 | +0.00802 |
+|  | F129 | 4,562 | 15.32 | 3.31 | 3.15 | +0.03641 |
+|  | F146 | 4,552 | 3.06 | 2.21 | 2.14 | +0.03794 |
+|  | F158 | 4,556 | 4.90 | 3.05 | 3.06 | +0.00607 |
+|  | F184 | 4,564 | 9.98 | 4.47 | 3.97 | +0.11287 |
+|  | F213 | 4,573 | 8.85 | 8.02 | 6.40 | +0.27087 |
+| WFI04 | F062 | 4,568 | 12.81 | 8.24 | 5.92 | +0.27716 |
+|  | F087 | 4,564 | 23.54 | 4.37 | 4.16 | +0.04557 |
+|  | F106 | 4,564 | 7.82 | 3.65 | 3.39 | +0.04961 |
+|  | F129 | 4,568 | 17.45 | 3.49 | 3.27 | +0.03090 |
+|  | F146 | 4,549 | 3.35 | 2.30 | 2.21 | +0.03240 |
+|  | F158 | 4,560 | 6.58 | 3.28 | 3.18 | +0.02911 |
+|  | F184 | 4,560 | 10.14 | 3.94 | 3.92 | +0.00275 |
+|  | F213 | 4,556 | 12.79 | 6.79 | 5.56 | +0.19915 |
+| WFI05 | F062 | 4,240 | 10.66 | 7.10 | 5.57 | +0.22975 |
+|  | F087 | 4,247 | 21.06 | 3.92 | 3.66 | +0.06281 |
+|  | F106 | 4,250 | 6.26 | 3.44 | 3.44 | +0.00719 |
+|  | F129 | 4,248 | 16.76 | 3.09 | 3.03 | +0.00986 |
+|  | F146 | 4,245 | 3.35 | 2.00 | 2.02 | -0.00115 |
+|  | F158 | 4,250 | 5.98 | 2.96 | 2.86 | +0.01364 |
+|  | F184 | 4,246 | 9.21 | 4.03 | 3.87 | +0.01922 |
+|  | F213 | 4,249 | 11.59 | 6.82 | 5.63 | +0.23221 |
+| WFI06 | F062 | 4,468 | 9.78 | 7.51 | 5.51 | +0.29449 |
+|  | F087 | 4,482 | 11.57 | 5.33 | 3.79 | +0.31297 |
+|  | F106 | 4,485 | 4.43 | 3.41 | 3.26 | +0.02853 |
+|  | F129 | 4,493 | 16.97 | 3.55 | 3.20 | +0.08073 |
+|  | F146 | 4,492 | 3.77 | 2.44 | 2.21 | +0.12050 |
+|  | F158 | 4,498 | 5.01 | 3.04 | 2.96 | +0.02325 |
+|  | F184 | 4,492 | 12.18 | 4.18 | 3.86 | +0.05298 |
+|  | F213 | 4,492 | 9.94 | 7.78 | 5.83 | +0.35771 |
+| WFI07 | F062 | 3,800 | 11.21 | 7.12 | 5.90 | +0.18687 |
+|  | F087 | 3,818 | 23.88 | 4.12 | 3.85 | +0.04898 |
+|  | F106 | 3,806 | 5.57 | 3.37 | 3.28 | +0.03093 |
+|  | F129 | 3,787 | 15.32 | 3.17 | 3.02 | +0.01901 |
+|  | F146 | 3,779 | 3.53 | 1.99 | 1.97 | +0.00721 |
+|  | F158 | 3,771 | 6.96 | 3.04 | 2.96 | +0.02145 |
+|  | F184 | 3,792 | 7.42 | 3.95 | 3.79 | +0.02407 |
+|  | F213 | 3,805 | 11.71 | 6.59 | 5.16 | +0.24435 |
+| WFI08 | F062 | 4,454 | 9.39 | 7.05 | 5.25 | +0.28539 |
+|  | F087 | 4,462 | 15.48 | 3.94 | 3.76 | +0.03857 |
+|  | F106 | 4,463 | 5.48 | 3.30 | 3.25 | +0.01317 |
+|  | F129 | 4,463 | 16.78 | 3.10 | 3.07 | +0.01665 |
+|  | F146 | 4,459 | 3.47 | 2.02 | 2.01 | +0.00681 |
+|  | F158 | 4,460 | 6.27 | 2.92 | 2.85 | +0.01263 |
+|  | F184 | 4,460 | 10.79 | 3.84 | 3.79 | +0.01778 |
+|  | F213 | 4,460 | 12.47 | 7.06 | 5.26 | +0.33563 |
+| WFI09 | F062 | 3,157 | 10.52 | 6.71 | 5.33 | +0.18874 |
+|  | F087 | 3,156 | 18.56 | 4.57 | 3.62 | +0.18334 |
+|  | F106 | 3,155 | 4.89 | 3.21 | 3.25 | -0.00800 |
+|  | F129 | 3,159 | 14.51 | 3.16 | 3.02 | +0.04094 |
+|  | F146 | 3,153 | 3.70 | 2.09 | 1.92 | +0.07954 |
+|  | F158 | 3,152 | 6.43 | 2.87 | 2.80 | +0.02451 |
+|  | F184 | 3,144 | 8.57 | 3.80 | 3.79 | +0.00488 |
+|  | F213 | 3,155 | 9.69 | 6.48 | 5.44 | +0.20265 |
+| WFI10 | F062 | 4,436 | 12.68 | 8.68 | 6.69 | +0.24116 |
+|  | F087 | 4,441 | 24.55 | 5.03 | 4.75 | +0.02667 |
+|  | F106 | 4,439 | 7.90 | 4.45 | 4.35 | +0.01249 |
+|  | F129 | 4,435 | 20.14 | 4.17 | 4.11 | +0.00978 |
+|  | F146 | 4,440 | 4.62 | 3.03 | 2.94 | +0.01051 |
+|  | F158 | 4,440 | 7.79 | 4.11 | 4.05 | +0.01360 |
+|  | F184 | 4,442 | 13.36 | 5.46 | 5.23 | +0.02532 |
+|  | F213 | 4,448 | 17.33 | 6.76 | 6.21 | +0.06516 |
+| WFI11 | F062 | 4,111 | 11.26 | 7.34 | 5.99 | +0.19255 |
+|  | F087 | 4,111 | 16.96 | 4.67 | 4.26 | +0.05593 |
+|  | F106 | 4,109 | 6.04 | 3.59 | 3.61 | -0.00229 |
+|  | F129 | 4,114 | 18.72 | 3.40 | 3.34 | +0.01151 |
+|  | F146 | 4,112 | 3.33 | 2.34 | 2.36 | +0.00084 |
+|  | F158 | 4,110 | 5.93 | 3.30 | 3.26 | +0.01061 |
+|  | F184 | 4,107 | 12.82 | 4.29 | 4.27 | -0.00050 |
+|  | F213 | 4,104 | 12.31 | 7.44 | 5.81 | +0.24401 |
+| WFI12 | F062 | 4,448 | 9.96 | 7.40 | 5.48 | +0.28758 |
+|  | F087 | 4,448 | 18.04 | 5.18 | 3.79 | +0.32909 |
+|  | F106 | 4,450 | 5.83 | 3.21 | 3.30 | -0.00893 |
+|  | F129 | 4,452 | 14.94 | 3.07 | 3.01 | +0.01989 |
+|  | F146 | 4,453 | 3.04 | 2.15 | 2.11 | +0.01847 |
+|  | F158 | 4,457 | 5.53 | 2.93 | 2.88 | +0.01132 |
+|  | F184 | 4,457 | 9.76 | 3.68 | 3.67 | +0.02063 |
+|  | F213 | 4,455 | 10.16 | 6.33 | 5.18 | +0.18501 |
+| WFI13 | F062 | 4,137 | 11.79 | 7.56 | 5.64 | +0.25219 |
+|  | F087 | 4,134 | 14.63 | 4.24 | 3.92 | +0.04090 |
+|  | F106 | 4,118 | 5.77 | 3.41 | 3.35 | +0.00564 |
+|  | F129 | 4,122 | 21.10 | 3.40 | 3.33 | +0.01874 |
+|  | F146 | 4,110 | 3.61 | 2.28 | 2.26 | +0.00556 |
+|  | F158 | 4,123 | 5.63 | 3.33 | 3.20 | +0.02527 |
+|  | F184 | 4,125 | 13.56 | 3.98 | 3.99 | +0.00026 |
+|  | F213 | 4,124 | 15.12 | 6.14 | 5.29 | +0.13870 |
+| WFI14 | F062 | 4,174 | 11.50 | 7.61 | 5.58 | +0.27526 |
+|  | F087 | 4,174 | 14.79 | 4.57 | 3.79 | +0.16425 |
+|  | F106 | 4,179 | 7.24 | 3.48 | 3.44 | +0.00526 |
+|  | F129 | 4,178 | 19.33 | 3.02 | 2.99 | +0.01185 |
+|  | F146 | 4,174 | 2.97 | 1.96 | 1.99 | +0.00393 |
+|  | F158 | 4,178 | 5.85 | 3.05 | 2.96 | +0.01968 |
+|  | F184 | 4,187 | 12.13 | 4.11 | 4.11 | +0.00327 |
+|  | F213 | 4,182 | 13.50 | 5.76 | 5.06 | +0.13375 |
+| WFI15 | F062 | 4,352 | 8.35 | 6.65 | 5.45 | +0.16999 |
+|  | F087 | 4,349 | 14.34 | 4.08 | 3.77 | +0.07333 |
+|  | F106 | 4,350 | 4.77 | 3.20 | 3.16 | +0.00311 |
+|  | F129 | 4,335 | 17.34 | 3.08 | 2.95 | +0.03193 |
+|  | F146 | 4,331 | 3.82 | 2.02 | 2.01 | +0.00862 |
+|  | F158 | 4,334 | 4.62 | 2.87 | 2.78 | +0.01173 |
+|  | F184 | 4,324 | 13.39 | 3.85 | 3.85 | -0.00090 |
+|  | F213 | 4,326 | 11.89 | 5.99 | 4.96 | +0.18854 |
+| WFI16 | F062 | 4,435 | 10.36 | 6.73 | 4.93 | +0.27452 |
+|  | F087 | 4,424 | 18.98 | 3.62 | 3.42 | +0.03137 |
+|  | F106 | 4,431 | 4.33 | 3.29 | 3.20 | +0.01931 |
+|  | F129 | 4,430 | 19.16 | 2.98 | 2.82 | +0.03077 |
+|  | F146 | 4,430 | 4.12 | 1.99 | 1.92 | +0.03275 |
+|  | F158 | 4,430 | 5.35 | 3.03 | 2.80 | +0.05781 |
+|  | F184 | 4,424 | 12.93 | 3.70 | 3.73 | -0.00358 |
+|  | F213 | 4,422 | 15.00 | 6.12 | 5.19 | +0.18041 |
+| WFI17 | F062 | 3,926 | 9.50 | 6.80 | 5.99 | +0.12652 |
+|  | F087 | 3,923 | 16.52 | 4.53 | 4.24 | +0.09982 |
+|  | F106 | 3,925 | 4.23 | 3.88 | 4.03 | +0.03798 |
+|  | F129 | 3,925 | 18.65 | 3.72 | 3.63 | +0.09032 |
+|  | F146 | 3,917 | 4.91 | 2.54 | 2.76 | +0.04698 |
+|  | F158 | 3,925 | 6.28 | 3.62 | 3.59 | +0.02527 |
+|  | F184 | 3,927 | 10.39 | 4.66 | 5.02 | -0.01078 |
+|  | F213 | 3,923 | 13.54 | 6.40 | 5.80 | +0.14364 |
+| WFI18 | F062 | 3,575 | 11.59 | 6.66 | 5.89 | +0.12350 |
+|  | F087 | 3,573 | 28.10 | 4.74 | 4.04 | +0.12586 |
+|  | F106 | 3,572 | 5.73 | 3.89 | 3.76 | +0.04383 |
+|  | F129 | 3,562 | 9.68 | 3.72 | 3.45 | +0.07433 |
+|  | F146 | 3,558 | 3.76 | 2.52 | 2.55 | +0.07534 |
+|  | F158 | 3,557 | 8.53 | 3.50 | 3.39 | +0.03106 |
+|  | F184 | 3,557 | 6.62 | 4.47 | 4.84 | +0.00116 |
+|  | F213 | 3,551 | 11.47 | 6.36 | 5.63 | +0.13788 |
 
 **Table A1. CAR201 residual metrics by detector and filter.** Detector labels
 appear once at the start of each eight-filter block. The no-ice-correction
@@ -1395,121 +1457,122 @@ reported photometric uncertainties and detector-level excess scatter are used
 for both predictions, with star/filter locations profiled separately. These are
 in-sample comparisons.
 
-| Detector | LED | Filter | Groups | RCS-only TMM $\chi^2$/group | Joint $\chi^2$/group | $\Delta\bar{\ell}_{J-R}$/group |
+| Detector | LED | Filter | Nonreference groups | RCS-only TMM $\chi^2$/group | Joint $\chi^2$/group | $\Delta\bar{\ell}_{J-R}$/group |
 | --- | ---: | --- | ---: | ---: | ---: | ---: |
-| WFI01 | 1 | F062 | 34,816 | 0.07328 | 0.05840 | +0.007439 |
-|  | 2 | F087 | 34,816 | 0.02492 | 0.02654 | -0.000811 |
-|  | 3 | F106 | 34,816 | 0.01340 | 0.01292 | +0.000239 |
-|  | 4 | F129 | 34,816 | 0.01083 | 0.01006 | +0.000388 |
-|  | 5 | F158 | 34,816 | 0.00683 | 0.00638 | +0.000220 |
-|  | 6 | F184 | 34,560 | 0.01032 | 0.00728 | +0.001518 |
-| WFI02 | 1 | F062 | 34,816 | 0.05679 | 0.04371 | +0.006542 |
-|  | 2 | F087 | 34,816 | 0.05076 | 0.04219 | +0.004285 |
-|  | 3 | F106 | 34,816 | 0.01280 | 0.01054 | +0.001127 |
-|  | 4 | F129 | 34,816 | 0.01935 | 0.01909 | +0.000130 |
-|  | 5 | F158 | 34,816 | 0.01771 | 0.01522 | +0.001247 |
-|  | 6 | F184 | 34,560 | 0.01098 | 0.00880 | +0.001093 |
-| WFI03 | 1 | F062 | 34,816 | 0.03479 | 0.03355 | +0.000619 |
-|  | 2 | F087 | 34,816 | 0.03768 | 0.03263 | +0.002524 |
-|  | 3 | F106 | 34,816 | 0.00821 | 0.00597 | +0.001119 |
-|  | 4 | F129 | 34,816 | 0.01092 | 0.01174 | -0.000408 |
-|  | 5 | F158 | 34,816 | 0.01423 | 0.01212 | +0.001056 |
-|  | 6 | F184 | 34,560 | 0.01220 | 0.00941 | +0.001395 |
-| WFI04 | 1 | F062 | 34,816 | 0.06202 | 0.05668 | +0.002669 |
-|  | 2 | F087 | 34,816 | 0.05954 | 0.05466 | +0.002441 |
-|  | 3 | F106 | 34,816 | 0.01495 | 0.01411 | +0.000420 |
-|  | 4 | F129 | 34,816 | 0.03583 | 0.03135 | +0.002238 |
-|  | 5 | F158 | 34,816 | 0.01905 | 0.01791 | +0.000569 |
-|  | 6 | F184 | 34,560 | 0.00987 | 0.01023 | -0.000179 |
-| WFI05 | 1 | F062 | 34,816 | 0.03029 | 0.02664 | +0.001827 |
-|  | 2 | F087 | 34,816 | 0.03950 | 0.03522 | +0.002137 |
-|  | 3 | F106 | 34,816 | 0.01251 | 0.01212 | +0.000193 |
-|  | 4 | F129 | 34,816 | 0.01894 | 0.01812 | +0.000409 |
-|  | 5 | F158 | 34,816 | 0.01251 | 0.01138 | +0.000566 |
-|  | 6 | F184 | 34,560 | 0.00982 | 0.00896 | +0.000427 |
-| WFI06 | 1 | F062 | 34,816 | 0.08457 | 0.08019 | +0.002189 |
-|  | 2 | F087 | 34,816 | 0.04572 | 0.04356 | +0.001082 |
-|  | 3 | F106 | 34,816 | 0.01450 | 0.01007 | +0.002218 |
-|  | 4 | F129 | 34,816 | 0.02007 | 0.01918 | +0.000442 |
-|  | 5 | F158 | 34,816 | 0.01896 | 0.01702 | +0.000973 |
-|  | 6 | F184 | 34,560 | 0.01321 | 0.01009 | +0.001559 |
-| WFI07 | 1 | F062 | 34,816 | 0.03425 | 0.02859 | +0.002826 |
-|  | 2 | F087 | 34,816 | 0.02174 | 0.01785 | +0.001944 |
-|  | 3 | F106 | 34,816 | 0.01076 | 0.01185 | -0.000542 |
-|  | 4 | F129 | 34,816 | 0.01125 | 0.01162 | -0.000189 |
-|  | 5 | F158 | 34,816 | 0.00957 | 0.00918 | +0.000195 |
-|  | 6 | F184 | 34,560 | 0.01083 | 0.00955 | +0.000643 |
-| WFI08 | 1 | F062 | 34,816 | 0.02846 | 0.02507 | +0.001694 |
-|  | 2 | F087 | 34,816 | 0.02598 | 0.02227 | +0.001856 |
-|  | 3 | F106 | 34,816 | 0.01160 | 0.01204 | -0.000222 |
-|  | 4 | F129 | 34,816 | 0.02046 | 0.01987 | +0.000293 |
-|  | 5 | F158 | 34,816 | 0.01437 | 0.01294 | +0.000715 |
-|  | 6 | F184 | 34,560 | 0.01074 | 0.00957 | +0.000585 |
-| WFI09 | 1 | F062 | 34,816 | 0.03682 | 0.03099 | +0.002913 |
-|  | 2 | F087 | 34,816 | 0.03744 | 0.03553 | +0.000952 |
-|  | 3 | F106 | 34,816 | 0.00740 | 0.00643 | +0.000488 |
-|  | 4 | F129 | 34,816 | 0.01371 | 0.01286 | +0.000424 |
-|  | 5 | F158 | 34,816 | 0.01285 | 0.01208 | +0.000385 |
-|  | 6 | F184 | 34,560 | 0.00942 | 0.00832 | +0.000552 |
-| WFI10 | 1 | F062 | 34,816 | 0.03811 | 0.03203 | +0.003039 |
-|  | 2 | F087 | 34,816 | 0.02315 | 0.01797 | +0.002588 |
-|  | 3 | F106 | 34,816 | 0.01026 | 0.01046 | -0.000098 |
-|  | 4 | F129 | 34,816 | 0.01859 | 0.01812 | +0.000238 |
-|  | 5 | F158 | 34,816 | 0.00928 | 0.00821 | +0.000535 |
-|  | 6 | F184 | 34,560 | 0.00867 | 0.00698 | +0.000844 |
-| WFI11 | 1 | F062 | 34,816 | 0.02783 | 0.02623 | +0.000797 |
-|  | 2 | F087 | 34,816 | 0.03708 | 0.03117 | +0.002955 |
-|  | 3 | F106 | 34,816 | 0.00996 | 0.00930 | +0.000330 |
-|  | 4 | F129 | 34,816 | 0.01829 | 0.01773 | +0.000283 |
-|  | 5 | F158 | 34,816 | 0.01298 | 0.01107 | +0.000958 |
-|  | 6 | F184 | 34,560 | 0.01205 | 0.00980 | +0.001124 |
-| WFI12 | 1 | F062 | 34,816 | 0.05605 | 0.05364 | +0.001205 |
-|  | 2 | F087 | 34,816 | 0.04763 | 0.04453 | +0.001549 |
-|  | 3 | F106 | 34,816 | 0.01363 | 0.01243 | +0.000602 |
-|  | 4 | F129 | 34,816 | 0.03369 | 0.03240 | +0.000642 |
-|  | 5 | F158 | 34,816 | 0.02179 | 0.02090 | +0.000441 |
-|  | 6 | F184 | 34,560 | 0.01244 | 0.01211 | +0.000169 |
-| WFI13 | 1 | F062 | 34,816 | 0.03488 | 0.02992 | +0.002480 |
-|  | 2 | F087 | 34,816 | 0.03824 | 0.02954 | +0.004347 |
-|  | 3 | F106 | 34,816 | 0.01080 | 0.00932 | +0.000739 |
-|  | 4 | F129 | 34,816 | 0.01697 | 0.01665 | +0.000163 |
-|  | 5 | F158 | 34,816 | 0.01552 | 0.01289 | +0.001314 |
-|  | 6 | F184 | 34,560 | 0.01196 | 0.00871 | +0.001623 |
-| WFI14 | 1 | F062 | 34,816 | 0.05026 | 0.04236 | +0.003950 |
-|  | 2 | F087 | 34,816 | 0.05224 | 0.04298 | +0.004630 |
-|  | 3 | F106 | 34,816 | 0.01209 | 0.01039 | +0.000851 |
-|  | 4 | F129 | 34,816 | 0.01652 | 0.01646 | +0.000030 |
-|  | 5 | F158 | 34,816 | 0.01663 | 0.01404 | +0.001294 |
-|  | 6 | F184 | 34,560 | 0.01213 | 0.00940 | +0.001365 |
-| WFI15 | 1 | F062 | 34,816 | 0.02864 | 0.02728 | +0.000679 |
-|  | 2 | F087 | 34,816 | 0.02747 | 0.02630 | +0.000586 |
-|  | 3 | F106 | 34,816 | 0.00795 | 0.00677 | +0.000590 |
-|  | 4 | F129 | 34,816 | 0.01405 | 0.01443 | -0.000187 |
-|  | 5 | F158 | 34,816 | 0.01613 | 0.01361 | +0.001259 |
-|  | 6 | F184 | 34,560 | 0.01387 | 0.01022 | +0.001824 |
-| WFI16 | 1 | F062 | 34,816 | 0.03095 | 0.03277 | -0.000906 |
-|  | 2 | F087 | 34,816 | 0.02716 | 0.02330 | +0.001928 |
-|  | 3 | F106 | 34,816 | 0.00815 | 0.00686 | +0.000645 |
-|  | 4 | F129 | 34,816 | 0.01740 | 0.01777 | -0.000190 |
-|  | 5 | F158 | 34,816 | 0.01449 | 0.01365 | +0.000418 |
-|  | 6 | F184 | 34,560 | 0.01260 | 0.00944 | +0.001579 |
-| WFI17 | 1 | F062 | 34,816 | 0.03180 | 0.02676 | +0.002517 |
-|  | 2 | F087 | 34,816 | 0.01924 | 0.01719 | +0.001023 |
-|  | 3 | F106 | 34,816 | 0.00786 | 0.00742 | +0.000219 |
-|  | 4 | F129 | 34,816 | 0.01413 | 0.01432 | -0.000097 |
-|  | 5 | F158 | 34,816 | 0.01058 | 0.01061 | -0.000011 |
-|  | 6 | F184 | 34,560 | 0.00879 | 0.00806 | +0.000364 |
-| WFI18 | 1 | F062 | 34,816 | 0.05739 | 0.04868 | +0.004356 |
-|  | 2 | F087 | 34,816 | 0.10093 | 0.10111 | -0.000090 |
-|  | 3 | F106 | 34,816 | 0.06665 | 0.06658 | +0.000037 |
-|  | 4 | F129 | 34,816 | 0.06844 | 0.07119 | -0.001374 |
-|  | 5 | F158 | 34,816 | 0.06017 | 0.06237 | -0.001100 |
-|  | 6 | F184 | 34,560 | 0.06258 | 0.06079 | +0.000894 |
+| WFI01 | 1 | F062 | 36,352 | 0.09371 | 0.06990 | +0.011906 |
+|  | 2 | F087 | 36,352 | 0.04365 | 0.03792 | +0.002866 |
+|  | 3 | F106 | 36,352 | 0.02084 | 0.01566 | +0.002590 |
+|  | 4 | F129 | 36,352 | 0.01063 | 0.00936 | +0.000637 |
+|  | 5 | F158 | 36,352 | 0.01255 | 0.00692 | +0.002817 |
+|  | 6 | F184 | 36,096 | 0.00935 | 0.00770 | +0.000823 |
+| WFI02 | 1 | F062 | 36,352 | 0.05585 | 0.04303 | +0.006411 |
+|  | 2 | F087 | 36,352 | 0.05787 | 0.04268 | +0.007596 |
+|  | 3 | F106 | 36,352 | 0.01211 | 0.01052 | +0.000796 |
+|  | 4 | F129 | 36,352 | 0.01916 | 0.01945 | -0.000145 |
+|  | 5 | F158 | 36,352 | 0.01765 | 0.01568 | +0.000983 |
+|  | 6 | F184 | 36,096 | 0.01280 | 0.00984 | +0.001480 |
+| WFI03 | 1 | F062 | 36,352 | 0.03373 | 0.03266 | +0.000534 |
+|  | 2 | F087 | 36,352 | 0.04443 | 0.03303 | +0.005699 |
+|  | 3 | F106 | 36,352 | 0.00905 | 0.00628 | +0.001385 |
+|  | 4 | F129 | 36,352 | 0.01104 | 0.01201 | -0.000487 |
+|  | 5 | F158 | 36,352 | 0.01381 | 0.01250 | +0.000653 |
+|  | 6 | F184 | 36,096 | 0.01381 | 0.00995 | +0.001930 |
+| WFI04 | 1 | F062 | 36,352 | 0.06696 | 0.06294 | +0.002012 |
+|  | 2 | F087 | 36,352 | 0.05963 | 0.05307 | +0.003280 |
+|  | 3 | F106 | 36,352 | 0.01494 | 0.01467 | +0.000139 |
+|  | 4 | F129 | 36,352 | 0.03512 | 0.03031 | +0.002405 |
+|  | 5 | F158 | 36,352 | 0.01961 | 0.01812 | +0.000743 |
+|  | 6 | F184 | 36,096 | 0.00976 | 0.00960 | +0.000078 |
+| WFI05 | 1 | F062 | 36,352 | 0.03626 | 0.03283 | +0.001715 |
+|  | 2 | F087 | 36,352 | 0.03984 | 0.03419 | +0.002828 |
+|  | 3 | F106 | 36,352 | 0.01233 | 0.01243 | -0.000051 |
+|  | 4 | F129 | 36,352 | 0.01856 | 0.01786 | +0.000348 |
+|  | 5 | F158 | 36,352 | 0.01234 | 0.01156 | +0.000390 |
+|  | 6 | F184 | 36,096 | 0.01003 | 0.00904 | +0.000492 |
+| WFI06 | 1 | F062 | 36,352 | 0.08147 | 0.07704 | +0.002213 |
+|  | 2 | F087 | 36,352 | 0.04819 | 0.04234 | +0.002924 |
+|  | 3 | F106 | 36,352 | 0.01753 | 0.01035 | +0.003592 |
+|  | 4 | F129 | 36,352 | 0.02076 | 0.01942 | +0.000669 |
+|  | 5 | F158 | 36,352 | 0.01985 | 0.01894 | +0.000455 |
+|  | 6 | F184 | 36,096 | 0.01574 | 0.01078 | +0.002477 |
+| WFI07 | 1 | F062 | 36,352 | 0.04812 | 0.04065 | +0.003735 |
+|  | 2 | F087 | 36,352 | 0.02744 | 0.02238 | +0.002530 |
+|  | 3 | F106 | 36,352 | 0.01183 | 0.01226 | -0.000216 |
+|  | 4 | F129 | 36,352 | 0.01165 | 0.01160 | +0.000025 |
+|  | 5 | F158 | 36,352 | 0.00978 | 0.00942 | +0.000183 |
+|  | 6 | F184 | 36,096 | 0.01119 | 0.00933 | +0.000932 |
+| WFI08 | 1 | F062 | 36,352 | 0.03751 | 0.03264 | +0.002438 |
+|  | 2 | F087 | 36,352 | 0.02797 | 0.02413 | +0.001918 |
+|  | 3 | F106 | 36,352 | 0.01252 | 0.01246 | +0.000032 |
+|  | 4 | F129 | 36,352 | 0.02033 | 0.01924 | +0.000547 |
+|  | 5 | F158 | 36,352 | 0.01446 | 0.01376 | +0.000349 |
+|  | 6 | F184 | 36,096 | 0.01114 | 0.00973 | +0.000702 |
+| WFI09 | 1 | F062 | 36,352 | 0.04167 | 0.03558 | +0.003044 |
+|  | 2 | F087 | 36,352 | 0.04204 | 0.03597 | +0.003035 |
+|  | 3 | F106 | 36,352 | 0.00903 | 0.00696 | +0.001032 |
+|  | 4 | F129 | 36,352 | 0.01395 | 0.01313 | +0.000413 |
+|  | 5 | F158 | 36,352 | 0.01254 | 0.01195 | +0.000297 |
+|  | 6 | F184 | 36,096 | 0.01058 | 0.00965 | +0.000467 |
+| WFI10 | 1 | F062 | 36,352 | 0.04605 | 0.03671 | +0.004671 |
+|  | 2 | F087 | 36,352 | 0.02513 | 0.01861 | +0.003263 |
+|  | 3 | F106 | 36,352 | 0.01094 | 0.01143 | -0.000245 |
+|  | 4 | F129 | 36,352 | 0.01892 | 0.01812 | +0.000399 |
+|  | 5 | F158 | 36,352 | 0.00946 | 0.00868 | +0.000390 |
+|  | 6 | F184 | 36,096 | 0.00892 | 0.00688 | +0.001022 |
+| WFI11 | 1 | F062 | 36,352 | 0.02848 | 0.02659 | +0.000944 |
+|  | 2 | F087 | 36,352 | 0.03866 | 0.02973 | +0.004465 |
+|  | 3 | F106 | 36,352 | 0.00962 | 0.00938 | +0.000122 |
+|  | 4 | F129 | 36,352 | 0.01802 | 0.01772 | +0.000149 |
+|  | 5 | F158 | 36,352 | 0.01251 | 0.01113 | +0.000690 |
+|  | 6 | F184 | 36,096 | 0.01217 | 0.00995 | +0.001110 |
+| WFI12 | 1 | F062 | 36,352 | 0.05411 | 0.05084 | +0.001634 |
+|  | 2 | F087 | 36,352 | 0.05042 | 0.04379 | +0.003315 |
+|  | 3 | F106 | 36,352 | 0.01452 | 0.01266 | +0.000928 |
+|  | 4 | F129 | 36,352 | 0.03420 | 0.03276 | +0.000721 |
+|  | 5 | F158 | 36,352 | 0.02169 | 0.02106 | +0.000315 |
+|  | 6 | F184 | 36,096 | 0.01329 | 0.01283 | +0.000230 |
+| WFI13 | 1 | F062 | 36,352 | 0.03505 | 0.02981 | +0.002620 |
+|  | 2 | F087 | 36,352 | 0.04093 | 0.02889 | +0.006017 |
+|  | 3 | F106 | 36,352 | 0.01049 | 0.00952 | +0.000484 |
+|  | 4 | F129 | 36,352 | 0.01678 | 0.01684 | -0.000028 |
+|  | 5 | F158 | 36,352 | 0.01520 | 0.01349 | +0.000859 |
+|  | 6 | F184 | 36,096 | 0.01308 | 0.00932 | +0.001882 |
+| WFI14 | 1 | F062 | 36,352 | 0.04886 | 0.04115 | +0.003856 |
+|  | 2 | F087 | 36,352 | 0.05594 | 0.04242 | +0.006759 |
+|  | 3 | F106 | 36,352 | 0.01188 | 0.01040 | +0.000737 |
+|  | 4 | F129 | 36,352 | 0.01640 | 0.01681 | -0.000204 |
+|  | 5 | F158 | 36,352 | 0.01684 | 0.01478 | +0.001028 |
+|  | 6 | F184 | 36,096 | 0.01436 | 0.01086 | +0.001753 |
+| WFI15 | 1 | F062 | 36,352 | 0.02899 | 0.02765 | +0.000670 |
+|  | 2 | F087 | 36,352 | 0.03452 | 0.02681 | +0.003852 |
+|  | 3 | F106 | 36,352 | 0.00843 | 0.00721 | +0.000610 |
+|  | 4 | F129 | 36,352 | 0.01449 | 0.01482 | -0.000164 |
+|  | 5 | F158 | 36,352 | 0.01565 | 0.01390 | +0.000872 |
+|  | 6 | F184 | 36,096 | 0.01481 | 0.01080 | +0.002003 |
+| WFI16 | 1 | F062 | 36,352 | 0.03412 | 0.03543 | -0.000657 |
+|  | 2 | F087 | 36,352 | 0.02707 | 0.02320 | +0.001936 |
+|  | 3 | F106 | 36,352 | 0.00851 | 0.00690 | +0.000804 |
+|  | 4 | F129 | 36,352 | 0.01663 | 0.01696 | -0.000164 |
+|  | 5 | F158 | 36,352 | 0.01423 | 0.01464 | -0.000206 |
+|  | 6 | F184 | 36,096 | 0.01303 | 0.00933 | +0.001852 |
+| WFI17 | 1 | F062 | 36,352 | 0.04526 | 0.03833 | +0.003470 |
+|  | 2 | F087 | 36,352 | 0.02317 | 0.02066 | +0.001252 |
+|  | 3 | F106 | 36,352 | 0.00808 | 0.00748 | +0.000301 |
+|  | 4 | F129 | 36,352 | 0.01469 | 0.01402 | +0.000336 |
+|  | 5 | F158 | 36,352 | 0.01103 | 0.01131 | -0.000137 |
+|  | 6 | F184 | 36,096 | 0.00905 | 0.00837 | +0.000341 |
+| WFI18 | 1 | F062 | 36,352 | 0.19899 | 0.14944 | +0.024776 |
+|  | 2 | F087 | 36,352 | 0.17462 | 0.17548 | -0.000427 |
+|  | 3 | F106 | 36,352 | 0.07978 | 0.06871 | +0.005535 |
+|  | 4 | F129 | 36,352 | 0.07034 | 0.06741 | +0.001466 |
+|  | 5 | F158 | 36,352 | 0.06831 | 0.06418 | +0.002066 |
+|  | 6 | F184 | 36,096 | 0.06399 | 0.06283 | +0.000579 |
 
 **Table A2. RCS fit comparison by detector, LED, and filter.** The detector
-label appears once per six-LED block. Groups count tile/observation samples.
-The two $\chi^2$/group columns are production-weighted values for RCS-only TMM
-and Joint RCS + stellar. $\Delta\bar{\ell}_{J-R}$ is Joint RCS + stellar minus
+label appears once per six-LED block. Nonreference groups count tile/observation
+samples after excluding each LED's first reference observation. The two
+$\chi^2$/group columns are production-weighted values for RCS-only TMM and Joint
+RCS + stellar. $\Delta\bar{\ell}_{J-R}$ is Joint RCS + stellar minus
 RCS-only TMM log likelihood per group, equal to half the RCS-only TMM minus
 Joint RCS + stellar weighted $\chi^2$ per group; positive favors Joint RCS +
 stellar. These are in-sample comparisons.
