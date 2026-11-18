@@ -167,18 +167,19 @@ measurements cover filters F062, F087, F106, F129, F158, F184, F146, and F213.
 
 The source list comes from Gaia Data Release 3 (DR3): a 0.75-degree-radius
 circle centered at right ascension 294.3169668004104 degrees and declination
-46.35565460946458 degrees, with Gaia `G` magnitudes from 19 inclusive to 21.5
+46.35565460946458 degrees, with Gaia `G` magnitudes from 13 inclusive to 21.5
 exclusive. No Gaia temperature is required. The magnitude limit is in Gaia G,
-not a Roman WFI filter. The query contains 52,173 sources; the sky region and
-input catalogues therefore set the sample's source coverage.
+not a Roman WFI filter. The query contains 85,297 sources; 52,173 are in the
+fainter `19 <= G < 21.5` subset. The sky region and input catalogues therefore
+set the sample's source coverage.
 
-Pan-STARRS DR2 mean point-spread-function (PSF) photometry is matched to Gaia
-positions within one arcsecond. Gaia positions are propagated from epoch 2016
-to an approximate Pan-STARRS epoch of 2012 using Gaia proper motions where
-available; missing proper motions are flagged. A Pan-STARRS measurement is
-rejected if multiple counterparts lie within one arcsecond or the same
-counterpart is assigned to another Gaia source, including a brighter source.
-The brighter-source check is approximate.
+For the fainter stars, Pan-STARRS DR2 mean point-spread-function (PSF)
+photometry is matched to Gaia positions within one arcsecond. Gaia positions are
+propagated from epoch 2016 to an approximate Pan-STARRS epoch of 2012 using Gaia
+proper motions where available; missing proper motions are flagged. A
+Pan-STARRS measurement is rejected if multiple counterparts lie within one
+arcsecond or the same counterpart is assigned to another Gaia source, including
+a brighter source. The brighter-source check is approximate.
 
 Two Micron All Sky Survey (2MASS) point-source matches use Gaia positions
 propagated to each candidate observation date. A match must be within one
@@ -186,16 +187,21 @@ arcsecond, have no other 2MASS candidate within two arcseconds, and not be
 shared with another Gaia source. 2MASS quality flags are used to exclude
 individual band measurements.
 
-For the stellar SED fits, a photometric measurement must have a finite magnitude
-and finite positive uncertainty. The photometry catalog retains single-detection
-Pan-STARRS measurements and does not impose an upper cut on ordinary photometric
-uncertainties. A 2MASS band is used only with an accepted quality
-flag, valid uncertainty, and no contamination flag. The poor-profile-fit `E`
-flag is retained but recorded. Upper-limit `U` measurements are not used as
-detections, and `F` or `X` values do not supply a usable measurement and error.
-A 2MASS uncertainty value of 8 mag or larger is treated as a catalogue flag rather
-than a statistical uncertainty. These checks exclude individual bands; they
-do not remove the source from the SED sample.
+Brighter stars (`13 <= G < 19`) use Gaia and 2MASS photometry, without
+Pan-STARRS. Their 2MASS measurements are restricted to quality flags A--C and
+uncertainties below 0.2 mag. Every star in this bright subset has at least the
+three Gaia bands.
+
+For the faint-star SED fits, a photometric measurement must have a finite
+magnitude and finite positive uncertainty. The catalog retains single-detection
+Pan-STARRS measurements and does not impose an upper cut on their ordinary
+photometric uncertainties. A faint-star 2MASS band is used only with an
+accepted quality flag, valid uncertainty, and no contamination flag. The
+poor-profile-fit `E` flag is retained but recorded. Upper-limit `U` measurements
+are not used as detections, and `F` or `X` values do not supply a usable
+measurement and error. A 2MASS uncertainty value of 8 mag or larger is treated
+as a catalogue flag rather than a statistical uncertainty. These checks exclude
+individual bands; they do not remove the source from the SED sample.
 
 For the joint ice fit, measurements are matched by source, filter, and visit.
 The first eleven visits through 31 October 2026 are used. Observations with
@@ -220,7 +226,7 @@ RCS LED spectra,
 shown relative to each LED's peak and truncated below the five-percent cutoff
 used in the RCS integral. (b) WFI02 effective-area curves for the eight imaging
 filters, each normalized to its own peak. (c) Illustrative photon spectrum for
-a K giant observed on WFI02 (Gaia DR3 source 2128134408017300864;
+a K-type star observed on WFI02 (Gaia DR3 source 2128134408017300864;
 $T_{\mathrm{eff}}=4861\,\mathrm{K}$, $\log g=1.96$), reconstructed from its
 posterior-median stellar parameters and normalized to its peak. The vertical
 markers show the six LED centers. Independent peak normalization in each panel
@@ -252,8 +258,8 @@ surface gravity ($\log g$, base-10 logarithm in cm/s$^2$, from 0 to 5.5),
 metallicity (-1 to $+0.5$ dex relative to solar), visual extinction $A_V$
 (0--4 mag), and overall flux normalization.
 These bounds and priors strongly influence fits with few usable bands. Every
-source with at least one usable measurement is fit; sources with one or two
-bands are flagged as weakly constrained, with their SED estimates largely
+source with at least one usable measurement is fit; faint sources with one or
+two bands are flagged as weakly constrained, with their SED estimates largely
 determined by the priors.
 
 The SED fits use nested sampling (`dynesty`), which maintains 80 active samples
@@ -272,10 +278,11 @@ photon spectrum from the posterior-median parameters and the BT-Settl grid. The
 128 posterior draws are used to obtain those medians, but predictions are not
 averaged over the draws; SED-parameter uncertainty is not propagated into the
 photometric likelihood. The likelihood does include the reported photometric
-uncertainties and fitted detector-level excess scatter. Of 52,173 fitted stars,
-50,445 contribute zero usable 2MASS bands and 1,441 contribute one or two. Their
-infrared SED constraints therefore depend strongly on the adopted atmosphere
-and extinction models.
+uncertainties and fitted detector-level excess scatter. In the 52,173-star faint
+subset, 50,445 contribute zero usable 2MASS bands. Also within this subset,
+1,441 have only one or two usable photometric bands in total; this is not a
+count of stars with only one or two 2MASS bands. These sparse-band SED
+constraints depend strongly on the adopted atmosphere and extinction models.
 
 ## 3. Physical Model of Ice Deposition
 
