@@ -43,6 +43,24 @@ def nmad(values: np.ndarray) -> float:
     return float(1.4826 * np.median(np.abs(values - center)))
 
 
+def residual_summary_millilog(values) -> tuple[float, float]:
+    values = np.asarray(values, dtype=float).reshape(-1)
+    if values.size == 0:
+        return float("nan"), float("nan")
+    return float(1000.0 * np.sqrt(np.mean(values**2))), float(1000.0 * nmad(values))
+
+
+def lag_one_correlation(values) -> float:
+    values = np.asarray(values, dtype=float).reshape(-1)
+    if values.size < 3:
+        return float("nan")
+    earlier = values[:-1]
+    later = values[1:]
+    if np.std(earlier) == 0.0 or np.std(later) == 0.0:
+        return float("nan")
+    return float(np.corrcoef(earlier, later)[0, 1])
+
+
 def profile_group_locations(data, prediction, scales, valid):
     pass_count = valid.shape[-1]
     values = (data - prediction).reshape((-1, pass_count))
@@ -216,10 +234,19 @@ def compute_detector(detector: str, led_wavelength_nm, led_weights):
         np.sum(standardized_joint_residual**2), saved_rsc_chi2, rtol=2e-7, atol=2e-4
     )
     rcs_rows = []
+    all_rcs_only_residuals = []
+    all_joint_residuals = []
+    detector_rcs_only_lag_one = []
+    detector_joint_lag_one = []
     for led_number, tile_items in enumerate(led_model.bands, start=1):
         rcs_only_chi2 = 0.0
         joint_chi2 = 0.0
         group_count = 0
+        rcs_only_residuals = []
+        joint_residuals = []
+        rcs_only_lag_one = []
+        joint_lag_one = []
+        nonreference_group_count = 0
         for tile, item in enumerate(tile_items):
             rcs_only_prediction = np.asarray(item[6], dtype=float)
             observed_groups = np.asarray(item[7], dtype=float)
@@ -233,19 +260,62 @@ def compute_detector(detector: str, led_wavelength_nm, led_weights):
             np.testing.assert_allclose(rows["observed"].to_numpy(float), observed_groups, rtol=0, atol=1e-10)
             rcs_only_chi2 += float(np.sum(((rcs_only_prediction - observed_groups) / sigma) ** 2))
             joint_chi2 += float(np.sum(((joint_prediction - observed_groups) / sigma) ** 2))
+            nonreference = days > days[0] + 1.0e-12
+            rcs_residual = rcs_only_prediction[nonreference] - observed_groups[nonreference]
+            joint_residual = joint_prediction[nonreference] - observed_groups[nonreference]
+            rcs_only_residuals.append(rcs_residual)
+            joint_residuals.append(joint_residual)
+            rcs_only_lag_one.append(lag_one_correlation(rcs_residual))
+            joint_lag_one.append(lag_one_correlation(joint_residual))
+            nonreference_group_count += int(nonreference.sum())
             group_count += len(days)
+        rcs_only_rmse, rcs_only_nmad = residual_summary_millilog(
+            np.concatenate(rcs_only_residuals)
+        )
+        joint_rmse, joint_nmad = residual_summary_millilog(
+            np.concatenate(joint_residuals)
+        )
+        all_rcs_only_residuals.append(np.concatenate(rcs_only_residuals))
+        all_joint_residuals.append(np.concatenate(joint_residuals))
+        detector_rcs_only_lag_one.extend(rcs_only_lag_one)
+        detector_joint_lag_one.extend(joint_lag_one)
         rcs_rows.append({
             "detector": detector,
             "led": led_number,
             "filter": LED_FILTERS[led_number - 1],
             "n_tile_groups": group_count,
-            "rcs_only_weighted_chi2_per_group": rcs_only_chi2 / group_count,
-            "joint_weighted_chi2_per_group": joint_chi2 / group_count,
+            "n_nonreference_tile_groups": int(sum(values.size for values in rcs_only_residuals)),
+            "rcs_only_weighted_chi2_per_group": rcs_only_chi2 / nonreference_group_count,
+            "joint_weighted_chi2_per_group": joint_chi2 / nonreference_group_count,
+            "rcs_only_group_mean_rmse_millilog": rcs_only_rmse,
+            "rcs_only_group_mean_nmad_millilog": rcs_only_nmad,
+            "joint_group_mean_rmse_millilog": joint_rmse,
+            "joint_group_mean_nmad_millilog": joint_nmad,
+            "rcs_only_median_tile_lag1_residual_correlation": float(
+                np.nanmedian(rcs_only_lag_one)
+            ),
+            "joint_median_tile_lag1_residual_correlation": float(
+                np.nanmedian(joint_lag_one)
+            ),
             "delta_mean_log_likelihood_joint_minus_rcs_only_per_group": (
-                0.5 * (rcs_only_chi2 - joint_chi2) / group_count
+                0.5 * (rcs_only_chi2 - joint_chi2) / nonreference_group_count
             ),
         })
-    return photometry_rows, rcs_rows
+    detector_rcs_summary = {}
+    for model_name, residual_parts in (
+        ("rcs_only", all_rcs_only_residuals),
+        ("joint", all_joint_residuals),
+    ):
+        rmse, robust_sigma = residual_summary_millilog(np.concatenate(residual_parts))
+        detector_rcs_summary[f"{model_name}_all_led_group_mean_rmse_millilog"] = rmse
+        detector_rcs_summary[f"{model_name}_all_led_group_mean_nmad_millilog"] = robust_sigma
+    detector_rcs_summary["rcs_only_median_tile_lag1_residual_correlation"] = float(
+        np.nanmedian(detector_rcs_only_lag_one)
+    )
+    detector_rcs_summary["joint_median_tile_lag1_residual_correlation"] = float(
+        np.nanmedian(detector_joint_lag_one)
+    )
+    return photometry_rows, rcs_rows, detector_rcs_summary
 
 
 def main() -> None:
@@ -257,7 +327,9 @@ def main() -> None:
     all_rcs_rows = []
     detector_summary = []
     for detector in run.workflow.DETECTORS:
-        photometry_rows, rcs_rows = compute_detector(detector, led_wavelength_nm, led_weights)
+        photometry_rows, rcs_rows, detector_rcs_summary = compute_detector(
+            detector, led_wavelength_nm, led_weights
+        )
         all_photometry_rows.extend(photometry_rows)
         all_rcs_rows.extend(rcs_rows)
         measurements = sum(row["n_measurements"] for row in photometry_rows)
@@ -266,16 +338,17 @@ def main() -> None:
             * row["n_measurements"]
             for row in photometry_rows
         )
-        rcs_groups = sum(row["n_tile_groups"] for row in rcs_rows)
+        rcs_groups = sum(row["n_nonreference_tile_groups"] for row in rcs_rows)
         rcs_loglike_gain = sum(
             row["delta_mean_log_likelihood_joint_minus_rcs_only_per_group"]
-            * row["n_tile_groups"]
+            * row["n_nonreference_tile_groups"]
             for row in rcs_rows
         )
         nmad_rcs = np.asarray([row["nmad_rcs_only_tmm_mmag"] for row in photometry_rows])
         nmad_joint = np.asarray([row["nmad_joint_mmag"] for row in photometry_rows])
         detector_summary.append({
             "detector": detector,
+            **detector_rcs_summary,
             "car201_measurements": measurements,
             "car201_filters_joint_nmad_improved": int(np.count_nonzero(nmad_joint < nmad_rcs)),
             "car201_median_filter_nmad_rcs_only_mmag": float(np.median(nmad_rcs)),
@@ -286,11 +359,11 @@ def main() -> None:
             "rcs_tile_groups": rcs_groups,
             "rcs_weighted_chi2_per_group_rcs_only": float(np.average(
                 [row["rcs_only_weighted_chi2_per_group"] for row in rcs_rows],
-                weights=[row["n_tile_groups"] for row in rcs_rows],
+                weights=[row["n_nonreference_tile_groups"] for row in rcs_rows],
             )),
             "rcs_weighted_chi2_per_group_joint": float(np.average(
                 [row["joint_weighted_chi2_per_group"] for row in rcs_rows],
-                weights=[row["n_tile_groups"] for row in rcs_rows],
+                weights=[row["n_nonreference_tile_groups"] for row in rcs_rows],
             )),
             "rcs_delta_mean_log_likelihood_joint_minus_rcs_only_per_group": (
                 rcs_loglike_gain / rcs_groups

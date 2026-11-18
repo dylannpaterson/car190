@@ -956,6 +956,41 @@ compare ice-thickness histories and RCS predictions, then examine CAR201
 photometry and spectral modulation. Appendix A extends these detector-level
 comparisons to all 18 detectors.
 
+### RCS likelihood scale and residual correlation
+
+The fixed log-response scale is $\sigma_{\log}=0.005$ (5.0 millilog units).
+It is an effective scale for the count-weighted likelihood, not the sampling
+error of an independent-pixel tile mean. In the corrected RCS statistics, the
+median within-group pixel standard deviation is $6.17\times10^{-3}$ in log
+response (10th--90th percentile: $5.66\times10^{-3}$--$7.27\times10^{-3}$),
+with a median of 64,753 valid pixel pairs per group. If those pixels were
+independent, the standard error of a group mean would be only
+$2.42\times10^{-5}$; the post-fit residuals are appreciably larger, consistent
+with shared pixel-level and time-dependent structure.
+
+The fit-residual summaries exclude each LED's first, reference observation.
+NMAD is $1.4826$ times the median absolute deviation about the residual median.
+Across the 18 detectors, the median detector-level RCS-only group-mean RMSE is
+$0.714\times10^{-3}$ and the median NMAD is $0.511\times10^{-3}$ (detector
+ranges $0.625$--$1.282$ and $0.433$--$0.893$, respectively, in units of
+$10^{-3}$ log response). For the joint fit, the corresponding medians are
+$0.671\times10^{-3}$ and $0.481\times10^{-3}$, with detector ranges
+$0.597$--$1.272$ and $0.422$--$0.886$. The weighted $\chi^2$ divided by the
+number of non-reference tile/LED observations has a median of 0.0203 for
+RCS-only TMM (detector range 0.0155--0.0699) and 0.0179 for the joint fit
+(0.0142--0.0690). These values are diagnostics, not reduced-$\chi^2$ estimates:
+successive non-reference residuals within each tile/LED series are strongly
+autocorrelated, with a median lag-one correlation of 0.79 across detectors
+(detector medians 0.63--0.86).
+
+Thus, $\sigma_{\log}=0.005$ is comparable to the observed within-group pixel
+scatter while remaining several times larger than the post-fit residuals of
+the tile means. The low $\chi^2$ per observation is consistent with this
+conservative effective scale and correlated residuals; it does not imply that
+the independent-pixel standard error is an adequate likelihood width. The
+residual correlation also cautions against interpreting the very large number
+of tile/epoch groups as an equal number of independent constraints.
+
 ### RCS ice-thickness histories and fit agreement
 
 ![Figure 3. RCS-only TMM and Joint RCS + stellar ice-thickness histories and rates for representative WFI02 tile 135.](./figures/wfi02_representative_ice_history.png)
