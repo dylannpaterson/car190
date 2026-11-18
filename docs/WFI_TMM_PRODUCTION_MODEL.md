@@ -246,8 +246,11 @@ individual bands; they do not remove the source from the SED sample.
 For the joint ice fit, measurements are matched by source, filter, and visit.
 The first eleven visits through 31 October 2026 are used. These visits comprise
 Execution Plan 3 (EP3) passes 1--6 and Execution Plan 4
-(EP4) passes 1--5. The roll separates EP4 pass 1 from pass 2; Figure 5 marks the
-median timestamp of the first post-roll pass, `2026-10-18T09:39:36.654 UTC`.
+(EP4) passes 1--5. The roll separates EP4 pass 1 from pass 2 and moves many
+stars to new detector positions. Because no L-flat was applied to these CAR201
+measurements, the changed positions can produce flux steps from spatial response
+variation, apart from the time-dependent ice signal. Figure 5 marks the median
+timestamp of the first post-roll pass, `2026-10-18T09:39:36.654 UTC`.
 Observations with
 the Roman `DO_NOT_USE` bit (mask value 1) or `SATURATED` bit (mask value 2)
 set are excluded. A source is excluded entirely if any of its measurements is
@@ -841,12 +844,12 @@ the LED's reference and compared with the corrected sufficient statistics in
 the RCS Sufficient Statistics and Likelihood section. Valid-pixel counts
 determine the Gaussian weights in the RCS likelihood.
 
-The band integral and reference-visit normalization are defined above. A post-roll
-log-response offset $\zeta_f$ is added to the model response. The reference
-group has $\zeta_{f,0}=0$; one offset per filter is fitted for the post-roll
-group. For this data set the reference group contains EP3 passes 1--6 and EP4
-pass 1; the fitted post-roll offsets apply to
-EP4 passes 2--5. Each offset is fitted within bounds `+/-0.25`.
+The band integral and reference-visit normalization are defined above. To prevent this roll-linked
+spatial-response change from being misattributed to ice evolution, a per-filter post-roll
+log-response offset $\zeta_f$ captures the aggregate flux shift as stars sample new detector
+positions. The reference group has $\zeta_{f,0}=0$; offsets are fitted for the post-roll group. For
+this data set the reference group contains EP3 passes 1--6 and EP4 pass 1; the fitted post-roll
+offsets apply to EP4 passes 2--5. Each offset is fitted within bounds `+/-0.25`.
 
 Photometric residuals use a Student-$t$ likelihood with four degrees of freedom.
 Let $\sigma_{i,\mathrm{phot}}$ be the reported photometric measurement
@@ -910,7 +913,7 @@ in the fits reported here.
 | Joint segment-start thickness adjustments $\delta d_{0,k,s}$ | Log adjustments about the starting RCS-derived ice-thickness history, per tile and segment | Zero-centered normal prior; standard deviation `1.5`, except `0.10` after the third decontamination; optimizer bounds $\pm\ln(4)$ |
 | Joint rate multipliers $\delta q_{k,s,j}$ | Per-tile log multipliers on baseline deposition, with at-most-two-day knot spacing | Zero-centered normal prior, standard deviation `1.5`; optimizer bounds $\pm\ln(4)$ |
 | Post-reset response offsets | Fixed from the starting RCS-derived ice-thickness history; one per tile and reset | Retained at their RCS-only MAP values |
-| Post-roll offset $\zeta_f$ | One log-response offset per filter; zero in the pre-roll group | Fitted within bounds `+/-0.25` |
+| Post-roll offset $\zeta_f$ | One log-response offset per filter to absorb the aggregate position-dependent response step; zero in the pre-roll group | Fitted within bounds `+/-0.25` |
 | Star/filter location $\mu_{sf}$ | Robust residual location profiled separately for every star/filter group | Profiled under the Student-$t$ likelihood |
 | Detector-level excess photometric scatter $\sigma_{\mathrm{det},d}$ | One positive scatter term per detector, added in quadrature to reported photometric uncertainty | Fitted within bounds $10^{-4}$--$100$ mmag |
 
