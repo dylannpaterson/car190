@@ -172,7 +172,9 @@ The MAST token is read from `mast_api_token.txt` in the repository root.
 
 This reducer runs on Nexus only. See
 [`docs/WFI_NEXUS_REDUCTION_HANDOFF.md`](docs/WFI_NEXUS_REDUCTION_HANDOFF.md)
-for its data handoff to the local model pipeline.
+for its data handoff to the local model pipeline. The concise end-to-end
+operator sequence and model-output map are in
+[`docs/WFI_NEXUS_PIPELINE_USER_GUIDE.md`](docs/WFI_NEXUS_PIPELINE_USER_GUIDE.md).
 
 On the Nexus, use the one-step pipeline instead of copying products from a
 user-owned CAR190 directory. It lists calibrated ASDF products under the
