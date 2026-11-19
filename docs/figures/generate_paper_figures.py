@@ -532,21 +532,23 @@ def plot_rcs_model_data() -> tuple[Path, Path]:
         use = rcs_only["led"].to_numpy(int) == led
         days = warm_days[use]
         axis.errorbar(dates(days), observed[use]*1000, yerr=sigma[use]*1000,
-                      fmt="o", color="0.12", markersize=2.8, elinewidth=0.65,
-                      capsize=1.0, label="Corrected RCS group means" if led == 1 else None)
+                      fmt="none", ecolor="0.18", elinewidth=0.55,
+                      capsize=0.35, zorder=8,
+                      label="Corrected RCS group means (error bars)" if led == 1 else None)
         masks = [days < RESET_DAYS[0], (days >= RESET_DAYS[0]) & (days < RESET_DAYS[1]), days >= RESET_DAYS[1]]
         for segment, mask in enumerate(masks):
             if not np.any(mask):
                 continue
             axis.plot(dates(days[mask]), warm_prediction[use][mask]*1000,
-                      color=colors["warm"], linestyle="--", linewidth=1.0,
+                      color=colors["warm"], linestyle="--", linewidth=1.55, zorder=4,
                       label="Constant-rate preliminary fit" if led == 1 and segment == 0 else None)
-            axis.plot(dates(days[mask]), rcs_only.loc[use, "model_log_change"].to_numpy()[mask]*1000,
-                      color=colors["rcs_only"], linewidth=1.0,
-                      label="RCS-only TMM" if led == 1 and segment == 0 else None)
             axis.plot(dates(days[mask]), joint_prediction[use][mask]*1000,
-                      color=colors["joint"], linewidth=1.0,
+                      color=colors["joint"], linewidth=1.8, zorder=5,
                       label="Joint RCS + stellar" if led == 1 and segment == 0 else None)
+            axis.plot(dates(days[mask]), rcs_only.loc[use, "model_log_change"].to_numpy()[mask]*1000,
+                      color=colors["rcs_only"], linestyle=(0, (4, 2)),
+                      linewidth=1.45, zorder=6,
+                      label="RCS-only TMM" if led == 1 and segment == 0 else None)
         for reset_index, reset in enumerate(RESET_DAYS):
             style = ":" if reset_index == 0 else "-."
             axis.axvline(dates([reset])[0], color="#263c63", linestyle=style, linewidth=0.8)

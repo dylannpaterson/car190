@@ -163,3 +163,101 @@ Paths below are relative to the `--output-path` used for that fit (for example,
 fingerprints, and the recorded paths and hashes of the main outputs.
 The relative-response route reuses its pinned six-LED cache rather than copying
 that cache under the run root.
+
+## Publish the paired response bundle to S3
+
+The portable response release consists of the two stable all-detector archives:
+`wfi_all_2nm_rank16.npz` and `wfi_all_2nm_rank16_modulated.npz`. Prepare the
+paired export and copy the complete staged directory to Nexus as described in
+[`WFI_MODULATED_WAVELENGTH_RESPONSE_BUNDLE.md`](WFI_MODULATED_WAVELENGTH_RESPONSE_BUNDLE.md).
+The staged directory also contains the bundle reader, uploader, and checksum
+manifest. Keep dated build archives and provenance in their local run directories;
+publish the two archives using their stable filenames.
+
+On Nexus, change to the staged directory (the path below is the directory used
+for the 2026-11-18 upload; substitute the current release directory for a later
+run):
+
+```bash
+cd /teams/romcom/data/dpaterson/CAR190/completed_model/20261118
+```
+
+First run a dry-run with both required destination arguments:
+
+```bash
+python upload_wfi_wavelength_response_s3.py \
+  --bucket roman-s3-romcom \
+  --prefix rges-pit/ice_model \
+  --dry-run
+```
+
+The uploader refreshes `SHA256SUMS`, validates the listed local files, and shows
+the planned S3 sync. Review the source, destination, and planned keys; confirm
+that the two stable archive filenames are present and no dated model archive is
+being published. `--source-dir` is optional when run from the staged directory;
+otherwise pass the staged directory explicitly. Both `--bucket` and `--prefix`
+are required. Running the script without them only prints its usage message.
+
+After reviewing the dry-run, repeat the command without `--dry-run` to upload:
+
+```bash
+python upload_wfi_wavelength_response_s3.py \
+  --bucket roman-s3-romcom \
+  --prefix rges-pit/ice_model
+```
+
+The uploader uses the normal Nexus AWS credential chain. A successful run prints
+the refreshed and validated checksum counts and invokes a filtered `aws s3 sync`
+for the staged model and support files. It can update matching keys but does not
+delete unrelated S3 objects. The separate reader HDF5 output under `final/` is
+not included in this paired NPZ archive sync.
+
+Confirm the two archive objects are present after the upload:
+
+```bash
+aws s3 ls s3://roman-s3-romcom/rges-pit/ice_model/wfi_all_2nm_rank16.npz
+aws s3 ls s3://roman-s3-romcom/rges-pit/ice_model/wfi_all_2nm_rank16_modulated.npz
+```
+
+### Separately upload the reader HDF5 model
+
+The reader-compatible `joint_modulated_v2.h5` is a separate one-object upload;
+it is not part of the paired NPZ sync above. For the HDF5 validation and current
+uploader behavior, see [`WFI_JOINT_MODULATED_H5_PIPELINE.md`](WFI_JOINT_MODULATED_H5_PIPELINE.md).
+The Nexus `eric_format` upload used this source file and destination key:
+
+```bash
+cd /teams/romcom/data/dpaterson/CAR190/completed_model/eric_format
+```
+
+Preview the single-object copy with the HDF5 uploader. Pass the source and key
+explicitly so the helper uses the `joint_modulated_v2.h5` names from this run;
+the checked-in helper's default names are different:
+
+```bash
+python upload_joint_modulated_all_detectors_s3.py \
+  --source joint_modulated_v2.h5 \
+  --bucket roman-s3-romcom \
+  --prefix rges-pit/ice_model \
+  --key joint_modulated_v2.h5 \
+  --dry-run
+```
+
+Check the printed source, destination, and SHA256. After confirming they identify
+the intended model, repeat without `--dry-run`:
+
+```bash
+python upload_joint_modulated_all_detectors_s3.py \
+  --source joint_modulated_v2.h5 \
+  --bucket roman-s3-romcom \
+  --prefix rges-pit/ice_model \
+  --key joint_modulated_v2.h5
+```
+
+This helper validates the HDF5 model and performs one `aws s3 cp` with the
+`application/x-hdf5` content type; it does not sync or delete other S3 objects.
+Confirm the object is present:
+
+```bash
+aws s3 ls s3://roman-s3-romcom/rges-pit/ice_model/joint_modulated_v2.h5
+```
