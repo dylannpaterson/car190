@@ -914,7 +914,7 @@ in the fits reported here.
 | Joint rate multipliers $\delta q_{k,s,j}$ | Per-tile log multipliers on baseline deposition, with at-most-two-day knot spacing | Zero-centered normal prior, standard deviation `1.5`; optimizer bounds $\pm\ln(4)$ |
 | Post-reset response offsets | Fixed from the starting RCS-derived ice-thickness history; one per tile and reset | Retained at their RCS-only MAP values |
 | Post-roll offset $\zeta_f$ | One log-response offset per filter to absorb the aggregate position-dependent response step; zero in the pre-roll group | Fitted within bounds `+/-0.25` |
-| Star/filter location $\mu_{sf}$ | Robust residual location profiled separately for every star/filter group | Profiled under the Student-$t$ likelihood |
+| Star/filter baseline magnitude $b_{sf}$ | Constant star/filter brightness term in the median-centered data | Profiled under the Student-$t$ likelihood |
 | Detector-level excess photometric scatter $\sigma_{\mathrm{det},d}$ | One positive scatter term per detector, added in quadrature to reported photometric uncertainty | Fitted within bounds $10^{-4}$--$100$ mmag |
 
 #### Joint RCS + stellar Objective
@@ -950,17 +950,17 @@ $$
 $$
 
 where $r(v)$ is the reference/post-roll group. The residual also includes a
-profiled star/filter location $\mu_{sf}$:
+constant star/filter baseline magnitude $b_{sf}$:
 
 $$
-e_i=y_i-\widehat m_{sfv}-\mu_{sf}.
+e_i=y_i-\widehat m_{sfv}-b_{sf}.
 $$
 
-The nuisance brightness $\mu_{sf}$ is profiled separately for each
-star/filter group under the Student-$t$ likelihood. This profiled location
-absorbs the constant difference between the median-centered observed changes
-and the $v_0$-referenced model changes, so the residuals do not depend on the
-choice of reference visit.
+The baseline magnitude $b_{sf}$ is profiled separately for each star/filter
+group under the Student-$t$ likelihood. In the median-centered data it absorbs
+the constant difference between the observed and $v_0$-referenced model
+baselines; it is not an absolute calibrated magnitude. This makes the residuals
+independent of the choice of reference visit.
 
 The effective Student-$t$ width is
 
@@ -1161,7 +1161,8 @@ define $\Delta\bar{\ell}_{J-R}=\bar{\ell}_{\mathrm{joint}}-
 \bar{\ell}_{\mathrm{RCS-only}}$; positive values favor the joint fit. CAR201
 differences are per valid measurement and use the Student-$t$ likelihood with
 the same reported uncertainties and joint-fit detector scatter for both
-predictions; star/filter locations are profiled separately. RCS differences
+predictions; constant star/filter magnitude offsets are profiled separately.
+RCS differences
 are per nonreference LED/tile/observation group and equal half the RCS-only
 minus joint weighted $\chi^2$. These are data-likelihood comparisons, not full MAP
 objectives including priors and regularization.
@@ -1180,7 +1181,8 @@ is the RCS-only TMM prediction using the RCS-derived ice-thickness histories;
 the orange curve and band show Joint RCS + stellar using the
 jointly refined histories and fitted spectral modulation. The model curves omit
 the post-roll term.
-Star/filter locations are profiled separately for each model. Dotted and dash-dot
+Constant star/filter magnitude offsets are profiled separately for each model.
+Dotted and dash-dot
 vertical lines mark Decon2 and Decon3, respectively; the dashed line marks the
 post-roll transition.
 Between visits, model curves are evaluated on a 0.25-day grid using the nearest
@@ -1202,13 +1204,13 @@ Decon3 resets.
 applies no modeled ice-response correction, so its predicted reference-relative
 change is zero; physical ice is present on the detector.
 NMAD (mmag) is $1.4826$ times the
-median absolute deviation after profiling per-star/filter locations.
+median absolute deviation after fitting per-star/filter magnitude offsets.
 $\Delta\bar{\ell}_{J-R}$/observation is Joint RCS + stellar minus RCS-only TMM
 $\nu=4$ Student-$t$ data log likelihood; positive favors Joint RCS + stellar.
 Both predictions use the same
 roll-adjusted photometry and reported photometric uncertainties, with the
 detector-level excess photometric scatter held at its joint-fit estimate.
-Locations are profiled separately for each model. These are in-sample results.
+Magnitude offsets are profiled separately for each model. These are in-sample results.
 
 | LED/filter | Nonreference groups | RCS-only TMM $\chi^2$/group | Joint $\chi^2$/group | $\Delta\bar{\ell}_{J-R}$/group |
 | --- | ---: | ---: | ---: | ---: |
@@ -1466,8 +1468,8 @@ present. NMAD columns are in mmag; $N$ is the valid measurement count.
 $\Delta\bar{\ell}_{J-R}$/obs is Joint RCS + stellar minus RCS-only TMM Student-$t$
 log likelihood per measurement; positive favors Joint RCS + stellar. The same
 reported photometric uncertainties and detector-level excess scatter are used
-for both predictions, with star/filter locations profiled separately. These are
-in-sample comparisons.
+for both predictions, with per-star/filter magnitude offsets profiled
+separately. These are in-sample comparisons.
 
 | Detector | LED | Filter | Nonreference groups | RCS-only TMM $\chi^2$/group | Joint $\chi^2$/group | $\Delta\bar{\ell}_{J-R}$/group |
 | --- | ---: | --- | ---: | ---: | ---: | ---: |
