@@ -690,6 +690,11 @@ def plot_car201_model_data() -> tuple[Path, Path]:
     dense_forward=ReaderCompatiblePhotometryForward(dense_model)
     baseline_curve=np.empty((source_count,filter_count,len(dense_days)))
     joint_curve=np.empty_like(baseline_curve)
+    baseline_ice_effect=np.empty_like(baseline_curve)
+    joint_ice_effect=np.empty_like(baseline_curve)
+    baseline_ice_reference=None
+    joint_ice_reference=None
+    log_flux_per_mag=float(run.workflow.LOG_FLUX_PER_MAG)
     zero_modulation=np.zeros(2*mode)
     joint_modulation=parameters[:2*mode]
     chunk_size=20
@@ -712,11 +717,30 @@ def plot_car201_model_data() -> tuple[Path, Path]:
             nearest=np.argmin(distance,axis=1)
             dense_model.source_tile_ids[:,fi,1:]=source_tiles[np.arange(source_count)[:,None],fi,nearest]
         base_log,_=dense_forward.evaluate(zero_modulation)
-        baseline_curve[:,:,start:stop]=-1000*base_log[:,:,1:]/run.workflow.LOG_FLUX_PER_MAG
+        baseline_curve[:,:,start:stop]=-1000*base_log[:,:,1:]/log_flux_per_mag
+        gray_by_tile_time=dense_model.reader_gray_log_by_tile.copy()
+        dense_model.reader_gray_log_by_tile=np.zeros_like(gray_by_tile_time)
+        base_absolute_log=dense_forward.evaluate_absolute(zero_modulation)
+        baseline_ice_effect[:,:,start:stop]=-1000*base_absolute_log[:,:,1:]/log_flux_per_mag
+        base_reference=-1000*base_absolute_log[:,:,0]/log_flux_per_mag
+        if baseline_ice_reference is None:
+            baseline_ice_reference=base_reference
+        else:
+            np.testing.assert_allclose(base_reference,baseline_ice_reference,rtol=0,atol=1e-10)
+        dense_model.reader_gray_log_by_tile=gray_by_tile_time
         for fi in range(filter_count):
             dense_model.tile_thickness_by_id[:,fi,:]=interp_history(fitted_history,targets[fi])
         joint_log,_=dense_forward.evaluate(joint_modulation)
-        joint_curve[:,:,start:stop]=-1000*joint_log[:,:,1:]/run.workflow.LOG_FLUX_PER_MAG
+        joint_curve[:,:,start:stop]=-1000*joint_log[:,:,1:]/log_flux_per_mag
+        dense_model.reader_gray_log_by_tile=np.zeros_like(gray_by_tile_time)
+        joint_absolute_log=dense_forward.evaluate_absolute(joint_modulation)
+        joint_ice_effect[:,:,start:stop]=-1000*joint_absolute_log[:,:,1:]/log_flux_per_mag
+        joint_reference=-1000*joint_absolute_log[:,:,0]/log_flux_per_mag
+        if joint_ice_reference is None:
+            joint_ice_reference=joint_reference
+        else:
+            np.testing.assert_allclose(joint_reference,joint_ice_reference,rtol=0,atol=1e-10)
+        dense_model.reader_gray_log_by_tile=gray_by_tile_time
     visit_index=np.searchsorted(dense_days,pass_days)
     np.testing.assert_allclose(dense_days[visit_index],pass_days,rtol=0,atol=1e-10)
     joint_visit=joint_curve[np.arange(source_count)[:,None,None],np.arange(filter_count)[None,:,None],visit_index[None,:,:]]
@@ -733,6 +757,36 @@ def plot_car201_model_data() -> tuple[Path, Path]:
     no_ice_residual=roll_adjusted_data-no_ice_location[:,:,None]
     base_residual=roll_adjusted_data-base_visit-base_location[:,:,None]
     joint_residual=roll_adjusted_data-joint_no_roll-joint_location[:,:,None]
+    source_tile_ids=np.asarray(model.source_tile_ids,dtype=int)
+    reader_gray=np.asarray(model.reader_gray_log_by_tile,dtype=float)
+    gray_log_delta=np.zeros_like(joint_no_roll)
+    for fi in range(filter_count):
+        reference_tiles=source_tile_ids[:,fi,0]
+        reference_gray=reader_gray[reference_tiles,fi,0]
+        for pi in range(len(run.PASSES)):
+            current_tiles=source_tile_ids[:,fi,pi]
+            gray_log_delta[:,fi,pi]=reader_gray[current_tiles,fi,pi]-reference_gray
+    gray_magnitude_delta=-1000*gray_log_delta/log_flux_per_mag
+    zero_ice_observed=(
+        roll_adjusted_data
+        - joint_location[:,:,None]
+        - gray_magnitude_delta
+        + joint_ice_reference[:,:,None]
+    )
+    joint_ice_at_visits=joint_ice_effect[
+        np.arange(source_count)[:,None,None],
+        np.arange(filter_count)[None,:,None],
+        visit_index[None,:,:],
+    ]
+    zero_ice_residual=zero_ice_observed-joint_ice_at_visits
+    zero_ice_transfer_error=float(
+        np.max(np.abs(zero_ice_residual[valid]-joint_residual[valid]))
+    )
+    if zero_ice_transfer_error>2e-5:
+        raise ValueError(
+            "Zero-ice data transformation changed joint residuals; "
+            f"max difference={zero_ice_transfer_error} mmag"
+        )
     def robust_nmad(values):
         center=float(np.median(values))
         return float(1.4826*np.median(np.abs(values-center)))
@@ -837,11 +891,14 @@ def plot_car201_model_data() -> tuple[Path, Path]:
                 model_median=float(np.median(joint_plot[cohort,fi,time_index]))
                 model_summaries.append((band,run.PASSES[pi],data_median,model_median))
         axis.set_title(band, fontsize=8)
-        axis.set_ylim(-60, 50)
+        axis.set_ylim(50, -60)
         axis.set_yticks([-50, -25, 0, 25])
         axis.tick_params(labelsize=TICK_FONT_SIZE)
         axis.grid(axis="y", color="#d5dfeb", linewidth=0.8)
-    figure.supylabel("Median-centered magnitude change (mmag)", fontsize=PLOT_FONT_SIZE)
+    figure.supylabel(
+        "Median-centered magnitude change (mmag; brighter upward)",
+        fontsize=PLOT_FONT_SIZE,
+    )
     figure.supxlabel("UTC date", fontsize=PLOT_FONT_SIZE, y=0.035)
     handles=[
         Line2D([0],[0],marker="o",linestyle="none",color="black",markersize=3,label="Observed CAR201"),
@@ -857,14 +914,140 @@ def plot_car201_model_data() -> tuple[Path, Path]:
     for axis in axes:
         axis.set_xticks(ticks); axis.set_xlim(ticks[0]-.5,ticks[-1]+2.); axis.xaxis.set_major_formatter(mdates.DateFormatter("%b %d",tz=timezone.utc))
     figure.subplots_adjust(left=.105,right=.985,top=.87,bottom=.09,hspace=.30,wspace=.16)
-    png=FIGURES/"wfi02_full_car201_model_data.png"; figure.savefig(png,dpi=FIGURE_DPI); figure.savefig(png.with_suffix(".pdf"),dpi=FIGURE_DPI); plt.close(figure)
+    median_centered_png=FIGURES/"wfi02_full_car201_model_data_median_centered.png"
+    figure.savefig(median_centered_png,dpi=FIGURE_DPI)
+    figure.savefig(median_centered_png.with_suffix(".pdf"),dpi=FIGURE_DPI)
+    plt.close(figure)
+
+    # Companion view: report the optical ice contribution against a clean
+    # zero-thickness stack. The observed series is translated into that frame
+    # using the fitted star/filter baseline, reset-gray changes, and the joint
+    # model's EP3-pass-1 ice response; it is not a direct zero-ice observation.
+    zero_ice_data_summaries=[]
+    zero_ice_limits=[0.0]
+    zero_ice_model_quantiles=[]
+    for fi in range(filter_count):
+        rows=[]
+        for pi in range(len(run.PASSES)):
+            use=valid[:,fi,pi]
+            if use.any():
+                values=zero_ice_observed[use,fi,pi]
+                rows.append((pass_dates[fi,pi],*np.quantile(values,[.16,.5,.84])))
+        zero_ice_data_summaries.append(rows)
+        zero_ice_limits.extend(
+            value for row in rows for value in (float(row[1]),float(row[3]))
+        )
+        base_quantiles=np.empty((2,len(dense_days)))
+        joint_quantiles=np.empty((2,len(dense_days)))
+        base_median=np.empty(len(dense_days))
+        joint_median=np.empty(len(dense_days))
+        for time_index in range(len(dense_days)):
+            use_source=active_source[:,fi]&curve_cohort_valid[:,fi,time_index]
+            base_values=baseline_ice_effect[use_source,fi,time_index]
+            joint_values=joint_ice_effect[use_source,fi,time_index]
+            base_quantiles[:,time_index]=np.quantile(
+                base_values,[.16,.84]
+            )
+            joint_quantiles[:,time_index]=np.quantile(
+                joint_values,[.16,.84]
+            )
+            base_median[time_index]=np.median(base_values)
+            joint_median[time_index]=np.median(joint_values)
+        zero_ice_model_quantiles.append(
+            (base_quantiles,joint_quantiles,base_median,joint_median)
+        )
+        zero_ice_limits.extend(base_quantiles.ravel().tolist())
+        zero_ice_limits.extend(joint_quantiles.ravel().tolist())
+
+    zero_ice_low=float(min(zero_ice_limits))
+    zero_ice_high=float(max(zero_ice_limits))
+    zero_ice_margin=.06*max(zero_ice_high-zero_ice_low,1.0)
+    tick_step=25.0 if zero_ice_high-zero_ice_low<250.0 else 50.0
+    tick_low=np.floor((zero_ice_low-zero_ice_margin)/tick_step)*tick_step
+    tick_high=np.ceil((zero_ice_high+zero_ice_margin)/tick_step)*tick_step
+    zero_ice_ticks=np.arange(tick_low,tick_high+0.5*tick_step,tick_step)
+    ice_figure,ice_axes=plt.subplots(
+        4,2,figsize=(FIGURE_WIDTH_IN,6.2),sharex=True,sharey=True
+    )
+    ice_axes=ice_axes.ravel()
+    for fi,(band,axis) in enumerate(zip(run.FILTERS,ice_axes,strict=True)):
+        axis.axhline(0.0,color="0.25",linewidth=.9,zorder=2)
+        for reset_index,date in enumerate(reset_dates):
+            style=":" if reset_index==0 else "-."
+            axis.axvline(date,color="0.35",linestyle=style,linewidth=.8)
+        axis.axvline(postroll_date,color="0.45",linestyle="--",linewidth=.8)
+        for date,p16,median,p84 in zero_ice_data_summaries[fi]:
+            axis.errorbar(
+                date,median,yerr=[[median-p16],[p84-median]],fmt="o",
+                color="black",markersize=2.2,elinewidth=.45,capsize=.8,zorder=5,
+            )
+        base_quantiles,joint_quantiles,base_median,joint_median=zero_ice_model_quantiles[fi]
+        j16,j84=joint_quantiles
+        for segment in segments:
+            if not segment.any():
+                continue
+            x=dense_dates[segment]
+            axis.plot(
+                x,base_median[segment],
+                color=blue,linestyle="--",linewidth=1.4,zorder=3,
+            )
+            axis.fill_between(
+                x,j16[segment],j84[segment],color=orange,alpha=.16,
+                linewidth=0,zorder=3,
+            )
+            axis.plot(
+                x,joint_median[segment],
+                color=orange,linewidth=1.5,zorder=4,
+            )
+        axis.set_title(band,fontsize=8)
+        axis.set_ylim(zero_ice_high+zero_ice_margin,zero_ice_low-zero_ice_margin)
+        axis.set_yticks(zero_ice_ticks)
+        axis.tick_params(labelsize=TICK_FONT_SIZE)
+        axis.grid(axis="y",color="#d5dfeb",linewidth=.8)
+    ice_figure.supylabel(
+        "Ice-induced magnitude change from zero ice (mmag; brighter upward)",
+        fontsize=PLOT_FONT_SIZE,
+    )
+    ice_figure.supxlabel("UTC date",fontsize=PLOT_FONT_SIZE,y=.035)
+    ice_handles=[
+        Line2D([0],[0],marker="o",linestyle="none",color="black",markersize=3,
+               label="Observed (fit-shifted)"),
+        Line2D([0],[0],color=blue,linestyle="--",linewidth=1.0,
+               label="RCS-only TMM"),
+        Line2D([0],[0],color=orange,linewidth=1.0,
+               label="Joint RCS + stellar (16–84%)"),
+        Line2D([0],[0],color="0.25",linewidth=.9,label="Zero ice"),
+        Line2D([0],[0],color="0.35",linestyle=":",linewidth=.8,label="Decon2"),
+        Line2D([0],[0],color="0.35",linestyle="-.",linewidth=.8,label="Decon3"),
+        Line2D([0],[0],color="0.45",linestyle="--",linewidth=.8,label="Post-roll"),
+    ]
+    ice_figure.legend(
+        handles=ice_handles,loc="upper center",bbox_to_anchor=(.5,.995),ncol=4,
+        frameon=False,fontsize=LEGEND_FONT_SIZE,columnspacing=.8,handlelength=1.5,
+    )
+    for axis in ice_axes:
+        axis.set_xticks(ticks)
+        axis.set_xlim(ticks[0]-.5,ticks[-1]+2.)
+        axis.xaxis.set_major_formatter(mdates.DateFormatter("%b %d",tz=timezone.utc))
+    ice_figure.subplots_adjust(left=.14,right=.985,top=.88,bottom=.11,hspace=.30,wspace=.16)
+    zero_ice_png=FIGURES/"wfi02_full_car201_model_data.png"
+    zero_ice_pdf=zero_ice_png.with_suffix(".pdf")
+    companion_png=FIGURES/"wfi02_car201_ice_effect_zero_ice_reference.png"
+    ice_figure.savefig(zero_ice_png,dpi=FIGURE_DPI)
+    ice_figure.savefig(zero_ice_pdf,dpi=FIGURE_DPI)
+    ice_figure.savefig(companion_png,dpi=FIGURE_DPI)
+    ice_figure.savefig(companion_png.with_suffix(".pdf"),dpi=FIGURE_DPI)
+    plt.close(ice_figure)
     first_postroll=int(np.flatnonzero(np.asarray(model.pass_zero_point_group_ids)>0)[0])
     print("F062 post-roll data shift (mmag):",float(-1000*roll_mag[0,0,first_postroll]))
     print("Joint fit roll-transfer residual check (mmag):",float(joint_error))
     print("Baseline roll-transfer residual check (mmag):",float(base_transfer_error))
+    print("Zero-ice residual transfer check (mmag):",zero_ice_transfer_error)
     f062_visit_differences=[abs(data-model) for band,_,data,model in model_summaries if band=="F062"]
     print("F062 max absolute visit-median data/model difference (mmag):",float(max(f062_visit_differences)))
-    print("Saved WFI02 Figure 5",png,png.with_suffix(".pdf"))
+    print("Saved median-centered diagnostic",median_centered_png,median_centered_png.with_suffix(".pdf"))
+    print("Saved WFI02 Figure 5",zero_ice_png,zero_ice_pdf)
+    print("Saved zero-ice-reference companion",companion_png,companion_png.with_suffix(".pdf"))
 
 
 def plot_complex_reflectance() -> tuple[Path, Path]:

@@ -65,6 +65,20 @@ class ReaderCompatiblePhotometryForward:
             self.cells.append((support, kernel))
 
     def evaluate(self, parameters):
+        """Evaluate log responses relative to the first pass."""
+        logs, jacobian = self._evaluate_absolute_logs(parameters)
+        return logs - logs[:, :, :1], jacobian - jacobian[:, :, :1, :]
+
+    def evaluate_absolute(self, parameters):
+        """Return per-pass log responses before first-pass normalization.
+
+        If the model carries ``reader_gray_log_by_tile``, the corresponding gray
+        term is included in these absolute logs.
+        """
+        logs, _ = self._evaluate_absolute_logs(parameters)
+        return logs
+
+    def _evaluate_absolute_logs(self, parameters):
         model = self.model
         count = model.mode_count
         multiplier = np.exp(parameters[:count]@model.basis + 1j*(parameters[count:2*count]@model.basis))
@@ -98,7 +112,7 @@ class ReaderCompatiblePhotometryForward:
                 for pi in range(model.pass_count):
                     tiles = model.source_tile_ids[:, fi, pi]
                     logs[:, fi, pi] += model.reader_gray_log_by_tile[tiles, fi, pi]
-        return logs-logs[:, :, :1], jac-jac[:, :, :1, :]
+        return logs, jac
 
 
 def stellar_ice_gradient(objective, coordinates, jacobian, star_indices):
