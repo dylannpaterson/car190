@@ -14,8 +14,9 @@ python docs/figures/generate_paper_figures.py --figure all
 
 To regenerate one figure, pass its number with `--figure` (for example,
 `--figure 5`). The script reads the recorded data and fit outputs and does not
-rerun any fits. The `plot_wfi02_*.py` files are per-figure entry points into
-this same generator; their plotting implementations are not duplicated.
+rerun any fits. By default, it uses the completed 20261117 relative-response
+pipeline run. The `plot_wfi02_*.py` files are per-figure entry points into this
+same generator; their plotting implementations are not duplicated.
 
 To regenerate the paper figures from a completed relative-response pipeline
 run, pass its pipeline output root (or its date root). For example:

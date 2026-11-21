@@ -50,9 +50,11 @@ plt.rcParams.update({
 
 ROOT = Path(__file__).resolve().parents[2]
 FIGURES = Path(__file__).resolve().parent
-STATS = ROOT / "20261111/corrected_statistics_4h_thinned"
-PRODUCTION_ROOT = STATS / "production"
-INPUT_ROOT = None
+DEFAULT_RUN_ROOT = ROOT / "20261117/production/pipeline_runs/relative_response"
+DEFAULT_INPUT_ROOT = ROOT / "20261117"
+STATS = DEFAULT_RUN_ROOT / "corrected_statistics_4h_thinned"
+PRODUCTION_ROOT = DEFAULT_RUN_ROOT / "production"
+INPUT_ROOT = DEFAULT_INPUT_ROOT
 PINNED_LED_QUADRATURE = (
     ROOT
     / "20261111/corrected_statistics_4h_thinned/production/wavelength_response_bundle/"
@@ -92,6 +94,12 @@ def save_figure(figure, stem: str, dpi: int = FIGURE_DPI) -> tuple[Path, Path]:
     plt.close(figure)
     print(f"Wrote {png} and {pdf}")
     return png, pdf
+
+
+def set_utc_date_axis(axis, max_ticks: int = 6) -> None:
+    locator = mdates.AutoDateLocator(minticks=3, maxticks=max_ticks, tz=timezone.utc)
+    axis.xaxis.set_major_locator(locator)
+    axis.xaxis.set_major_formatter(mdates.DateFormatter("%b %d", tz=timezone.utc))
 
 
 def plot_spectral_coverage() -> tuple[Path, Path]:
@@ -189,12 +197,13 @@ def plot_spectral_coverage() -> tuple[Path, Path]:
 
 def raw_corrected_comparison_frame() -> pd.DataFrame:
     if INPUT_ROOT is None:
-        path = ROOT / "20261111/correction_comparison/wfi02_tile135_raw_vs_corrected.csv"
-        return pd.read_csv(path)
+        input_root = DEFAULT_INPUT_ROOT
+    else:
+        input_root = INPUT_ROOT
 
-    raw_path = INPUT_ROOT / "raw_statistics/wfi02_tile_log_statistics_256.csv"
+    raw_path = input_root / "raw_statistics/wfi02_tile_log_statistics_256.csv"
     corrected_path = (
-        INPUT_ROOT
+        input_root
         / "corrected_statistics/wfi02_tile_log_statistics_256_count_corrected.csv"
     )
     missing = [path for path in (raw_path, corrected_path) if not path.is_file()]
@@ -269,7 +278,6 @@ def plot_raw_corrected() -> tuple[Path, Path]:
     reset_dates = [pd.Timestamp("2026-09-24T23:12:29.895"),
                    pd.Timestamp("2026-10-20T20:34:44.531")]
     figure, axes = plt.subplots(2, 3, figsize=(FIGURE_WIDTH_IN, 3.9), sharex=True, sharey=True)
-    date_ticks = pd.to_datetime(["2026-09-22", "2026-10-12", "2026-11-01"])
     colors = {"raw": "#2378b5", "corrected": "#d95f02"}
     markers = {1039: "o", 1063: "^"}
     for led, axis in enumerate(axes.flat, start=1):
@@ -285,9 +293,12 @@ def plot_raw_corrected() -> tuple[Path, Path]:
             axis.axvline(event, color="0.35", linestyle=style, linewidth=0.8)
         axis.set_title(f"LED {led} ({LED_FILTERS[led - 1]})")
         axis.grid(alpha=0.2)
-        axis.set_xticks(date_ticks)
-        axis.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+        set_utc_date_axis(axis, max_ticks=4)
         axis.tick_params(labelsize=TICK_FONT_SIZE)
+    first_date = frame["utc"].min()
+    last_date = frame["utc"].max()
+    axes.flat[0].set_xlim(first_date - pd.Timedelta(days=1), last_date + pd.Timedelta(days=1))
+    print(f"Figure 2 raw/corrected input coverage (UTC): {first_date} to {last_date}")
     figure.supylabel(r"Reference-relative log response ($10^{-3}$)", fontsize=PLOT_FONT_SIZE)
     figure.supxlabel("UTC date", fontsize=PLOT_FONT_SIZE, y=0.035)
     handles = [
@@ -347,6 +358,9 @@ def plot_ice_history() -> tuple[Path, Path]:
     def dates(days):
         return mdates.date2num([origin + timedelta(days=float(day)) for day in days])
 
+    history_start = min(float(warm_days.min()), float(rcs_only_days.min()), float(joint_days.min()))
+    history_end = max(float(warm_days.max()), float(rcs_only_days.max()), float(joint_days.max()))
+
     colors = {"initial": "#cb78a5", "rcs_only": "#177db5", "joint": "#db5b00"}
     series = [
         (warm_days, warm_d, warm_r, colors["initial"], "--",
@@ -370,6 +384,7 @@ def plot_ice_history() -> tuple[Path, Path]:
             style = ":" if reset_index == 0 else "-."
             axis.axvline(dates([reset])[0], color="#263c63", linestyle=style, linewidth=0.9)
         axis.grid(color="#d5dfeb", linewidth=0.6)
+        set_utc_date_axis(axis)
     axes[0].set_ylabel("Thickness (nm)")
     axes[0].set_ylim(-5, 255)
     axes[1].set_ylabel("Rate (nm/day)")
@@ -387,9 +402,13 @@ def plot_ice_history() -> tuple[Path, Path]:
     for axis, label in zip(axes, ("a", "b"), strict=True):
         axis.text(-0.07, 1.02, label, transform=axis.transAxes, fontsize=9,
                   fontweight="bold", va="bottom")
-    axes[1].set_xlim(dates([-1])[0], dates([61])[0])
-    axes[1].set_xticks(dates([0, 20, 40, 60]))
-    axes[1].xaxis.set_major_formatter(mdates.DateFormatter("%b %d", tz=timezone.utc))
+    axes[1].set_xlim(dates([history_start - 1, history_end + 1]))
+    print(
+        "Figure 3 fitted-history coverage (UTC):",
+        origin + timedelta(days=history_start),
+        "to",
+        origin + timedelta(days=history_end),
+    )
     figure.subplots_adjust(left=0.12, right=0.985, top=0.86, bottom=0.12, hspace=0.10)
     return save_figure(figure, "wfi02_representative_ice_history")
 
@@ -525,6 +544,8 @@ def plot_rcs_model_data() -> tuple[Path, Path]:
     colors = {"warm": "#cb78a5", "rcs_only": "#177db5", "joint": "#db5b00"}
     figure, axes = plt.subplots(2, 3, figsize=(FIGURE_WIDTH_IN, 4.2), sharex=True, sharey=True,
                                 gridspec_kw={"hspace": 0.35, "wspace": 0.20})
+    coverage_start = float(warm_days.min())
+    coverage_end = float(warm_days.max())
     values = np.concatenate([observed, warm_prediction, rcs_only["model_log_change"].to_numpy(float), joint_prediction]) * 1000.0
     low, high = float(values.min()), float(values.max())
     margin = 0.05 * max(high-low, 1.0)
@@ -557,13 +578,13 @@ def plot_rcs_model_data() -> tuple[Path, Path]:
         axis.grid(color="#d5dfeb",linewidth=0.8)
     figure.supylabel(r"Relative log response ($10^{-3}$)", fontsize=PLOT_FONT_SIZE)
     figure.supxlabel("UTC date", fontsize=PLOT_FONT_SIZE, y=0.035)
-    date_ticks = dates([10, 30, 50])
-    date_limits = dates([0, 60])
+    date_limits = dates([coverage_start - 1.0, coverage_end + 1.0])
     for axis in axes.flat:
-        axis.set_xticks(date_ticks)
         axis.set_xlim(date_limits[0], date_limits[-1])
-        axis.xaxis.set_major_formatter(mdates.DateFormatter("%b %d", tz=timezone.utc))
+        set_utc_date_axis(axis, max_ticks=4)
         axis.tick_params(labelsize=TICK_FONT_SIZE)
+    coverage_dates = Time(reference + np.asarray([coverage_start, coverage_end]), format="mjd", scale="utc").to_datetime()
+    print(f"Figure 4 corrected RCS/fits coverage (UTC): {coverage_dates[0]} to {coverage_dates[1]}")
     handles,labels=axes[0,0].get_legend_handles_labels()
     handles.extend([
         Line2D([0], [0], color="#263c63", linestyle=":", linewidth=0.8, label="Decon2 reset"),
@@ -662,8 +683,10 @@ def plot_car201_model_data() -> tuple[Path, Path]:
 
     model.reader_gray_log_by_tile=np.asarray(summary["reader_gray_log_offsets_by_tile"],float)[:,np.searchsorted(reset_days,pass_days,side="right")]
     dense_start=0.0
-    dense_end=min(float(history_times.max()),60.0)
-    dense_days=np.unique(np.r_[np.arange(dense_start,dense_end+1e-10,.25),pass_days.ravel()])
+    dense_end=float(history_times.max())
+    dense_days=np.unique(
+        np.r_[np.arange(dense_start,dense_end+1e-10,.25),pass_days.ravel(),dense_end]
+    )
     source_tiles=np.asarray(model.source_tile_ids,int)
     source_count=len(source_ids); filter_count=len(run.FILTERS); tile_count=baseline_history.shape[0]
     curve_cohort_valid=np.zeros((source_count,filter_count,len(dense_days)),dtype=bool)
@@ -833,6 +856,16 @@ def plot_car201_model_data() -> tuple[Path, Path]:
     reset_dates=mdates.date2num(Time(reference_mjd+reset_days,format="mjd",scale="utc").to_datetime())
     dense_dates=mdates.date2num(Time(reference_mjd+dense_days,format="mjd",scale="utc").to_datetime())
     pass_dates=mdates.date2num(Time(reference_mjd+pass_days,format="mjd",scale="utc").to_datetime())
+    observed_span=Time(
+        reference_mjd+np.asarray([pass_days.min(),pass_days.max()]),
+        format="mjd",scale="utc",
+    ).to_datetime()
+    model_span=Time(
+        reference_mjd+np.asarray([dense_days.min(),dense_days.max()]),
+        format="mjd",scale="utc",
+    ).to_datetime()
+    print("Figure 5 CAR201 visit coverage (UTC):",observed_span[0],"to",observed_span[1])
+    print("Figure 5 joint-fit model coverage (UTC):",model_span[0],"to",model_span[1])
     postroll_index=int(np.flatnonzero(np.asarray(model.pass_zero_point_group_ids)>0)[0])
     postroll_date=float(np.median(pass_dates[:,postroll_index]))
     active_source=active.reshape(source_count,filter_count)
@@ -910,9 +943,18 @@ def plot_car201_model_data() -> tuple[Path, Path]:
     ]
     figure.legend(handles=handles,loc="upper center",bbox_to_anchor=(.5,.995),ncol=3,
                   frameon=False,fontsize=LEGEND_FONT_SIZE,columnspacing=.8,handlelength=1.5)
-    ticks=mdates.date2num(Time(reference_mjd+np.asarray([0.,20.,40.,60.]),format="mjd",scale="utc").to_datetime())
+    plot_start=float(min(dense_days.min(),pass_days.min()))
+    plot_end=float(max(dense_days.max(),pass_days.max()))
+    date_limits=mdates.date2num(
+        Time(
+            reference_mjd+np.asarray([plot_start-1.0,plot_end+1.0]),
+            format="mjd",scale="utc",
+        ).to_datetime()
+    )
     for axis in axes:
-        axis.set_xticks(ticks); axis.set_xlim(ticks[0]-.5,ticks[-1]+2.); axis.xaxis.set_major_formatter(mdates.DateFormatter("%b %d",tz=timezone.utc))
+        axis.set_xlim(date_limits[0],date_limits[-1])
+        set_utc_date_axis(axis, max_ticks=4)
+        axis.tick_params(labelsize=TICK_FONT_SIZE)
     figure.subplots_adjust(left=.105,right=.985,top=.87,bottom=.09,hspace=.30,wspace=.16)
     median_centered_png=FIGURES/"wfi02_full_car201_model_data_median_centered.png"
     figure.savefig(median_centered_png,dpi=FIGURE_DPI)
@@ -1026,9 +1068,9 @@ def plot_car201_model_data() -> tuple[Path, Path]:
         frameon=False,fontsize=LEGEND_FONT_SIZE,columnspacing=.8,handlelength=1.5,
     )
     for axis in ice_axes:
-        axis.set_xticks(ticks)
-        axis.set_xlim(ticks[0]-.5,ticks[-1]+2.)
-        axis.xaxis.set_major_formatter(mdates.DateFormatter("%b %d",tz=timezone.utc))
+        axis.set_xlim(date_limits[0],date_limits[-1])
+        set_utc_date_axis(axis, max_ticks=4)
+        axis.tick_params(labelsize=TICK_FONT_SIZE)
     ice_figure.subplots_adjust(left=.14,right=.985,top=.88,bottom=.11,hspace=.30,wspace=.16)
     zero_ice_png=FIGURES/"wfi02_full_car201_model_data.png"
     zero_ice_pdf=zero_ice_png.with_suffix(".pdf")
@@ -1132,7 +1174,7 @@ def main(default_figure: str = "all") -> None:
     parser.add_argument(
         "--run-root",
         type=Path,
-        help="pipeline output root or date root; defaults to the validated 20261111 inputs",
+        help="pipeline output root or date root; defaults to the completed 20261117 run",
     )
     parser.add_argument(
         "--input-root",
@@ -1156,24 +1198,15 @@ def main(default_figure: str = "all") -> None:
     )
     args = parser.parse_args()
 
-    if args.run_root is not None:
-        paths = resolve_pipeline_run(args.run_root)
-        STATS = paths.statistics_dir
-        PRODUCTION_ROOT = paths.production_dir
-        INPUT_ROOT = (
-            args.input_root.expanduser().resolve()
-            if args.input_root is not None
-            else paths.input_dir
-        )
-        print("Using pipeline run:", paths.run_root)
-    else:
-        STATS = ROOT / "20261111/corrected_statistics_4h_thinned"
-        PRODUCTION_ROOT = STATS / "production"
-        INPUT_ROOT = (
-            args.input_root.expanduser().resolve()
-            if args.input_root is not None
-            else None
-        )
+    paths = resolve_pipeline_run(args.run_root or DEFAULT_RUN_ROOT)
+    STATS = paths.statistics_dir
+    PRODUCTION_ROOT = paths.production_dir
+    INPUT_ROOT = (
+        args.input_root.expanduser().resolve()
+        if args.input_root is not None
+        else paths.input_dir
+    )
+    print("Using pipeline run:", paths.run_root)
 
     reference_candidate = (
         PRODUCTION_ROOT

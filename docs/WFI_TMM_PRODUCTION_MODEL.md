@@ -1,4 +1,13 @@
-# WFI Ice-Deposition Methodology from RCS and Stellar Photometry
+---
+title: WFI Ice-Deposition Methodology from RCS and Stellar Photometry
+author:
+  - Dylan Paterson
+  - Amber Malpas
+---
+
+\begin{center}
+\small Department of Astronomy, The Ohio State University
+\end{center}
 
 **Abstract.** Thin-film water ice accumulating on the Nancy Grace Roman Space
 Telescope Wide Field Instrument (WFI) detectors modulates their wavelength-
@@ -1015,22 +1024,21 @@ group and equal half the RCS-only minus joint weighted $\chi^2$.
 ![Figure 5. Amber CAR201 data and fitted ice-induced magnitude response relative to a zero-ice stack for WFI02.](./figures/wfi02_full_car201_model_data.png)
 
 **Figure 5. CAR201 ice-induced magnitude response relative to zero ice for
-WFI02.** The panels show all eight filters and all 33,645 valid measurements
-from 604 stars in the WFI02 joint-fit sample, summarized by visit. Black points
-and error bars show the median and 16th--84th percentile range of observed
-magnitude changes transformed into the joint model's zero-ice frame. For each
-star/filter, this display subtracts the profiled baseline magnitude and fitted
-reset-gray and post-roll terms, then adds the joint model's EP3 pass-1 ice
-response relative to the clean stack. The observations are therefore
-model-conditioned; CAR201 contains no direct ice-free visit. The blue dashed
-curve shows the RCS-only fit's ice response, and the orange curve and band show
-the joint fit's ice response and its 16th--84th percentile range. Each is
-evaluated relative to its own zero-thickness clean stack, so zero denotes no
-modeled ice response for either model. The plotted model summaries use the same
-observed-star cohort. Dotted and dash-dot vertical lines mark Decon2 and Decon3;
-the dashed line marks the post-roll transition. Between visits, curves are
-evaluated on a 0.25-day grid using each source's nearest available tile
-assignment and split at the Decon2 and Decon3 resets.
+WFI02.** The panels show visit summaries of all 33,645 valid measurements from
+604 stars across eight filters. Black points show the median observed magnitude
+changes transformed into the joint model's zero-ice frame; bars span the
+16th--84th percentiles. For each star/filter, the transformation subtracts the
+profiled baseline and fitted reset-gray and post-roll terms, then adds the joint
+model's EP3 pass-1 ice response relative to the clean stack. This display is
+model-conditioned; CAR201 has no direct ice-free visit. Blue dashed curves show
+the RCS-only ice response; orange curves and shading show the joint-fit response
+and 16th--84th percentile range. Each model is relative to its own
+zero-thickness clean stack, so zero denotes no modeled ice response. Model
+summaries use the same observed-star cohort. Dotted and dash-dot lines mark
+Decon2 and Decon3; the dashed line marks post-roll. Between visits, curves use a
+0.25-day grid and each source's nearest available tile assignment, with curves
+split at both resets. CAR201 visits end 31 October 2026; model curves continue
+through the joint-fit endpoint on 17 November 2026.
 
 | Filter | $N$ | No-ice-correction reference NMAD (mmag) | RCS-only fit NMAD (mmag) | Joint-fit NMAD (mmag) | $\Delta\bar{\ell}_{J-R}$/obs |
 | --- | ---: | ---: | ---: | ---: | ---: |
