@@ -230,7 +230,7 @@ have a successful spectral-energy distribution (SED)
 estimate as described below.
 
 For photometric weighting, we tabulate each detector's Roman WFI v8
-effective-area curve (see References) on a 5 nm grid over its full nonzero
+effective-area curve (see Data Availability) on a 5 nm grid over its full nonzero
 support.
 
 ![Figure 1. RCS LED spectra, WFI02 effective areas, and an example field-star photon SED.](./figures/wfi02_spectral_coverage.png)
@@ -1126,6 +1126,30 @@ LED bands. The commissioning results have four main implications:
    of the inter-LED spectral modulation and reconstructed ice histories when
    those data are reduced; it does not enter the fits presented here.
 
+## Data Availability
+
+- Roman WFI calibrated image products and observation metadata: [MAST](https://mast.stsci.edu/).
+- Updated pre-Decon2 CAR190 calibrated exposures are available from the public Roman CAR190 S3 data collection: `s3://roman-s3-romcom/activities/CAR190/`.
+- Decon2-and-later calibrated RCS exposures: Level-2 products listed in the MAST exposure catalogue.
+- CAR201/Program 1043 Level-2 WFI images and forced-aperture photometry inputs.
+- Detector-specific WFI effective areas: [Roman Space Telescope technical-information repository, revision `14a9b0c98b0da723d0f2e4c6277956183c1fdd06`](https://github.com/RomanSpaceTelescope/roman-technical-information/tree/14a9b0c98b0da723d0f2e4c6277956183c1fdd06).
+- RCS LED spectral-energy distributions: relative output measurements transcribed from the 2024-Oct-25 `sRCS_PersonalityTable.xlsx`, “LED Spectrum” sheet, into the [public Roman WFI technical-information ECSV](https://github.com/RomanSpaceTelescope/roman-technical-information/blob/ff3bcfea58b5693169d7c30fa71dc90fc8346ea3/roman_technical_information/data/WideFieldInstrument/RelativeCalibrationSystem/WFI_RCS_LEDP_spectral_energy_distribution.ecsv) ([data review PR #93](https://github.com/RomanSpaceTelescope/roman-technical-information/pull/93)).
+
+## References
+
+- Allard, F., Homeier, D., Freytag, B., & Sharp, C. M. 2012, “Atmospheres From Very Low-Mass Stars to Extrasolar Planets,” *EAS Publications Series*, 57, 3 ([doi:10.1051/eas/1257001](https://doi.org/10.1051/eas/1257001)).
+- Bohlin, R. C., Mészáros, S., Fleming, S. W., Gordon, K. D., Koekemoer, A. M., & Kovács, J. 2017, “A New Stellar Atmosphere Grid and Comparisons with HST/STIS CALSPEC Flux Distributions,” *The Astronomical Journal*, 153, 234 ([doi:10.3847/1538-3881/aa6ba9](https://doi.org/10.3847/1538-3881/aa6ba9)).
+- Fitzpatrick, E. L. 1999, “Correcting for the Effects of Interstellar Extinction,” *Publications of the Astronomical Society of the Pacific*, 111, 63 ([doi:10.1086/316293](https://doi.org/10.1086/316293)).
+- Flewelling, H. A., Magnier, E. A., Chambers, K. C., et al. 2020, “The Pan-STARRS1 Database and Data Products,” *The Astrophysical Journal Supplement Series*, 251, 7 ([doi:10.3847/1538-4365/abb82d](https://doi.org/10.3847/1538-4365/abb82d)).
+- Foreman-Mackey, D., Hogg, D. W., Lang, D., & Goodman, J. 2013, “emcee: The MCMC Hammer,” *Publications of the Astronomical Society of the Pacific*, 125, 306 ([doi:10.1086/670067](https://doi.org/10.1086/670067)).
+- Gaia Collaboration, Brown, A. G. A., Vallenari, A., et al. 2021, “Gaia Early Data Release 3: Summary of the Contents and Survey Properties,” *Astronomy & Astrophysics*, 649, A1 ([doi:10.1051/0004-6361/202039657](https://doi.org/10.1051/0004-6361/202039657)).
+- Gaia Collaboration, Vallenari, A., Brown, A. G. A., et al. 2023, “Gaia Data Release 3: Summary of the Content and Survey Properties,” *Astronomy & Astrophysics*, 674, A1 ([doi:10.1051/0004-6361/202243940](https://doi.org/10.1051/0004-6361/202243940)).
+- Husser, T.-O., Wende-von Berg, S., Dreizler, S., Homeier, D., Reiners, A., Barman, T., & Hauschildt, P. H. 2013, “A New Extensive Library of PHOENIX Stellar Atmospheres and Synthetic Spectra,” *Astronomy & Astrophysics*, 553, A6 ([doi:10.1051/0004-6361/201219058](https://doi.org/10.1051/0004-6361/201219058)).
+- Skrutskie, M. F., Cutri, R. M., Stiening, R., et al. 2006, “The Two Micron All Sky Survey (2MASS),” *The Astronomical Journal*, 131, 1163 ([doi:10.1086/498708](https://doi.org/10.1086/498708)).
+- Speagle, J. S. 2020, “dynesty: A Dynamic Nested Sampling Package for Estimating Bayesian Posteriors and Evidences,” *Monthly Notices of the Royal Astronomical Society*, 493, 3132 ([doi:10.1093/mnras/staa278](https://doi.org/10.1093/mnras/staa278)).
+
+\clearpage
+
 ## Appendix A. Detector Comparison: RCS-only and Joint Fits
 
 The likelihood convention defined above applies throughout this appendix; a
@@ -1412,22 +1436,3 @@ $\chi^2$/group columns are production-weighted values for the RCS-only fit and
 the joint fit. $\Delta\bar{\ell}_{J-R}$ is the joint minus RCS-only fit log
 likelihood per group, equal to half the RCS-only fit minus joint-fit weighted
 $\chi^2$ per group; positive favors the joint fit.
-
-## References
-
-- Allard, F., Homeier, D., Freytag, B., & Sharp, C. M. 2012, “Atmospheres From Very Low-Mass Stars to Extrasolar Planets,” *EAS Publications Series*, 57, 3 ([doi:10.1051/eas/1257001](https://doi.org/10.1051/eas/1257001)).
-- Bohlin, R. C., Mészáros, S., Fleming, S. W., Gordon, K. D., Koekemoer, A. M., & Kovács, J. 2017, “A New Stellar Atmosphere Grid and Comparisons with HST/STIS CALSPEC Flux Distributions,” *The Astronomical Journal*, 153, 234 ([doi:10.3847/1538-3881/aa6ba9](https://doi.org/10.3847/1538-3881/aa6ba9)).
-- Flewelling, H. A., Magnier, E. A., Chambers, K. C., et al. 2020, “The Pan-STARRS1 Database and Data Products,” *The Astrophysical Journal Supplement Series*, 251, 7 ([doi:10.3847/1538-4365/abb82d](https://doi.org/10.3847/1538-4365/abb82d)).
-- Fitzpatrick, E. L. 1999, “Correcting for the Effects of Interstellar Extinction,” *Publications of the Astronomical Society of the Pacific*, 111, 63 ([doi:10.1086/316293](https://doi.org/10.1086/316293)).
-- Foreman-Mackey, D., Hogg, D. W., Lang, D., & Goodman, J. 2013, “emcee: The MCMC Hammer,” *Publications of the Astronomical Society of the Pacific*, 125, 306 ([doi:10.1086/670067](https://doi.org/10.1086/670067)).
-- Gaia Collaboration, Brown, A. G. A., Vallenari, A., et al. 2021, “Gaia Early Data Release 3: Summary of the Contents and Survey Properties,” *Astronomy & Astrophysics*, 649, A1 ([doi:10.1051/0004-6361/202039657](https://doi.org/10.1051/0004-6361/202039657)).
-- Gaia Collaboration, Vallenari, A., Brown, A. G. A., et al. 2023, “Gaia Data Release 3: Summary of the Content and Survey Properties,” *Astronomy & Astrophysics*, 674, A1 ([doi:10.1051/0004-6361/202243940](https://doi.org/10.1051/0004-6361/202243940)).
-- Husser, T.-O., Wende-von Berg, S., Dreizler, S., Homeier, D., Reiners, A., Barman, T., & Hauschildt, P. H. 2013, “A New Extensive Library of PHOENIX Stellar Atmospheres and Synthetic Spectra,” *Astronomy & Astrophysics*, 553, A6 ([doi:10.1051/0004-6361/201219058](https://doi.org/10.1051/0004-6361/201219058)).
-- Skrutskie, M. F., Cutri, R. M., Stiening, R., et al. 2006, “The Two Micron All Sky Survey (2MASS),” *The Astronomical Journal*, 131, 1163 ([doi:10.1086/498708](https://doi.org/10.1086/498708)).
-- Speagle, J. S. 2020, “dynesty: A Dynamic Nested Sampling Package for Estimating Bayesian Posteriors and Evidences,” *Monthly Notices of the Royal Astronomical Society*, 493, 3132 ([doi:10.1093/mnras/staa278](https://doi.org/10.1093/mnras/staa278)).
-- Roman WFI calibrated image products and observation metadata: [MAST](https://mast.stsci.edu/).
-- Updated pre-Decon2 CAR190 calibrated exposures are available from the public Roman CAR190 S3 data collection: `s3://roman-s3-romcom/activities/CAR190/`.
-- Decon2-and-later calibrated RCS exposures: Level-2 products listed in the MAST exposure catalogue.
-- CAR201/Program 1043 Level-2 WFI images and forced-aperture photometry inputs.
-- Detector-specific WFI effective areas: [Roman Space Telescope technical-information repository, revision `14a9b0c98b0da723d0f2e4c6277956183c1fdd06`](https://github.com/RomanSpaceTelescope/roman-technical-information/tree/14a9b0c98b0da723d0f2e4c6277956183c1fdd06).
-- RCS LED spectral-energy distributions: relative output measurements transcribed from the 2024-Oct-25 `sRCS_PersonalityTable.xlsx`, “LED Spectrum” sheet, into the [public Roman WFI technical-information ECSV](https://github.com/RomanSpaceTelescope/roman-technical-information/blob/ff3bcfea58b5693169d7c30fa71dc90fc8346ea3/roman_technical_information/data/WideFieldInstrument/RelativeCalibrationSystem/WFI_RCS_LEDP_spectral_energy_distribution.ecsv) ([data review PR #93](https://github.com/RomanSpaceTelescope/roman-technical-information/pull/93)).
