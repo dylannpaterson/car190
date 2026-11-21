@@ -60,8 +60,8 @@ third spacecraft decontamination events; they reset the ice-history segments at
 `2026-09-24T23:12:29.895 UTC` and `2026-10-20T20:34:44.531 UTC`, respectively
 (elapsed days 12.90740 and 38.79785).
 
-The analysis uses three distinct observational data sets. CAR190 and CAR216
-are separate RCS programs; CAR201 supplies broad-band stellar photometry.
+The analysis combines three observational data sets: two RCS flat-field programs
+(CAR190 and CAR216) and broad-band stellar photometry from CAR201 (Table 1).
 
 | Data set | Program | Measurement | Calibrated products |
 | --- | --- | --- | --- |
@@ -142,9 +142,7 @@ $$
 Here $T_{\mathrm{ref}}$ is the operating-temperature reference. The temperature
 correction is zero at $T_{\mathrm{ref}}$ and is applied equally to all six LEDs for a
 tile. ACM steps are constant log-count offsets beginning at identified event
-times. Some offsets are shared across all LEDs; others are LED-specific. The
-decontamination boundaries start new physical ice-thickness-history segments,
-as described in Section 3.
+times. Some offsets are shared across all LEDs; others are LED-specific.
 
 For each tile, LED, and observation group, let $N$ be the valid-pair count and
 define the raw sufficient statistics $S=\sum_{i=1}^{N}x_i^{\mathrm{raw}}$ and
@@ -178,13 +176,15 @@ CAR201 WFI photometry is derived from MAST Level-2 calibrated images in Program
 positions on all 18 detectors, including initial and post-roll positions. The
 measurements cover filters F062, F087, F106, F129, F158, F184, F146, and F213.
 
-The source list comes from Gaia Data Release 3 (DR3): a 0.75-degree-radius
+The source list comes from Gaia Data Release 3 (DR3; Gaia Collaboration et al.
+2023): a 0.75-degree-radius
 circle centered at right ascension 294.3170 degrees and declination 46.3557
 degrees, selected solely by Gaia $G$ magnitude ($13\le G<21.5$) without
 temperature cuts. The query contains 85,297 sources; 52,173 are in the fainter
 subset ($19\le G<21.5$).
 
-For the fainter stars, Pan-STARRS DR2 mean point-spread-function (PSF)
+For the fainter stars, Pan-STARRS DR2 (Flewelling et al. 2020) mean
+point-spread-function (PSF)
 photometry is matched to Gaia positions within one arcsecond. Gaia positions are
 propagated from epoch 2016 to an approximate Pan-STARRS epoch of 2012 using Gaia
 proper motions where available; missing proper motions are flagged. A
@@ -193,7 +193,7 @@ arcsecond or the same counterpart is assigned to another Gaia source, including
 a brighter source. We also apply an approximate brighter-neighbor veto to flag
 likely blends.
 
-Two Micron All Sky Survey (2MASS) point-source matches use Gaia positions
+Two Micron All Sky Survey (2MASS; Skrutskie et al. 2006) point-source matches use Gaia positions
 propagated to each candidate observation date. A match must be within one
 arcsecond, have no other 2MASS candidate within two arcseconds, and not be
 shared with another Gaia source. 2MASS quality flags are used to exclude
@@ -229,10 +229,9 @@ Each source/filter group must have at least two visits, and each star must
 have a successful spectral-energy distribution (SED)
 estimate as described below.
 
-Each detector uses its own Roman WFI v8 effective-area curve, which describes
-the fraction of incident light detected at each wavelength (see References).
-Each detector's curve is tabulated over its full nonzero support on a 5 nm
-wavelength grid for wavelength-dependent photometric weighting.
+For photometric weighting, we tabulate each detector's Roman WFI v8
+effective-area curve (see References) on a 5 nm grid over its full nonzero
+support.
 
 ![Figure 1. RCS LED spectra, WFI02 effective areas, and an example field-star photon SED.](./figures/wfi02_spectral_coverage.png)
 
@@ -260,24 +259,25 @@ Decon3 ice resets, respectively.
 
 ### Stellar SED Estimation
 
-Each star is fit with a grid of PHOENIX/BT-Settl stellar-atmosphere spectra to
+Each star is fit with a grid of PHOENIX/BT-Settl stellar-atmosphere spectra
+(Husser et al. 2013; Allard et al. 2012) to
 estimate its wavelength-dependent spectral energy distribution (SED). Dust
 attenuation follows the Fitzpatrick (1999) extinction law, with the
 total-to-selective extinction ratio $R_V=3.1$ fixed; extinction $A_V$ is fit
-for each star. Model fluxes are integrated through Gaia EDR3 (using EDR3
-passbands and zero points), Pan-STARRS, and 2MASS response curves.
+for each star. Model fluxes are integrated through Gaia EDR3 passbands and zero
+points (Gaia Collaboration et al. 2021), Pan-STARRS, and 2MASS response curves.
 
 The fit varies five parameters: effective temperature (3000--10,000 K),
 surface gravity ($\log g$, base-10 logarithm in cm/s$^2$, from 0 to 5.5),
 metallicity (-1 to $+0.5$ dex relative to solar), visual extinction $A_V$
 (0--4 mag), and overall flux normalization.
-These bounds and priors strongly influence fits with few usable bands. Every
-source with at least one usable measurement is fit; faint sources with one or
+Every source with at least one usable measurement is fit; faint sources with one or
 two bands are flagged as weakly constrained, with their SED estimates largely
 determined by the priors.
 
-The SED fits use nested sampling (`dynesty`) with 80 live points and stop when
-the estimated remaining log evidence is below 1 ($\mathrm{dlogz}=1$). Each fitted
+The SED fits use nested sampling (`dynesty`; Speagle 2020) with 80 live points
+and stop when the estimated remaining log evidence is below 1
+($\mathrm{dlogz}=1$). Each fitted
 star has 128 approximate posterior draws; each draw is a complete extincted
 spectrum that retains correlations across wavelength. We apply a 0.03 mag floor
 to photometric uncertainties for calibration and model error, then treat flux
@@ -435,9 +435,9 @@ design wavelength.
 
 #### Ice Optical Index and Incidence
 
-The baseline ice refractive index is $n=1.25+i0$; the RCS-only fit estimates one
-positive wavelength-independent index scale per tile. Ice is lossless ($k=0$)
-and modeled at normal incidence.
+We model the ice film as lossless ($k=0$) at normal incidence with a baseline
+refractive index of $n=1.25$, fitting one positive, wavelength-independent
+scale factor per tile in the RCS-only fit.
 
 ### Tile Ice-Deposition Rate and Thickness-History Model
 
@@ -546,6 +546,8 @@ fit. Once an optical state is fixed, trajectory evaluation interpolates
 precomputed per-LED TMM response curves over ice thickness rather than
 re-evaluating the transfer matrix at every time node.
 
+\pagebreak
+
 ### RCS-only Fit Priors and Bounds
 
 | Quantity | Parameterization, prior, or fixed convention |
@@ -564,9 +566,10 @@ re-evaluating the transfer matrix at every time node.
 
 **Table 3. RCS-only fit parameterization, priors, and fixed conventions.**
 
-### EMCEE Search and MAP Optimization
+### emcee Search and MAP Optimization
 
-The EMCEE ensemble search begins with a constant-in-time ice-deposition rate,
+The `emcee` ensemble search (Foreman-Mackey et al. 2013) begins with a
+constant-in-time ice-deposition rate,
 reducing the trajectory dimension while it explores the posterior over the
 optical stack, ice thicknesses, and deposition rate. High-posterior states
 identify promising likelihood basins. The best scalar rate is copied to every
@@ -1289,6 +1292,8 @@ reported photometric uncertainties and detector-level excess scatter are used
 for both predictions, with per-star/filter magnitude offsets profiled
 separately.
 
+\clearpage
+
 | Detector | LED | Filter | Nonreference groups | RCS-only fit $\chi^2$/group | Joint-fit $\chi^2$/group | $\Delta\bar{\ell}_{J-R}$/group |
 | --- | ---: | --- | ---: | ---: | ---: | ---: |
 | WFI01 | 1 | F062 | 36,352 | 0.09371 | 0.06990 | +0.011906 |
@@ -1410,8 +1415,17 @@ $\chi^2$ per group; positive favors the joint fit.
 
 ## References
 
-- Roman WFI calibrated image products and observation metadata: [MAST](https://mast.stsci.edu/).
+- Allard, F., Homeier, D., Freytag, B., & Sharp, C. M. 2012, “Atmospheres From Very Low-Mass Stars to Extrasolar Planets,” *EAS Publications Series*, 57, 3 ([doi:10.1051/eas/1257001](https://doi.org/10.1051/eas/1257001)).
 - Bohlin, R. C., Mészáros, S., Fleming, S. W., Gordon, K. D., Koekemoer, A. M., & Kovács, J. 2017, “A New Stellar Atmosphere Grid and Comparisons with HST/STIS CALSPEC Flux Distributions,” *The Astronomical Journal*, 153, 234 ([doi:10.3847/1538-3881/aa6ba9](https://doi.org/10.3847/1538-3881/aa6ba9)).
+- Flewelling, H. A., Magnier, E. A., Chambers, K. C., et al. 2020, “The Pan-STARRS1 Database and Data Products,” *The Astrophysical Journal Supplement Series*, 251, 7 ([doi:10.3847/1538-4365/abb82d](https://doi.org/10.3847/1538-4365/abb82d)).
+- Fitzpatrick, E. L. 1999, “Correcting for the Effects of Interstellar Extinction,” *Publications of the Astronomical Society of the Pacific*, 111, 63 ([doi:10.1086/316293](https://doi.org/10.1086/316293)).
+- Foreman-Mackey, D., Hogg, D. W., Lang, D., & Goodman, J. 2013, “emcee: The MCMC Hammer,” *Publications of the Astronomical Society of the Pacific*, 125, 306 ([doi:10.1086/670067](https://doi.org/10.1086/670067)).
+- Gaia Collaboration, Brown, A. G. A., Vallenari, A., et al. 2021, “Gaia Early Data Release 3: Summary of the Contents and Survey Properties,” *Astronomy & Astrophysics*, 649, A1 ([doi:10.1051/0004-6361/202039657](https://doi.org/10.1051/0004-6361/202039657)).
+- Gaia Collaboration, Vallenari, A., Brown, A. G. A., et al. 2023, “Gaia Data Release 3: Summary of the Content and Survey Properties,” *Astronomy & Astrophysics*, 674, A1 ([doi:10.1051/0004-6361/202243940](https://doi.org/10.1051/0004-6361/202243940)).
+- Husser, T.-O., Wende-von Berg, S., Dreizler, S., Homeier, D., Reiners, A., Barman, T., & Hauschildt, P. H. 2013, “A New Extensive Library of PHOENIX Stellar Atmospheres and Synthetic Spectra,” *Astronomy & Astrophysics*, 553, A6 ([doi:10.1051/0004-6361/201219058](https://doi.org/10.1051/0004-6361/201219058)).
+- Skrutskie, M. F., Cutri, R. M., Stiening, R., et al. 2006, “The Two Micron All Sky Survey (2MASS),” *The Astronomical Journal*, 131, 1163 ([doi:10.1086/498708](https://doi.org/10.1086/498708)).
+- Speagle, J. S. 2020, “dynesty: A Dynamic Nested Sampling Package for Estimating Bayesian Posteriors and Evidences,” *Monthly Notices of the Royal Astronomical Society*, 493, 3132 ([doi:10.1093/mnras/staa278](https://doi.org/10.1093/mnras/staa278)).
+- Roman WFI calibrated image products and observation metadata: [MAST](https://mast.stsci.edu/).
 - Updated pre-Decon2 CAR190 calibrated exposures are available from the public Roman CAR190 S3 data collection: `s3://roman-s3-romcom/activities/CAR190/`.
 - Decon2-and-later calibrated RCS exposures: Level-2 products listed in the MAST exposure catalogue.
 - CAR201/Program 1043 Level-2 WFI images and forced-aperture photometry inputs.
