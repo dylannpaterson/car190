@@ -45,13 +45,12 @@ broad WFI filters, providing complementary wavelength information between and
 around the LED bands. Together, these data sets constrain the time evolution of
 ice and the detector's broader spectral response.
 
-This paper describes the observations and their reduction (Section 2), develops
-the transfer-matrix method (TMM) optical stack and ice-deposition model
-(Section 3), and presents two fits: the RCS-only fit to the RCS data (Section 4)
-and the joint fit combining RCS with CAR201 stellar photometry (Section 5). We
-refer to them below as the RCS-only fit and the joint fit. Section 6 compares
-their reconstructions, discusses limitations, and outlines an independent
-validation test using slitless prism spectroscopy from CAR-192 (Program 1042).
+This paper describes the observations and reduction (Section 2), develops the
+transfer-matrix method (TMM) optical stack and ice-deposition model (Section 3),
+and presents two modeling stages: an RCS-only fit (Section 4) and a joint fit
+incorporating CAR201 stellar photometry (Section 5). Section 6 compares their
+reconstructions, discusses limitations, and outlines an independent validation
+test using slitless prism spectroscopy from CAR-192 (Program 1042).
 
 ## 2. Observational Data and Reduction
 
@@ -90,9 +89,8 @@ For each detector and LED, measurements are referenced to that LED's first
 exposure in time. A pixel pair is kept only if its data-quality (DQ) value is
 zero in both images, both the reference and current unscaled counts are finite
 and strictly positive, and the dark-subtracted photodiode signals used for
-exposure scaling are positive. We exclude any pair with a nonzero DQ flag but
-apply no additional outlier clipping on flux changes, so unflagged defects
-remain in the sample.
+exposure scaling are positive. We apply no additional outlier clipping on flux
+changes, so unflagged defects remain in the sample.
 
 We divide each detector image into 256-by-256-pixel tiles, each covering up to
 65,536 native pixel pairs. For each tile, LED, and exposure, we summarize
@@ -161,6 +159,8 @@ The reduction applies count-space corrections before forming corrected group
 statistics, using UTC event times shared across detectors and factors estimated
 at detector, tile, or LED level as indicated.
 
+\pagebreak
+
 #### Correction terms and timing
 
 | Correction group | What is corrected | Timing |
@@ -207,18 +207,17 @@ three usable Gaia-band measurements.
 For the faint-star SED fits, a photometric measurement must have a finite
 magnitude and finite positive uncertainty. The catalog retains single-detection
 Pan-STARRS measurements and does not impose an upper cut on their ordinary
-photometric uncertainties. A faint-star 2MASS band is used only with an
-accepted quality flag, valid uncertainty, and no contamination flag. The
-poor-profile-fit `E` flag is retained but recorded. Upper-limit `U` measurements
-are not used as detections, and `F` or `X` values do not supply a usable
-measurement and error. A 2MASS uncertainty value of 8 mag or larger is treated
-as a catalogue flag rather than a statistical uncertainty. These quality cuts
-filter out individual bands while retaining the star in the SED sample.
+photometric uncertainties. A faint-star 2MASS band requires an accepted quality
+flag, a finite positive uncertainty below 8 mag (larger values are catalogue
+flags), and no contamination flag; we retain and record poor-profile-fit `E`
+flags but exclude upper limits (`U`) and unusable (`F` or `X`) measurements.
+These quality cuts filter out individual bands while retaining the star in the
+SED sample.
 
-For the joint ice fit, measurements are matched by source, filter, and visit.
-The first eleven visits through 31 October 2026 are used. These visits comprise
-Execution Plan 3 (EP3) passes 1--6 and Execution Plan 4
-(EP4) passes 1--5. The roll separates EP4 pass 1 from pass 2 and moves many
+For the joint ice fit, we use the first eleven visits through 31 October 2026,
+matched by source, filter, and visit. They comprise Execution Plan 3 (EP3)
+passes 1--6 and Execution Plan 4 (EP4) passes 1--5. The roll separates EP4 pass
+1 from pass 2 and moves many
 stars to new detector positions. Because no L-flat was applied to these CAR201
 measurements, the changed positions can produce flux steps from spatial response
 variation, apart from the time-dependent ice signal. Figure 5 marks the median
@@ -298,17 +297,15 @@ adopted atmosphere and extinction models.
 
 #### Independent Spectrum Checks
 
-As an external check of the SED reconstruction, three example stars were
-compared with stellar spectra supplied by Tathagata Pal in private communication,
-their fitted BT-Settl spectra, and Gaia and 2MASS measurements. The comparison
-spectra were intrinsic, so the estimated extinction was applied before
-comparing with observed photometry. The supplied material included Gaia-band
-extinction $A_G$, which was approximately converted to $A_V$ using a model
-spectrum and the Fitzpatrick law. The spectra were integrated through the
-corresponding bandpasses. The results were broadly similar, with differences in
-some bands. Two stars were also checked against linked BOSZ atmosphere models
-(Bohlin et al. 2017): their input flux, catalogued radius, and distance
-reproduced the supplied intrinsic spectra to a maximum fractional difference
+As an external check, we compared the fitted BT-Settl spectra for three stars
+and their Gaia/2MASS photometry with intrinsic stellar spectra supplied by
+Tathagata Pal (private communication). We converted the supplied Gaia-band
+extinction $A_G$ approximately to $A_V$ using a model spectrum and the
+Fitzpatrick law, applied it to the intrinsic spectra, and integrated them
+through the corresponding bandpasses; the results broadly agreed, with minor
+band-to-band differences. For two stars, linked BOSZ atmosphere models
+(Bohlin et al. 2017) also reproduced the supplied intrinsic spectra from their
+input fluxes, catalogued radii, and distances to a maximum fractional difference
 below $4\times10^{-10}$.
 
 ## 3. Physical Model of Ice Deposition
@@ -465,8 +462,8 @@ where $t_s$ and $d_{0,k,s}$ are that segment's start time and fitted starting
 ice thickness. The integral is evaluated interval by interval with 8-point
 Gauss-Legendre quadrature.
 
-At each decontamination, a new ice-thickness-history segment starts with its
-own fitted initial ice thickness at the Decon2 and Decon3 epochs (Section 2).
+Each decontamination (Decon2 and Decon3; Section 2) initiates a new
+thickness-history segment with its own fitted starting thickness.
 
 The third decontamination was brief, so the model does not assume that all ice
 was removed. A nonzero post-event ice thickness can represent residual ice that
@@ -479,7 +476,7 @@ a multiplicative response factor $\exp(\gamma_{k,s})$.
 
 ### RCS Sufficient Statistics and Likelihood
 
-The RCS-only fit consumes per-tile sufficient statistics after the fixed
+The RCS-only fit uses per-tile sufficient statistics after the fixed
 count-space corrections; decontamination boundaries define the ice-history
 segments. For each tile, LED, and observation group, the reduction retains:
 
@@ -613,14 +610,14 @@ g_d(\lambda)&=\sum_{j=1}^{15}a_{d,j}B_j(\lambda),\\
 \end{aligned}
 $$
 
-The basis functions $B_j$ are shared by tiles on detector $d$ and are defined
-below. The clean-stack reflection and transfer normalization remain
-tile-specific. At each tile's ice thickness, the modulated ice-free reflection
-sets the ice-layer input admittance
-$Y_{\mathrm{mod}}=Y_0(1-r_{\mathrm{mod}})/(1+r_{\mathrm{mod}})$. The fitted
-ice-free reference-stack transfer normalization and substrate admittance $Y_s$
-remain fixed. Let $U_{0,k}(\lambda)$ be the first component of that fitted
-clean-stack transfer boundary. The input pair for the ice-layer transfer
+The basis functions $B_j$, defined below, are shared across all tiles on a
+detector. Each tile's clean-stack reflection, transfer normalization, and
+substrate admittance $Y_s$ remain tile-specific and fixed at their RCS-only
+values. At each tile's ice thickness, the modulated ice-free reflection sets
+the ice-layer input admittance
+$Y_{\mathrm{mod}}=Y_0(1-r_{\mathrm{mod}})/(1+r_{\mathrm{mod}})$. Let
+$U_{0,k}(\lambda)$ be the first component of the fitted clean-stack transfer
+boundary. The input pair for the ice-layer transfer
 matrix is $(U_{0,k},U_{0,k}Y_{\mathrm{mod}})$; applying the ice matrix gives
 $(U_{\mathrm{ice,mod}},V_{\mathrm{ice,mod}})$. The resulting substrate power is
 
@@ -838,8 +835,8 @@ $$
 
 where $\sigma_{i,\mathrm{phot}}$ is the reported photometric measurement
 uncertainty and $\sigma_{\mathrm{det},d}$ is the fitted detector-level excess
-photometric scatter. With fixed degrees-of-freedom $\nu=4$, the photometry term
-is
+photometric scatter. With fixed degrees of freedom $\nu=4$, the parameter-dependent
+Student-$t$ negative log-likelihood (NLL) is
 
 $$
 \mathcal{L}_{\mathrm{phot}}=
@@ -850,9 +847,7 @@ $$
 \right].
 $$
 
-The expression above is the parameter-dependent Student-$t$ negative
-log-likelihood (NLL). The detector-level excess photometric scatter uses the
-bounds in Table 4.
+The detector-level excess photometric scatter uses the bounds in Table 4.
 
 Let $\delta d_{0,k,s}$ be the log adjustment to the starting ice thickness for
 tile $k$ and reset segment $s$, and let $\delta q_{k,s,j}$ be the log
@@ -864,9 +859,6 @@ $$
 \frac{1}{2}\sum_{k,s}\left(\frac{\delta d_{0,k,s}}{\tau_s}\right)^2+
 \frac{1}{2}\sum_{k,s,j}\left(\frac{\delta q_{k,s,j}}{\sigma_{\delta q}}\right)^2.
 $$
-
-These parameters adjust the starting RCS-derived ice-thickness history and its
-ice-deposition-rate trajectory.
 
 The amplitude regularization favors a unit multiplier and integrates over
 normalized inverse wavelength $u$. For detector $d$, this coordinate and its
@@ -958,7 +950,7 @@ $5.66\times10^{-3}$--$7.27\times10^{-3}$), with a median of 64,753 valid pixel
 pairs per group. Treating those pairs as independent gives a group-mean standard
 error of $2.42\times10^{-5}$, far below the observed post-fit residuals.
 
-Fit-residual summaries exclude each LED's first, reference observation. NMAD is
+Fit-residual summaries exclude each LED's initial reference observation. NMAD is
 $1.4826$ times the median absolute deviation about the residual median. Across
 the 18 detectors, the median RCS-only group-mean RMSE is
 $0.737\times10^{-3}$ and the median NMAD is $0.534\times10^{-3}$ (detector
@@ -1077,8 +1069,7 @@ Across 217,856 nonreference RCS groups, weighted $\chi^2$ falls from 6,374.2 to
 photometric log-likelihood gain is $+2,472.0$. Relative to the no-ice-correction
 reference, the RCS-only fit lowers NMAD in all eight filters. The joint fit adds
 the largest reductions at F062 (21\%) and F213 (17\%); F146 is essentially
-unchanged. These metrics summarize the improvement and remaining residual
-scatter for WFI02.
+unchanged.
 
 The wavelength pattern in Table 5 is consistent with Figure 6, where the joint
 modulation differs most from the RCS-only response at the blue and red support edges and
@@ -1137,10 +1128,10 @@ LED bands. The commissioning results have four main implications:
 The likelihood convention defined above applies throughout this appendix; a
 positive $\Delta\bar{\ell}_{J-R}$ favors the joint fit. Pooled mean CAR201
 log-likelihood gains are largest in F062 (+0.225) and F213 (+0.203), followed
-by F087 (+0.112). WFI02's CAR201 log-likelihood gain is near the detector
-median; its RCS gain is about twice the cross-detector median, ranking third
-among the 18 detectors. WFI02's NMAD is lower in seven of eight filters, and
-five of six RCS LED weighted $\chi^2$ values improve.
+by F087 (+0.112). For WFI02, the CAR201 log-likelihood gain lies near the
+detector median, whereas the RCS gain is roughly twice the median (ranking third
+of 18), with NMAD improving in seven of eight filters and weighted $\chi^2$
+improving in five of six LEDs.
 
 | Detector | Filter | $N$ | No-ice-correction NMAD (mmag) | RCS-only fit NMAD (mmag) | Joint-fit NMAD (mmag) | $\Delta\bar{\ell}_{J-R}$/obs |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
