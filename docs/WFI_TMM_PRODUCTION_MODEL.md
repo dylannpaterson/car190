@@ -16,30 +16,28 @@ header-includes:
 **Abstract.** Thin-film water ice accumulating on the Nancy Grace Roman Space
 Telescope Wide Field Instrument (WFI) detectors modulates their wavelength-
 dependent sensitivity through thin-film interference. We present a two-stage
-physical methodology that reconstructs per-tile ice-thickness histories and
+physical model that reconstructs spatially resolved ice-thickness histories and
 detector optical properties across all 18 WFI detectors during commissioning.
-First, calibrated flat-field exposures from the Relative Calibration System
-(RCS; Programs 1039 and 1063) in six narrow LED bands (624--1670 nm) are
-compressed into exact pixel-pair sufficient statistics. We correct these for
-photodiode drift, readout side-swaps, detector temperature, and signal-level
-steps, then fit them with a four-layer transfer-matrix method (TMM) optical
-stack comprising three antireflection layers and an ice film over an optically
-thick HgCdTe substrate. The fit includes non-parametric per-tile ice-deposition
-histories across decontamination resets. Second, multi-epoch forced-aperture stellar
-photometry from CAR201 (Program 1043) across eight broad WFI filters
-(F062--F213; 470--2335 nm) is combined with stellar spectral energy
-distributions based on Gaia DR3, Pan-STARRS DR2, and 2MASS photometry. Holding
-the baseline TMM optical state fixed, a regularized 15-mode complex-reflection
-modulation is jointly fit with the stellar photometry and used to refine the ice
-histories under a robust Student-$t$ likelihood. Across all 18 detectors, the
-RCS-only fit reduces photometric NMAD in all 144 detector/filter
-combinations, with median reductions of 80.0% in F129 and 73.6% in F087. The
-joint fit lowers NMAD in 126 of 144 combinations and improves RCS weighted
-$\chi^2$ in 95 of 108 detector/LED groups; median reductions are
-largest in F062 (21.2%) and F213 (16.8%), where the stellar data extend
-constraints beyond the LED anchors. Finally, we outline an independent
-out-of-sample validation test using CAR-192 (Program 1042) WFI prism
-spectrophotometry.
+First, high-cadence flat-field exposures from the Relative Calibration System
+(RCS) in six narrow LED bands (624--1670 nm) are corrected for instrumental
+systematics and fit with a four-layer transfer-matrix optical model and
+time-varying ice-deposition histories across spacecraft decontamination events.
+Second, multi-epoch stellar photometry across eight broad WFI filters
+(F062--F213; 470--2335 nm) is jointly fit with a smooth spectral modulation of
+the ice-free detector reflectance to refine the ice histories and constrain
+detector response between and beyond the LED wavelengths. Across the focal
+plane, average ice-deposition rates decline steadily across successive
+commissioning intervals, from 9.9 nm/day before the second decontamination to
+9.0 nm/day after the second and 8.1 nm/day after the third. Fitted rates are
+highest immediately following decontamination--falling from focal-plane medians
+of 15.1 and 12.7 nm/day half a day later to 8.0 and 6.7 nm/day by day 20--though
+these early peaks remain degenerate with boundary effects and residual detector
+cooling. The baseline RCS-only model reduces stellar photometric scatter across
+all 144 detector/filter combinations (by medians of 80.0% in F129 and 73.6% in
+F087), while the joint fit yields further improvements--largest in F062 (21.2%)
+and F213 (16.8%), where stellar photometry extends beyond the LED wavelengths.
+Finally, we outline an independent out-of-sample validation test using WFI
+slitless prism spectrophotometry.
 
 ## 1. Introduction
 
@@ -233,7 +231,7 @@ passes 1--6 and Execution Plan 4 (EP4) passes 1--5. The roll separates EP4 pass
 1 from pass 2 and moves many
 stars to new detector positions. Because no L-flat was applied to these CAR201
 measurements, the changed positions can produce flux steps from spatial response
-variation, apart from the time-dependent ice signal. Figure 5 marks the median
+variation, apart from the time-dependent ice signal. Figure 6 marks the median
 timestamp of the first post-roll pass, `2026-10-18T09:39:36.654 UTC`. We discard
 exposures flagged `DO_NOT_USE` (bit 1) and remove any star entirely if any of its
 measurements is flagged `SATURATED` (bit 2). Retained rows must have finite
@@ -1020,7 +1018,7 @@ within each segment, excluding the thickness jumps at the resets.
 | Decon3 | 7 | 8.7 | 7.6--9.4 |
 | Decon3 | 20 | 6.7 | 6.0--7.3 |
 
-**Table 7. Fitted post-reset ice-deposition rates across the focal plane.** At
+**Table 5. Fitted post-reset ice-deposition rates across the focal plane.** At
 each offset, rates are interpolated within the relevant reset segment, summarized
 by the median rate across tiles on each detector, then reported as the median and
 10th--90th percentile across the 18 detector medians.
@@ -1039,9 +1037,29 @@ complex-reflection adjustment and jointly refined ice-thickness history. Model
 curves are evaluated on a denser date grid and split at the Decon2 and Decon3
 resets.
 
+\pagebreak
+
+### Focal-plane ice-thickness pattern
+
+Figure 5 shows the fitted per-tile ice thickness from the joint RCS and
+stellar-photometry model across the full WFI, at the last fitted node in segment
+2 before Decon3 and at the final fitted node in segment 3.
+The maps show a broad spatial gradient, with thicker fitted ice on upper and
+central detectors such as WFI01 and WFI10, and thinner ice toward the bottom
+and outer edge of the focal plane.
+
+![Figure 5. Fitted ice thickness from the joint RCS and stellar-photometry model across the WFI focal plane.](./figures/wfi_full_focal_plane_ice_thickness_segment_ends.png)
+
+**Figure 5. Joint-model ice thickness across the WFI focal plane.** Each panel
+maps the fitted thickness from the joint RCS and stellar-photometry model in all
+256 tiles on each of the 18 detectors, using a shared color scale. Panel (a)
+shows the last fitted node in segment 2 before Decon3 (2026-10-19 15:33:38 UTC);
+panel (b) shows the final segment-3 node (2026-11-17 23:33:34 UTC). The maps use
+the detector science-frame tile orientation.
+
 ### CAR201 data and predictions
 
-Figure 5 shows CAR201 data in the joint fit's model-conditioned zero-ice frame.
+Figure 6 shows CAR201 data in the joint fit's model-conditioned zero-ice frame.
 Define $\Delta\bar{\ell}_{J-R}=
 \bar{\ell}_{\mathrm{joint}}-\bar{\ell}_{\mathrm{RCS-only}}$ as the pure data
 log-likelihood difference, excluding priors and regularization; positive values
@@ -1051,9 +1069,9 @@ detector scatter for both predictions; constant star/filter magnitude offsets
 are profiled separately. RCS differences are per nonreference LED/tile/observation
 group and equal half the RCS-only minus joint weighted $\chi^2$.
 
-![Figure 5. Amber CAR201 data and fitted ice-induced magnitude response relative to a zero-ice stack for WFI02.](./figures/wfi02_full_car201_model_data.png)
+![Figure 6. Amber CAR201 data and fitted ice-induced magnitude response relative to a zero-ice stack for WFI02.](./figures/wfi02_full_car201_model_data.png)
 
-**Figure 5. CAR201 ice-induced magnitude response relative to zero ice for
+**Figure 6. CAR201 ice-induced magnitude response relative to zero ice for
 WFI02.** The panels show visit summaries of all 33,645 valid measurements from
 604 stars across eight filters. Black points show the median observed magnitude
 changes transformed into the joint model's zero-ice frame; bars span the
@@ -1081,9 +1099,9 @@ through the joint-fit endpoint on 17 November 2026.
 | F146 | 4,204 | 3.68 | 2.46 | 2.47 | +0.0003 |
 | F213 | 4,205 | 11.21 | 7.97 | 6.66 | +0.2266 |
 
-**Table 5. WFI02 CAR201 residual metrics.** NMAD (mmag) is $1.4826$ times the
+**Table 6. WFI02 CAR201 residual metrics.** NMAD (mmag) is $1.4826$ times the
 median absolute deviation after fitting per-star/filter magnitude offsets.
-$\Delta\bar{\ell}_{J-R}$/observation is the joint fit minus the RCS-only fit's
+$\Delta\bar{\ell}_{J-R}$/obs is the joint fit minus the RCS-only fit's
 $\nu=4$ Student-$t$ data log likelihood; positive favors the joint fit.
 Both predictions use the same
 roll-adjusted photometry and reported photometric uncertainties, with the
@@ -1099,7 +1117,7 @@ Magnitude offsets are profiled separately for each fit.
 | 5/F158 | 36,352 | 0.01765 | 0.01568 | +0.000983 |
 | 6/F184 | 36,096 | 0.01280 | 0.00984 | +0.001480 |
 
-**Table 6. WFI02 RCS likelihood by LED.** Values are production-weighted
+**Table 7. WFI02 RCS likelihood by LED.** Values are production-weighted
 $\chi^2$/group across 256 tiles, excluding each LED's first reference group.
 $\Delta\bar{\ell}_{J-R}$ is the joint minus the RCS-only fit log likelihood per
 group, equal to half the RCS-only fit minus joint-fit weighted $\chi^2$ per
@@ -1112,7 +1130,7 @@ reference, the RCS-only fit lowers NMAD in all eight filters. The joint fit adds
 the largest reductions at F062 (21\%) and F213 (17\%); F146 is essentially
 unchanged.
 
-The wavelength pattern in Table 5 is consistent with Figure 6, where the joint
+The wavelength pattern in Table 6 is consistent with Figure 7, where the joint
 modulation differs most from the RCS-only response at the blue and red support edges and
 in the 700--800 nm gap between LED1 and LED2. F062 extends blueward of LED1,
 while F213 lies redward of LED6; these filters add broad-band constraints where
@@ -1122,9 +1140,9 @@ F146 overlaps LED3--LED6, so its integrated response is already anchored by
 several RCS bands and averages over local spectral structure; its NMAD is
 essentially unchanged.
 
-![Figure 6. Effect of joint-fit spectral modulation on the ice-free WFI02 tile-135 complex reflection.](./figures/wfi02_tile135_complex_reflectance.png)
+![Figure 7. Effect of joint-fit spectral modulation on the ice-free WFI02 tile-135 complex reflection.](./figures/wfi02_tile135_complex_reflectance.png)
 
-**Figure 6. Effect of joint-fit spectral modulation on the ice-free complex
+**Figure 7. Effect of joint-fit spectral modulation on the ice-free complex
 reflection.** The panels show the amplitude and unwrapped phase of the ice-free
 reflection for representative WFI02 tile 135, for the RCS-only fit (blue dashed)
 and the joint fit after spectral modulation (orange). Both use the optical
@@ -1135,22 +1153,6 @@ horizontal axes show reciprocal wavelength and wavelength over the 470--2335 nm
 effective-area support. The phase branches are aligned at the longest
 wavelength, retaining the fitted phase shift. Both curves are MAP spectra of
 the ice-free reflection.
-
-\pagebreak
-
-### Focal-plane ice-thickness pattern
-
-Figure 7 shows the joint-fit ice-thickness pattern across the full WFI at the
-end of segment 2 and segment 3.
-
-![Figure 7. Joint-fit ice thickness across the WFI focal plane at the ends of segments 2 and 3.](./figures/wfi_full_focal_plane_ice_thickness_segment_ends.png)
-
-**Figure 7. Fitted ice thickness across the WFI focal plane.** Each panel maps
-the fitted thickness in all 256 tiles on each of the 18 detectors, using a
-shared color scale. Panel (a) shows the last fitted node in segment 2 before
-Decon3 (2026-10-19 15:33:38 UTC); panel (b) shows the final segment-3 node
-(2026-11-17 23:33:34 UTC). The maps use the detector science-frame tile
-orientation.
 
 ### Summary and Operational Implications
 
@@ -1188,6 +1190,17 @@ LED bands. The commissioning results have four main implications:
 - CAR201/Program 1043 Level-2 WFI images and forced-aperture photometry inputs.
 - Detector-specific WFI effective areas: [Roman Space Telescope technical-information repository, revision `14a9b0c98b0da723d0f2e4c6277956183c1fdd06`](https://github.com/RomanSpaceTelescope/roman-technical-information/tree/14a9b0c98b0da723d0f2e4c6277956183c1fdd06).
 - RCS LED spectral-energy distributions: relative output measurements transcribed from the 2024-Oct-25 `sRCS_PersonalityTable.xlsx`, “LED Spectrum” sheet, into the [public Roman WFI technical-information ECSV](https://github.com/RomanSpaceTelescope/roman-technical-information/blob/ff3bcfea58b5693169d7c30fa71dc90fc8346ea3/roman_technical_information/data/WideFieldInstrument/RelativeCalibrationSystem/WFI_RCS_LEDP_spectral_energy_distribution.ecsv) ([data review PR #93](https://github.com/RomanSpaceTelescope/roman-technical-information/pull/93)).
+
+## Acknowledgements
+
+We thank everyone involved in Roman commissioning analysis for their support.
+We are especially grateful to Chris Hirata and Nihar Dalal for helpful
+discussions about TMM optical models; Eric Switzer for helpful discussions
+about modeling complex reflectance at the ice/antireflection-coating boundary;
+Maxime Rizzo for advice on ACM-step and photodiode corrections to the data; Tim
+Brandt for advice on temperature-dependent sensitivity corrections; Tathagata
+Pal for providing stellar SEDs for comparison; and Zane Penella for providing
+CAR201 stellar photometry for comparison.
 
 ## References
 

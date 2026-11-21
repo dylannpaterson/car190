@@ -50,11 +50,11 @@ python docs/analyze_wfi_all_detector_metrics.py \
 | 2 — Raw and corrected RCS | `plot_raw_corrected` |
 | 3 — Ice-thickness history and deposition rate | `plot_ice_history` |
 | 4 — RCS data and model fits | `plot_rcs_model_data` |
-| 5 — CAR201 data and model predictions | `plot_car201_model_data` |
-| 6 — Ice-free complex reflection | `plot_complex_reflectance` |
-| 7 — Focal-plane ice thickness at segment ends | `plot_focal_plane_ice_thickness` |
+| 5 — Focal-plane ice thickness at segment ends | `plot_focal_plane_ice_thickness` |
+| 6 — CAR201 data and model predictions | `plot_car201_model_data` |
+| 7 — Ice-free complex reflection | `plot_complex_reflectance` |
 
-Figure 4 generation also writes `wfi02_rcs_likelihood_by_led.csv`; Figure 5
+Figure 4 generation also writes `wfi02_rcs_likelihood_by_led.csv`; Figure 6
 generation writes `wfi02_car201_residual_metrics.csv`. These summarize the saved
 fits over all 256 WFI02 tiles and the full WFI02 stellar sample, respectively.
 In both files, the log-likelihood difference is Joint RCS + stellar minus

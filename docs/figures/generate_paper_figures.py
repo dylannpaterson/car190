@@ -96,8 +96,14 @@ def save_figure(figure, stem: str, dpi: int = FIGURE_DPI) -> tuple[Path, Path]:
     return png, pdf
 
 
-def set_utc_date_axis(axis, max_ticks: int = 6) -> None:
-    locator = mdates.AutoDateLocator(minticks=3, maxticks=max_ticks, tz=timezone.utc)
+def set_utc_date_axis(
+    axis, max_ticks: int = 6, monthly_day: int | None = None
+) -> None:
+    locator = (
+        mdates.MonthLocator(bymonthday=monthly_day, tz=timezone.utc)
+        if monthly_day is not None
+        else mdates.AutoDateLocator(minticks=3, maxticks=max_ticks, tz=timezone.utc)
+    )
     axis.xaxis.set_major_locator(locator)
     axis.xaxis.set_major_formatter(mdates.DateFormatter("%b %d", tz=timezone.utc))
 
@@ -293,7 +299,7 @@ def plot_raw_corrected() -> tuple[Path, Path]:
             axis.axvline(event, color="0.35", linestyle=style, linewidth=0.8)
         axis.set_title(f"LED {led} ({LED_FILTERS[led - 1]})")
         axis.grid(alpha=0.2)
-        set_utc_date_axis(axis, max_ticks=4)
+        set_utc_date_axis(axis, monthly_day=15)
         axis.tick_params(labelsize=TICK_FONT_SIZE)
     first_date = frame["utc"].min()
     last_date = frame["utc"].max()
@@ -581,7 +587,7 @@ def plot_rcs_model_data() -> tuple[Path, Path]:
     date_limits = dates([coverage_start - 1.0, coverage_end + 1.0])
     for axis in axes.flat:
         axis.set_xlim(date_limits[0], date_limits[-1])
-        set_utc_date_axis(axis, max_ticks=4)
+        set_utc_date_axis(axis, monthly_day=15)
         axis.tick_params(labelsize=TICK_FONT_SIZE)
     coverage_dates = Time(reference + np.asarray([coverage_start, coverage_end]), format="mjd", scale="utc").to_datetime()
     print(f"Figure 4 corrected RCS/fits coverage (UTC): {coverage_dates[0]} to {coverage_dates[1]}")
@@ -601,7 +607,7 @@ def plot_rcs_model_data() -> tuple[Path, Path]:
 def plot_car201_model_data() -> tuple[Path, Path]:
     # The joint-fit forward model supplies fixed optical calibration, the RCS-only
     # baseline histories, the fitted histories, the stellar data, and the fitted
-    # post-roll offsets. Figure 5 moves that roll term to the observed series.
+    # post-roll offsets. Figure 6 moves that roll term to the observed series.
     sys.path.insert(0, str(ROOT / "wfi_pipeline"))
     from astropy.time import Time
     from fit_amber_wfi01_student_t import NU, profile_student_locations
@@ -864,8 +870,8 @@ def plot_car201_model_data() -> tuple[Path, Path]:
         reference_mjd+np.asarray([dense_days.min(),dense_days.max()]),
         format="mjd",scale="utc",
     ).to_datetime()
-    print("Figure 5 CAR201 visit coverage (UTC):",observed_span[0],"to",observed_span[1])
-    print("Figure 5 joint-fit model coverage (UTC):",model_span[0],"to",model_span[1])
+    print("Figure 6 CAR201 visit coverage (UTC):",observed_span[0],"to",observed_span[1])
+    print("Figure 6 joint-fit model coverage (UTC):",model_span[0],"to",model_span[1])
     postroll_index=int(np.flatnonzero(np.asarray(model.pass_zero_point_group_ids)>0)[0])
     postroll_date=float(np.median(pass_dates[:,postroll_index]))
     active_source=active.reshape(source_count,filter_count)
@@ -888,7 +894,7 @@ def plot_car201_model_data() -> tuple[Path, Path]:
         limits.extend([float(bq[0].min()),float(bq[1].max()),float(jq[0].min()),float(jq[1].max())])
     if min(limits) <= -60 or max(limits) >= 50:
         raise ValueError(
-            "Figure 5 data or full-span model curves exceed the original shared y-axis range"
+            "Figure 6 data or full-span model curves exceed the original shared y-axis range"
         )
     figure,axes=plt.subplots(4,2,figsize=(FIGURE_WIDTH_IN,6.2),sharex=True,sharey=True); axes=axes.ravel()
     blue,orange="#1f77b4","#d95f02"; segments=[dense_days<reset_days[0],(dense_days>=reset_days[0])&(dense_days<reset_days[1]),dense_days>=reset_days[1]]
@@ -1088,7 +1094,7 @@ def plot_car201_model_data() -> tuple[Path, Path]:
     f062_visit_differences=[abs(data-model) for band,_,data,model in model_summaries if band=="F062"]
     print("F062 max absolute visit-median data/model difference (mmag):",float(max(f062_visit_differences)))
     print("Saved median-centered diagnostic",median_centered_png,median_centered_png.with_suffix(".pdf"))
-    print("Saved WFI02 Figure 5",zero_ice_png,zero_ice_pdf)
+    print("Saved WFI02 Figure 6",zero_ice_png,zero_ice_pdf)
     print("Saved zero-ice-reference companion",companion_png,companion_png.with_suffix(".pdf"))
 
 
@@ -1369,7 +1375,7 @@ def main(default_figure: str = "all") -> None:
     parser.add_argument(
         "--modulated-bundle",
         type=Path,
-        help="override the run's modulated wavelength-response bundle for Figure 6",
+        help="override the run's modulated wavelength-response bundle for Figures 5 and 7",
     )
     args = parser.parse_args()
 
@@ -1407,9 +1413,9 @@ def main(default_figure: str = "all") -> None:
         "2": plot_raw_corrected,
         "3": plot_ice_history,
         "4": plot_rcs_model_data,
-        "5": plot_car201_model_data,
-        "6": plot_complex_reflectance,
-        "7": plot_focal_plane_ice_thickness,
+        "5": plot_focal_plane_ice_thickness,
+        "6": plot_car201_model_data,
+        "7": plot_complex_reflectance,
     }
     if args.figure == "all":
         for generator in generators.values():
