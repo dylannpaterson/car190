@@ -1,8 +1,12 @@
 ---
-title: WFI Ice-Deposition Methodology from RCS and Stellar Photometry
+title: WFI Ice-Deposition from RCS and Stellar Photometry
 author:
   - Dylan Paterson
   - Amber Malpas
+header-includes:
+  - \usepackage{titling}
+  - \pretitle{\begin{center}\Large\bfseries}
+  - \posttitle{\end{center}}
 ---
 
 \begin{center}
@@ -999,6 +1003,32 @@ trajectory. Because these rates are numerical derivatives of the piecewise MAP
 thickness history, the current data cannot distinguish rapid post-reset
 reaccumulation from boundary sensitivity.
 
+Across the 18 detectors, averaging each detector's 256 tile-wise thickness
+slopes between the first and last fitted nodes within each reset segment gives
+9.9 nm/day before Decon2 (detector means 9.0--10.8), 9.0 nm/day in segment 2
+(8.2--9.8), and 8.1 nm/day in segment 3 (7.2--9.2). These slopes are computed
+within each segment, excluding the thickness jumps at the resets.
+
+\pagebreak
+
+| Reset | Days after reset | Median of detector median rates (nm/day) | Detector 10th--90th percentile (nm/day) |
+| --- | ---: | ---: | ---: |
+| Decon2 | 0.5 | 15.1 | 9.8--18.1 |
+| Decon2 | 7 | 10.1 | 9.1--10.8 |
+| Decon2 | 20 | 8.0 | 7.2--8.6 |
+| Decon3 | 0.5 | 12.7 | 10.7--14.8 |
+| Decon3 | 7 | 8.7 | 7.6--9.4 |
+| Decon3 | 20 | 6.7 | 6.0--7.3 |
+
+**Table 7. Fitted post-reset ice-deposition rates across the focal plane.** At
+each offset, rates are interpolated within the relevant reset segment, summarized
+by the median rate across tiles on each detector, then reported as the median and
+10th--90th percentile across the 18 detector medians.
+
+The high early post-reset rates may partly reflect residual detector cooling: an
+imperfect temperature-dependent sensitivity correction could leave a time-varying
+response that the model attributes to ice deposition.
+
 ![Figure 4. Corrected RCS data and the RCS-only and joint fits for WFI02 tile 135.](./figures/wfi02_tile135_rcs_model_data.png)
 
 **Figure 4. RCS data and fits for WFI02 tile 135.** Each panel shows one LED.
@@ -1105,6 +1135,22 @@ horizontal axes show reciprocal wavelength and wavelength over the 470--2335 nm
 effective-area support. The phase branches are aligned at the longest
 wavelength, retaining the fitted phase shift. Both curves are MAP spectra of
 the ice-free reflection.
+
+\pagebreak
+
+### Focal-plane ice-thickness pattern
+
+Figure 7 shows the joint-fit ice-thickness pattern across the full WFI at the
+end of segment 2 and segment 3.
+
+![Figure 7. Joint-fit ice thickness across the WFI focal plane at the ends of segments 2 and 3.](./figures/wfi_full_focal_plane_ice_thickness_segment_ends.png)
+
+**Figure 7. Fitted ice thickness across the WFI focal plane.** Each panel maps
+the fitted thickness in all 256 tiles on each of the 18 detectors, using a
+shared color scale. Panel (a) shows the last fitted node in segment 2 before
+Decon3 (2026-10-19 15:33:38 UTC); panel (b) shows the final segment-3 node
+(2026-11-17 23:33:34 UTC). The maps use the detector science-frame tile
+orientation.
 
 ### Summary and Operational Implications
 

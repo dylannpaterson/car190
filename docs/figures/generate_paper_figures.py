@@ -1,7 +1,7 @@
-"""Regenerate the WFI methodology paper's six figures in this directory.
+"""Regenerate the WFI methodology paper's seven figures in this directory.
 
 Run ``python docs/figures/generate_paper_figures.py --figure all`` to rebuild
-the complete set, or pass a figure number from 1 through 6 to rebuild one plot.
+the complete set, or pass a figure number from 1 through 7 to rebuild one plot.
 The scripts use the recorded statistics, model fits, and reference data in the
 repository workspace; no fitting stage is rerun.
 """
@@ -1163,13 +1163,188 @@ def plot_complex_reflectance() -> tuple[Path, Path]:
     return save_figure(figure, "wfi02_tile135_complex_reflectance")
 
 
+def plot_focal_plane_ice_thickness() -> tuple[Path, Path]:
+    from matplotlib.patches import Rectangle
+
+    sys.path[:0] = [
+        str(ROOT / "wfi_pipeline"),
+        str(ROOT / "archive/exploratory/legacy_root_scripts"),
+    ]
+    import plot_joint_modulated_ice_trends as trends
+    import plot_wfi_full_focal_plane_rates as focal
+
+    bundle = trends.load_joint_modulated_plot_bundle(MODULATED_BUNDLE)
+    trends.validate_joint_modulated_bundle(bundle)
+    reset_days, _ = trends._reset_metadata(bundle)
+    if len(reset_days) < 2:
+        raise ValueError("Focal-plane reset maps require Decon2 and Decon3")
+    days = np.asarray(bundle["observation_days"], dtype=float).reshape(-1)
+    thickness = np.asarray(bundle["tile_ice_thickness"], dtype=float)
+    rates = np.asarray(bundle["tile_instantaneous_rate_nm_day"], dtype=float)
+    detector_ids = np.asarray(bundle["detectors"]).astype(str)
+    tile_ids = np.asarray(bundle["tile_ids"], dtype=int)
+    tile_rows = np.asarray(bundle["tile_rows"], dtype=int)
+    tile_cols = np.asarray(bundle["tile_cols"], dtype=int)
+
+    segment2_nodes = np.flatnonzero((days >= reset_days[0]) & (days < reset_days[1]))
+    segment3_nodes = np.flatnonzero(days >= reset_days[1])
+    if not segment2_nodes.size or not segment3_nodes.size:
+        raise ValueError("Joint fit lacks a fitted node in segment 2 or segment 3")
+    segment2_index = int(segment2_nodes[-1])
+    segment3_index = int(segment3_nodes[-1])
+    endpoint_specs = (
+        ("segment2_end", segment2_index),
+        ("segment3_end", segment3_index),
+    )
+
+    maps = {name: {} for name, _index in endpoint_specs}
+    for detector in focal.SCAS:
+        selected = np.flatnonzero(detector_ids == detector)
+        order = np.argsort(tile_ids[selected])
+        selected = selected[order]
+        if not np.array_equal(tile_ids[selected], np.arange(256)):
+            raise ValueError(f"{detector}: joint bundle does not contain all 256 tiles")
+        rows = tile_rows[selected]
+        cols = tile_cols[selected]
+        for name, time_index in endpoint_specs:
+            values = np.full((16, 16), np.nan, dtype=float)
+            values[rows, cols] = thickness[selected, time_index]
+            if not np.isfinite(values).all():
+                raise ValueError(f"{detector}/{name}: incomplete fitted thickness map")
+            maps[name][detector] = {"ice_thickness_nm": values}
+
+    all_values = np.concatenate(
+        [
+            maps[name][detector]["ice_thickness_nm"].ravel()
+            for name, _index in endpoint_specs
+            for detector in focal.SCAS
+        ]
+    )
+    color_min, color_max = np.percentile(all_values, [1.0, 99.0])
+    if not color_min < color_max:
+        raise ValueError("Focal-plane thickness maps have degenerate color limits")
+
+    figure, axes = plt.subplots(1, 2, figsize=(FIGURE_WIDTH_IN, 3.25))
+    figure.subplots_adjust(left=0.015, right=0.91, top=0.96, bottom=0.12, wspace=0.04)
+    image = None
+    for axis, (panel, (map_name, _time_index)) in zip(
+        axes, zip(("a", "b"), endpoint_specs, strict=True), strict=True
+    ):
+        axis.text(-0.025, 1.015, panel, transform=axis.transAxes,
+                  fontsize=9, fontweight="bold", va="bottom")
+        for detector in focal.SCAS:
+            x, y = focal.sca_position(detector)
+            values = maps[map_name][detector]["ice_thickness_nm"]
+            image = axis.imshow(
+                values,
+                origin="lower",
+                interpolation="none",
+                cmap="viridis",
+                vmin=color_min,
+                vmax=color_max,
+                extent=(x, x + focal.SCA_SIZE, y, y + focal.SCA_SIZE),
+            )
+            axis.add_patch(
+                Rectangle((x, y), focal.SCA_SIZE, focal.SCA_SIZE,
+                          fill=False, edgecolor="black", linewidth=0.65)
+            )
+            axis.text(x + focal.SCA_SIZE / 2, y + focal.SCA_SIZE / 2, detector,
+                      ha="center", va="center", fontsize=5.2, color="white")
+            grid_size = values.shape[0]
+            for tile_index in range(1, grid_size):
+                position = focal.SCA_SIZE * tile_index / grid_size
+                axis.plot((x + position, x + position), (y, y + focal.SCA_SIZE),
+                          color="white", alpha=0.32, linewidth=0.22)
+                axis.plot((x, x + focal.SCA_SIZE), (y + position, y + position),
+                          color="white", alpha=0.32, linewidth=0.22)
+
+        axis.set_aspect("equal")
+        axis.set_xlim(-1.0, focal.SCA_PITCH * 6 - 1.0)
+        axis.set_ylim(
+            min(focal.COLUMN_Y_OFFSET) - 1.0,
+            focal.SCA_PITCH * 2 + max(focal.COLUMN_Y_OFFSET) + focal.SCA_SIZE + 1.0,
+        )
+        axis.set_xticks([])
+        axis.set_yticks([])
+        axis.set_xlabel("Roman WFI focal-plane mosaic", fontsize=TICK_FONT_SIZE)
+        center_x = focal.SCA_PITCH * 3 - 0.5
+        center_y = focal.SCA_PITCH * 2 + focal.COLUMN_Y_OFFSET[2] + 1.2
+        axis.plot(center_x, center_y, marker="x", color="#d62728",
+                  markersize=5, markeredgewidth=1.0)
+        axis.text(center_x + 0.3, center_y + 0.5, "WFI_CEN", color="#d62728",
+                  fontsize=5, va="bottom")
+
+    colorbar = figure.colorbar(image, ax=axes, fraction=0.035, pad=0.025)
+    colorbar.set_label("Fitted ice thickness (nm)", fontsize=PLOT_FONT_SIZE)
+    colorbar.ax.tick_params(labelsize=TICK_FONT_SIZE)
+    origin = datetime.fromisoformat(RCS_ORIGIN_UTC)
+    segment2_date = origin + timedelta(days=float(days[segment2_index]))
+    segment3_date = origin + timedelta(days=float(days[segment3_index]))
+    print("Focal-plane thickness-map times (UTC):", segment2_date, segment3_date)
+
+    detector_mean_rates = []
+    segment_specs = (
+        ("before Decon2", (days >= days[0]) & (days < reset_days[0])),
+        ("segment 2", (days >= reset_days[0]) & (days < reset_days[1])),
+        ("segment 3", days >= reset_days[1]),
+    )
+    for segment_name, mask in segment_specs:
+        indices = np.flatnonzero(mask)
+        if indices.size < 2:
+            raise ValueError(f"Not enough fitted nodes to summarize {segment_name}")
+        first, last = int(indices[0]), int(indices[-1])
+        duration = float(days[last] - days[first])
+        tile_mean_rates = (thickness[:, last] - thickness[:, first]) / duration
+        per_detector = np.asarray(
+            [np.mean(tile_mean_rates[detector_ids == detector]) for detector in focal.SCAS],
+            dtype=float,
+        )
+        detector_mean_rates.append(per_detector)
+        print(
+            f"Mean {segment_name} rate across detector tile means: "
+            f"{np.mean(per_detector):.2f} nm/day "
+            f"(detector min–max {np.min(per_detector):.2f}–{np.max(per_detector):.2f})"
+        )
+
+    for reset_index, reset_day in enumerate(reset_days):
+        next_reset = reset_days[reset_index + 1] if reset_index + 1 < len(reset_days) else np.inf
+        segment_indices = np.flatnonzero((days >= reset_day) & (days < next_reset))
+        segment_days = days[segment_indices]
+        for offset in (0.5, 7.0, 20.0):
+            target_day = float(reset_day + offset)
+            if not segment_days.size or target_day > segment_days[-1]:
+                continue
+            upper = int(np.searchsorted(segment_days, target_day, side="right"))
+            upper = min(max(upper, 1), segment_days.size - 1)
+            lower = upper - 1
+            fraction = (target_day - segment_days[lower]) / (
+                segment_days[upper] - segment_days[lower]
+            )
+            values = (
+                rates[:, segment_indices[lower]] * (1.0 - fraction)
+                + rates[:, segment_indices[upper]] * fraction
+            )
+            per_detector = np.asarray(
+                [np.median(values[detector_ids == detector]) for detector in focal.SCAS],
+                dtype=float,
+            )
+            print(
+                f"Post-reset rate, reset {reset_index + 2}, +{offset:g} days: "
+                f"median detector median {np.median(per_detector):.2f} nm/day "
+                f"(detector p10–p90 {np.percentile(per_detector, 10):.2f}–"
+                f"{np.percentile(per_detector, 90):.2f})"
+            )
+
+    return save_figure(figure, "wfi_full_focal_plane_ice_thickness_segment_ends")
+
+
 def main(default_figure: str = "all") -> None:
     global FIGURES, STATS, PRODUCTION_ROOT, INPUT_ROOT, LED_QUADRATURE_H5, MODULATED_BUNDLE
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--figure", choices=("all", "1", "2", "3", "4", "5", "6"),
-        default=default_figure, help="Figure to regenerate; default regenerates all six",
+        "--figure", choices=("all", "1", "2", "3", "4", "5", "6", "7"),
+        default=default_figure, help="Figure to regenerate; default regenerates all seven",
     )
     parser.add_argument(
         "--run-root",
@@ -1234,6 +1409,7 @@ def main(default_figure: str = "all") -> None:
         "4": plot_rcs_model_data,
         "5": plot_car201_model_data,
         "6": plot_complex_reflectance,
+        "7": plot_focal_plane_ice_thickness,
     }
     if args.figure == "all":
         for generator in generators.values():
