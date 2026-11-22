@@ -10,7 +10,9 @@ header-includes:
 ---
 
 \begin{center}
-\small Department of Astronomy, The Ohio State University
+\small Department of Astronomy, The Ohio State University\\
+4055 McPherson Laboratory, 140 West 18th Avenue\\
+Columbus, OH 43210, USA
 \end{center}
 
 **Abstract.** Thin-film water ice accumulating on the Nancy Grace Roman Space
@@ -25,14 +27,21 @@ time-varying ice-deposition histories across spacecraft decontamination events.
 Second, multi-epoch stellar photometry across eight broad WFI filters
 (F062--F213; 470--2335 nm) is jointly fit with a smooth spectral modulation of
 the ice-free detector reflectance to refine the ice histories and constrain
-detector response between and beyond the LED wavelengths. Across the focal
-plane, average ice-deposition rates decline steadily across successive
-commissioning intervals, from 9.9 nm/day before the second decontamination to
-9.0 nm/day after the second and 8.1 nm/day after the third. Fitted rates are
-highest immediately following decontamination--falling from focal-plane medians
-of 15.1 and 12.7 nm/day half a day later to 8.0 and 6.7 nm/day by day 20--though
-these early peaks remain degenerate with boundary effects and residual detector
-cooling. The baseline RCS-only model reduces stellar photometric scatter across
+detector response between and beyond the LED wavelengths. The analyzed series
+begins just after the first spacecraft decontamination (Decon1), leaving a short
+12.9-day first interval. Preliminary, unconverged fits produced imprecise high
+rates and raised concern about the 300 nm operational limit; the final fit now
+separates detector-optics changes from ice-thickness changes and estimates mean
+rates of 9.9, 9.0, and 8.1 nm/day before the second, after the second, and after
+the third decontamination, respectively. The joint-model map shows thicker ice
+on upper and central detectors such as WFI01 and WFI10, thinning toward the
+bottom and outer edge. Median rates half a day after the second and third
+decontaminations are 15.1 and 12.7 nm/day, declining to 8.0 and 6.7 by day 20;
+these early peaks may reflect boundary effects and residual detector cooling.
+The final joint fit reaches 306.1 nm on WFI01 at the final 17 November
+observation, slightly above the 300 nm limit; the subsequent 10-day fourth
+decontamination dryout began on 18 November, outside the analyzed data. The
+baseline RCS-only model reduces stellar photometric scatter across
 all 144 detector/filter combinations (by medians of 80.0% in F129 and 73.6% in
 F087), while the joint fit yields further improvements--largest in F062 (21.2%)
 and F213 (16.8%), where stellar photometry extends beyond the LED wavelengths.
@@ -61,15 +70,19 @@ transfer-matrix method (TMM) optical stack and ice-deposition model (Section 3),
 and presents two modeling stages: an RCS-only fit (Section 4) and a joint fit
 incorporating CAR201 stellar photometry (Section 5). Section 6 compares their
 reconstructions, discusses limitations, and outlines an independent validation
-test using slitless prism spectroscopy from CAR-192 (Program 1042).
+test using slitless prism spectroscopy from CAR192 (Program 1042).
 
 ## 2. Observational Data and Reduction
 
 Elapsed days throughout this paper are measured from the reference epoch
-$t_0=$`2026-09-12T01:25:50.714 UTC`. Decon2 and Decon3 denote the second and
-third spacecraft decontamination events; they reset the ice-history segments at
+$t_0=$`2026-09-12T01:25:50.714 UTC`, immediately after Decon1. The first modeled
+segment therefore begins just after the first spacecraft decontamination and
+ends at Decon2. Decon2 and Decon3 denote the second and third spacecraft
+decontamination events; they reset the ice-history segments at
 `2026-09-24T23:12:29.895 UTC` and `2026-10-20T20:34:44.531 UTC`, respectively
-(elapsed days 12.90740 and 38.79785).
+(elapsed days 12.90740 and 38.79785). The final analyzed RCS observation was
+`2026-11-17T23:33:33.773 UTC`. The 10-day Decon4 dryout began on `2026-11-18` and
+falls outside this analysis.
 
 The analysis combines three observational data sets: two RCS flat-field programs
 (CAR190 and CAR216) and broad-band stellar photometry from CAR201 (Table 1).
@@ -210,7 +223,7 @@ arcsecond, have no other 2MASS candidate within two arcseconds, and not be
 shared with another Gaia source. 2MASS quality flags are used to exclude
 individual band measurements.
 
-Brighter stars (`13 <= G < 19`) use Gaia and 2MASS photometry, without
+Brighter stars ($13 \le G < 19$) use Gaia and 2MASS photometry, without
 Pan-STARRS. Their 2MASS measurements are restricted to quality flags A--C and
 uncertainties below 0.2 mag. Every star in this bright subset has at least
 three usable Gaia-band measurements.
@@ -529,11 +542,13 @@ is the corrected observed mean, $m^0_{kg}$ is the TMM-predicted log change from
 that LED's first observation, and $\gamma_{k,s(g)}$ is the fitted grey reset
 correction for the segment containing group $g$. The log-response noise scale is
 $\sigma_{\log}=0.005$. The weights $w_{kg}$ set the relative influence of each
-group. In the RCS-only fit,
-$w_{kg}=1/(N_{\mathrm{tile}}\widetilde N)$, where $N_{\mathrm{tile}}$ is the
-number of fitted tiles and $\widetilde N$ is the median valid-pixel count
-across all groups. The joint fit uses the alternative per-tile
-median-count weights defined in Section 5.
+group. The RCS-only MAP fits each tile independently, so
+$N_{\mathrm{tile}}=1$ in each fitted objective and
+$\widetilde N=\widetilde N_k=\operatorname{median}_g(N_{kg})$ is that tile's
+median valid-pixel count. Thus the RCS-only weight reduces to
+$w_{kg}=1/\widetilde N_k$, the same per-tile normalization used in Section 5;
+there is no factor-of-256 change in the RCS likelihood relative to its priors
+between the two stages.
 
 The RCS-only fit's MAP objective adds Gaussian prior penalties:
 
@@ -931,8 +946,10 @@ $$
 $$
 
 The production regularization weights are fixed at `1890.6` for inverse-
-wavelength entropy, `0.01` for curvature, and `100` for phase-coefficient
-shrinkage. A curvature-weight sweep on WFI01 across $10^{-4}$--$10^{-2}$ shifted
+wavelength entropy, `0.01` for curvature, and `100` for the zero-padded phase
+second-difference penalty (equivalent to an effective ridge coefficient of
+`200` in $\mathcal{P}_{\mathrm{phase}}$). A curvature-weight sweep on WFI01
+across $10^{-4}$--$10^{-2}$ shifted
 CAR201 predictions by less than 1.4 mmag at the 95th percentile while leaving
 CAR190 weighted $\chi^2$ virtually unchanged; we adopt `0.01` across all
 detectors. The entropy weight is set by the ratio of the starting-state
@@ -1001,11 +1018,30 @@ trajectory. Because these rates are numerical derivatives of the piecewise MAP
 thickness history, the current data cannot distinguish rapid post-reset
 reaccumulation from boundary sensitivity.
 
-Across the 18 detectors, averaging each detector's 256 tile-wise thickness
-slopes between the first and last fitted nodes within each reset segment gives
-9.9 nm/day before Decon2 (detector means 9.0--10.8), 9.0 nm/day in segment 2
-(8.2--9.8), and 8.1 nm/day in segment 3 (7.2--9.2). These slopes are computed
-within each segment, excluding the thickness jumps at the resets.
+The first fitted segment runs from the post-Decon1 reference epoch to Decon2,
+only 12.907 days later. Preliminary, unconverged fits to this short interval
+gave imprecise high rates and raised concern that the inferred thickness would
+quickly reach the 300 nm operational limit. With the completed dataset, the
+final fit now disentangles detector-optics changes from ice thickness well
+enough to estimate the segment-average rates in Table 5.
+
+\pagebreak
+
+| Modeled interval | Focal-plane mean rate (nm/day) | Range of detector mean rates (nm/day) |
+| --- | ---: | ---: |
+| Post-Decon1--Decon2 (12.9 days) | 9.9 | 9.0--10.8 |
+| Decon2--Decon3 | 9.0 | 8.2--9.8 |
+| Decon3--final RCS observation | 8.1 | 7.2--9.2 |
+
+**Table 5. Segment-average ice-deposition rates from the final joint model.** For
+each detector, the rate is the mean of its 256 tile-wise thickness slopes between
+the first and last fitted nodes in the segment. The table reports the mean and
+range of the 18 detector-level means; reset jumps are excluded.
+
+The final joint-model maximum is 306.1 nm in WFI01 tile 239 at the last RCS
+observation on 17 November, slightly above the nominal 300 nm operational limit.
+The 10-day Decon4 dryout began on 18 November, after the analyzed data ended, so
+its effect is not modeled.
 
 \pagebreak
 
@@ -1018,7 +1054,7 @@ within each segment, excluding the thickness jumps at the resets.
 | Decon3 | 7 | 8.7 | 7.6--9.4 |
 | Decon3 | 20 | 6.7 | 6.0--7.3 |
 
-**Table 5. Fitted post-reset ice-deposition rates across the focal plane.** At
+**Table 6. Fitted post-reset ice-deposition rates across the focal plane.** At
 each offset, rates are interpolated within the relevant reset segment, summarized
 by the median rate across tiles on each detector, then reported as the median and
 10th--90th percentile across the 18 detector medians.
@@ -1099,7 +1135,7 @@ through the joint-fit endpoint on 17 November 2026.
 | F146 | 4,204 | 3.68 | 2.46 | 2.47 | +0.0003 |
 | F213 | 4,205 | 11.21 | 7.97 | 6.66 | +0.2266 |
 
-**Table 6. WFI02 CAR201 residual metrics.** NMAD (mmag) is $1.4826$ times the
+**Table 7. WFI02 CAR201 residual metrics.** NMAD (mmag) is $1.4826$ times the
 median absolute deviation after fitting per-star/filter magnitude offsets.
 $\Delta\bar{\ell}_{J-R}$/obs is the joint fit minus the RCS-only fit's
 $\nu=4$ Student-$t$ data log likelihood; positive favors the joint fit.
@@ -1117,7 +1153,7 @@ Magnitude offsets are profiled separately for each fit.
 | 5/F158 | 36,352 | 0.01765 | 0.01568 | +0.000983 |
 | 6/F184 | 36,096 | 0.01280 | 0.00984 | +0.001480 |
 
-**Table 7. WFI02 RCS likelihood by LED.** Values are production-weighted
+**Table 8. WFI02 RCS likelihood by LED.** Values are production-weighted
 $\chi^2$/group across 256 tiles, excluding each LED's first reference group.
 $\Delta\bar{\ell}_{J-R}$ is the joint minus the RCS-only fit log likelihood per
 group, equal to half the RCS-only fit minus joint-fit weighted $\chi^2$ per
@@ -1130,7 +1166,7 @@ reference, the RCS-only fit lowers NMAD in all eight filters. The joint fit adds
 the largest reductions at F062 (21\%) and F213 (17\%); F146 is essentially
 unchanged.
 
-The wavelength pattern in Table 6 is consistent with Figure 7, where the joint
+The wavelength pattern in Table 7 is consistent with Figure 7, where the joint
 modulation differs most from the RCS-only response at the blue and red support edges and
 in the 700--800 nm gap between LED1 and LED2. F062 extends blueward of LED1,
 while F213 lies redward of LED6; these filters add broad-band constraints where
@@ -1154,30 +1190,40 @@ effective-area support. The phase branches are aligned at the longest
 wavelength, retaining the fitted phase shift. Both curves are MAP spectra of
 the ice-free reflection.
 
+\pagebreak
+
 ### Summary and Operational Implications
 
 The two-stage analysis combines high-cadence RCS constraints on ice evolution
 with broad-band stellar constraints on detector response between and beyond the
 LED bands. The commissioning results have four main implications:
 
-1. **Baseline thin-film capture.** The RCS-only fit lowers CAR201 NMAD in all 144
+1. **Non-uniform and declining deposition.** The series starts just after Decon1,
+   so its first segment to Decon2 spans only 12.9 days. Preliminary unconverged
+   fits were imprecise and initially suggested high rates, but the final fit now
+   separates optical-property changes from ice thickness and yields segment
+   means of 9.9, 9.0, and 8.1 nm/day (Table 5). The joint-model focal-plane map
+   shows thicker ice on upper and central detectors, including WFI01 and WFI10,
+   thinning toward the bottom and outer edge. Median post-reset rates at 0.5 days
+   after Decon2 and Decon3 are 15.1 and 12.7 nm/day, declining to 8.0 and 6.7 by
+   day 20; WFI02 tile 135 begins segment 3 with roughly 30 nm of modeled ice. The
+   final model reaches 306.1 nm in WFI01 tile 239 at the final 17 November
+   observation, slightly above the nominal 300 nm limit; Decon4's 10-day dryout
+   began the next day and is outside these data. Early post-reset rates remain
+   subject to boundary sensitivity and residual detector cooling.
+
+2. **Baseline thin-film capture.** The RCS-only fit lowers CAR201 NMAD in all 144
    detector/filter combinations relative to the no-ice-correction reference.
    Median reductions across detectors are 80.0% in F129 and 73.6% in F087.
-2. **Broad-band extrapolation.** The joint fit lowers CAR201
+3. **Broad-band extrapolation.** The joint fit lowers CAR201
    NMAD in 126 of 144 detector/filter combinations and RCS weighted $\chi^2$ in
    95 of 108 detector/LED groups. The largest median NMAD reductions are in
    F062 (21.2%) and F213 (16.8%), whose bandpasses extend beyond the blue and red
    LED anchors.
-3. **Non-uniform deposition.** The representative WFI02 tile 135 history shows
-   elevated fitted rates immediately after Decon2 and Decon3, followed by a
-   return toward the lower rate seen through much of each segment. Its third
-   segment also begins with roughly 30 nm of modeled ice. Whether these
-   post-reset features reflect physical reaccumulation or boundary effects
-   remains degenerate in the current fit.
 4. **Limitations and independent validation.** Stellar predictions use
    posterior-median SEDs without propagating the full spectral-parameter
    covariance, and the remaining millimagnitude residuals are not calibrated
-   prediction intervals. CAR-192 (Program 1042) WFI slitless prism
+    prediction intervals. CAR192 (Program 1042) WFI slitless prism
    spectrophotometry, covering roughly 750--1800 nm, is a natural held-out test
    of the inter-LED spectral modulation and reconstructed ice histories when
    those data are reduced; it does not enter the fits presented here.
@@ -1233,145 +1279,145 @@ improving in five of six LEDs.
 |  | F087 | 4,601 | 33.79 | 5.51 | 5.01 | +0.05890 |
 |  | F106 | 4,603 | 5.72 | 4.53 | 4.49 | +0.01015 |
 |  | F129 | 4,605 | 17.52 | 4.48 | 4.38 | +0.01858 |
-|  | F146 | 4,601 | 7.19 | 3.00 | 2.99 | +0.00812 |
 |  | F158 | 4,604 | 12.07 | 4.21 | 4.13 | +0.01381 |
 |  | F184 | 4,604 | 8.50 | 5.34 | 5.48 | -0.00881 |
+|  | F146 | 4,601 | 7.19 | 3.00 | 2.99 | +0.00812 |
 |  | F213 | 4,604 | 16.06 | 7.87 | 6.77 | +0.14186 |
 | WFI02 | F062 | 4,211 | 12.88 | 7.74 | 6.12 | +0.21100 |
 |  | F087 | 4,206 | 14.75 | 4.80 | 4.32 | +0.09436 |
 |  | F106 | 4,207 | 7.72 | 3.96 | 3.92 | +0.00713 |
 |  | F129 | 4,204 | 20.33 | 3.57 | 3.50 | +0.01045 |
-|  | F146 | 4,204 | 3.68 | 2.46 | 2.47 | +0.00029 |
 |  | F158 | 4,207 | 6.65 | 3.60 | 3.50 | +0.01278 |
 |  | F184 | 4,201 | 10.98 | 4.39 | 4.24 | +0.02495 |
+|  | F146 | 4,204 | 3.68 | 2.46 | 2.47 | +0.00029 |
 |  | F213 | 4,205 | 11.21 | 7.97 | 6.66 | +0.22660 |
 | WFI03 | F062 | 4,576 | 8.97 | 7.07 | 5.65 | +0.20567 |
 |  | F087 | 4,574 | 12.01 | 4.96 | 3.87 | +0.23195 |
 |  | F106 | 4,566 | 4.44 | 3.38 | 3.32 | +0.00802 |
 |  | F129 | 4,562 | 15.32 | 3.31 | 3.15 | +0.03641 |
-|  | F146 | 4,552 | 3.06 | 2.21 | 2.14 | +0.03794 |
 |  | F158 | 4,556 | 4.90 | 3.05 | 3.06 | +0.00607 |
 |  | F184 | 4,564 | 9.98 | 4.47 | 3.97 | +0.11287 |
+|  | F146 | 4,552 | 3.06 | 2.21 | 2.14 | +0.03794 |
 |  | F213 | 4,573 | 8.85 | 8.02 | 6.40 | +0.27087 |
 | WFI04 | F062 | 4,568 | 12.81 | 8.24 | 5.92 | +0.27716 |
 |  | F087 | 4,564 | 23.54 | 4.37 | 4.16 | +0.04557 |
 |  | F106 | 4,564 | 7.82 | 3.65 | 3.39 | +0.04961 |
 |  | F129 | 4,568 | 17.45 | 3.49 | 3.27 | +0.03090 |
-|  | F146 | 4,549 | 3.35 | 2.30 | 2.21 | +0.03240 |
 |  | F158 | 4,560 | 6.58 | 3.28 | 3.18 | +0.02911 |
 |  | F184 | 4,560 | 10.14 | 3.94 | 3.92 | +0.00275 |
+|  | F146 | 4,549 | 3.35 | 2.30 | 2.21 | +0.03240 |
 |  | F213 | 4,556 | 12.79 | 6.79 | 5.56 | +0.19915 |
 | WFI05 | F062 | 4,240 | 10.66 | 7.10 | 5.57 | +0.22975 |
 |  | F087 | 4,247 | 21.06 | 3.92 | 3.66 | +0.06281 |
 |  | F106 | 4,250 | 6.26 | 3.44 | 3.44 | +0.00719 |
 |  | F129 | 4,248 | 16.76 | 3.09 | 3.03 | +0.00986 |
-|  | F146 | 4,245 | 3.35 | 2.00 | 2.02 | -0.00115 |
 |  | F158 | 4,250 | 5.98 | 2.96 | 2.86 | +0.01364 |
 |  | F184 | 4,246 | 9.21 | 4.03 | 3.87 | +0.01922 |
+|  | F146 | 4,245 | 3.35 | 2.00 | 2.02 | -0.00115 |
 |  | F213 | 4,249 | 11.59 | 6.82 | 5.63 | +0.23221 |
 | WFI06 | F062 | 4,468 | 9.78 | 7.51 | 5.51 | +0.29449 |
 |  | F087 | 4,482 | 11.57 | 5.33 | 3.79 | +0.31297 |
 |  | F106 | 4,485 | 4.43 | 3.41 | 3.26 | +0.02853 |
 |  | F129 | 4,493 | 16.97 | 3.55 | 3.20 | +0.08073 |
-|  | F146 | 4,492 | 3.77 | 2.44 | 2.21 | +0.12050 |
 |  | F158 | 4,498 | 5.01 | 3.04 | 2.96 | +0.02325 |
 |  | F184 | 4,492 | 12.18 | 4.18 | 3.86 | +0.05298 |
+|  | F146 | 4,492 | 3.77 | 2.44 | 2.21 | +0.12050 |
 |  | F213 | 4,492 | 9.94 | 7.78 | 5.83 | +0.35771 |
 | WFI07 | F062 | 3,800 | 11.21 | 7.12 | 5.90 | +0.18687 |
 |  | F087 | 3,818 | 23.88 | 4.12 | 3.85 | +0.04898 |
 |  | F106 | 3,806 | 5.57 | 3.37 | 3.28 | +0.03093 |
 |  | F129 | 3,787 | 15.32 | 3.17 | 3.02 | +0.01901 |
-|  | F146 | 3,779 | 3.53 | 1.99 | 1.97 | +0.00721 |
 |  | F158 | 3,771 | 6.96 | 3.04 | 2.96 | +0.02145 |
 |  | F184 | 3,792 | 7.42 | 3.95 | 3.79 | +0.02407 |
+|  | F146 | 3,779 | 3.53 | 1.99 | 1.97 | +0.00721 |
 |  | F213 | 3,805 | 11.71 | 6.59 | 5.16 | +0.24435 |
 | WFI08 | F062 | 4,454 | 9.39 | 7.05 | 5.25 | +0.28539 |
 |  | F087 | 4,462 | 15.48 | 3.94 | 3.76 | +0.03857 |
 |  | F106 | 4,463 | 5.48 | 3.30 | 3.25 | +0.01317 |
 |  | F129 | 4,463 | 16.78 | 3.10 | 3.07 | +0.01665 |
-|  | F146 | 4,459 | 3.47 | 2.02 | 2.01 | +0.00681 |
 |  | F158 | 4,460 | 6.27 | 2.92 | 2.85 | +0.01263 |
 |  | F184 | 4,460 | 10.79 | 3.84 | 3.79 | +0.01778 |
+|  | F146 | 4,459 | 3.47 | 2.02 | 2.01 | +0.00681 |
 |  | F213 | 4,460 | 12.47 | 7.06 | 5.26 | +0.33563 |
 | WFI09 | F062 | 3,157 | 10.52 | 6.71 | 5.33 | +0.18874 |
 |  | F087 | 3,156 | 18.56 | 4.57 | 3.62 | +0.18334 |
 |  | F106 | 3,155 | 4.89 | 3.21 | 3.25 | -0.00800 |
 |  | F129 | 3,159 | 14.51 | 3.16 | 3.02 | +0.04094 |
-|  | F146 | 3,153 | 3.70 | 2.09 | 1.92 | +0.07954 |
 |  | F158 | 3,152 | 6.43 | 2.87 | 2.80 | +0.02451 |
 |  | F184 | 3,144 | 8.57 | 3.80 | 3.79 | +0.00488 |
+|  | F146 | 3,153 | 3.70 | 2.09 | 1.92 | +0.07954 |
 |  | F213 | 3,155 | 9.69 | 6.48 | 5.44 | +0.20265 |
 | WFI10 | F062 | 4,436 | 12.68 | 8.68 | 6.69 | +0.24116 |
 |  | F087 | 4,441 | 24.55 | 5.03 | 4.75 | +0.02667 |
 |  | F106 | 4,439 | 7.90 | 4.45 | 4.35 | +0.01249 |
 |  | F129 | 4,435 | 20.14 | 4.17 | 4.11 | +0.00978 |
-|  | F146 | 4,440 | 4.62 | 3.03 | 2.94 | +0.01051 |
 |  | F158 | 4,440 | 7.79 | 4.11 | 4.05 | +0.01360 |
 |  | F184 | 4,442 | 13.36 | 5.46 | 5.23 | +0.02532 |
+|  | F146 | 4,440 | 4.62 | 3.03 | 2.94 | +0.01051 |
 |  | F213 | 4,448 | 17.33 | 6.76 | 6.21 | +0.06516 |
 | WFI11 | F062 | 4,111 | 11.26 | 7.34 | 5.99 | +0.19255 |
 |  | F087 | 4,111 | 16.96 | 4.67 | 4.26 | +0.05593 |
 |  | F106 | 4,109 | 6.04 | 3.59 | 3.61 | -0.00229 |
 |  | F129 | 4,114 | 18.72 | 3.40 | 3.34 | +0.01151 |
-|  | F146 | 4,112 | 3.33 | 2.34 | 2.36 | +0.00084 |
 |  | F158 | 4,110 | 5.93 | 3.30 | 3.26 | +0.01061 |
 |  | F184 | 4,107 | 12.82 | 4.29 | 4.27 | -0.00050 |
+|  | F146 | 4,112 | 3.33 | 2.34 | 2.36 | +0.00084 |
 |  | F213 | 4,104 | 12.31 | 7.44 | 5.81 | +0.24401 |
 | WFI12 | F062 | 4,448 | 9.96 | 7.40 | 5.48 | +0.28758 |
 |  | F087 | 4,448 | 18.04 | 5.18 | 3.79 | +0.32909 |
 |  | F106 | 4,450 | 5.83 | 3.21 | 3.30 | -0.00893 |
 |  | F129 | 4,452 | 14.94 | 3.07 | 3.01 | +0.01989 |
-|  | F146 | 4,453 | 3.04 | 2.15 | 2.11 | +0.01847 |
 |  | F158 | 4,457 | 5.53 | 2.93 | 2.88 | +0.01132 |
 |  | F184 | 4,457 | 9.76 | 3.68 | 3.67 | +0.02063 |
+|  | F146 | 4,453 | 3.04 | 2.15 | 2.11 | +0.01847 |
 |  | F213 | 4,455 | 10.16 | 6.33 | 5.18 | +0.18501 |
 | WFI13 | F062 | 4,137 | 11.79 | 7.56 | 5.64 | +0.25219 |
 |  | F087 | 4,134 | 14.63 | 4.24 | 3.92 | +0.04090 |
 |  | F106 | 4,118 | 5.77 | 3.41 | 3.35 | +0.00564 |
 |  | F129 | 4,122 | 21.10 | 3.40 | 3.33 | +0.01874 |
-|  | F146 | 4,110 | 3.61 | 2.28 | 2.26 | +0.00556 |
 |  | F158 | 4,123 | 5.63 | 3.33 | 3.20 | +0.02527 |
 |  | F184 | 4,125 | 13.56 | 3.98 | 3.99 | +0.00026 |
+|  | F146 | 4,110 | 3.61 | 2.28 | 2.26 | +0.00556 |
 |  | F213 | 4,124 | 15.12 | 6.14 | 5.29 | +0.13870 |
 | WFI14 | F062 | 4,174 | 11.50 | 7.61 | 5.58 | +0.27526 |
 |  | F087 | 4,174 | 14.79 | 4.57 | 3.79 | +0.16425 |
 |  | F106 | 4,179 | 7.24 | 3.48 | 3.44 | +0.00526 |
 |  | F129 | 4,178 | 19.33 | 3.02 | 2.99 | +0.01185 |
-|  | F146 | 4,174 | 2.97 | 1.96 | 1.99 | +0.00393 |
 |  | F158 | 4,178 | 5.85 | 3.05 | 2.96 | +0.01968 |
 |  | F184 | 4,187 | 12.13 | 4.11 | 4.11 | +0.00327 |
+|  | F146 | 4,174 | 2.97 | 1.96 | 1.99 | +0.00393 |
 |  | F213 | 4,182 | 13.50 | 5.76 | 5.06 | +0.13375 |
 | WFI15 | F062 | 4,352 | 8.35 | 6.65 | 5.45 | +0.16999 |
 |  | F087 | 4,349 | 14.34 | 4.08 | 3.77 | +0.07333 |
 |  | F106 | 4,350 | 4.77 | 3.20 | 3.16 | +0.00311 |
 |  | F129 | 4,335 | 17.34 | 3.08 | 2.95 | +0.03193 |
-|  | F146 | 4,331 | 3.82 | 2.02 | 2.01 | +0.00862 |
 |  | F158 | 4,334 | 4.62 | 2.87 | 2.78 | +0.01173 |
 |  | F184 | 4,324 | 13.39 | 3.85 | 3.85 | -0.00090 |
+|  | F146 | 4,331 | 3.82 | 2.02 | 2.01 | +0.00862 |
 |  | F213 | 4,326 | 11.89 | 5.99 | 4.96 | +0.18854 |
 | WFI16 | F062 | 4,435 | 10.36 | 6.73 | 4.93 | +0.27452 |
 |  | F087 | 4,424 | 18.98 | 3.62 | 3.42 | +0.03137 |
 |  | F106 | 4,431 | 4.33 | 3.29 | 3.20 | +0.01931 |
 |  | F129 | 4,430 | 19.16 | 2.98 | 2.82 | +0.03077 |
-|  | F146 | 4,430 | 4.12 | 1.99 | 1.92 | +0.03275 |
 |  | F158 | 4,430 | 5.35 | 3.03 | 2.80 | +0.05781 |
 |  | F184 | 4,424 | 12.93 | 3.70 | 3.73 | -0.00358 |
+|  | F146 | 4,430 | 4.12 | 1.99 | 1.92 | +0.03275 |
 |  | F213 | 4,422 | 15.00 | 6.12 | 5.19 | +0.18041 |
 | WFI17 | F062 | 3,926 | 9.50 | 6.80 | 5.99 | +0.12652 |
 |  | F087 | 3,923 | 16.52 | 4.53 | 4.24 | +0.09982 |
 |  | F106 | 3,925 | 4.23 | 3.88 | 4.03 | +0.03798 |
 |  | F129 | 3,925 | 18.65 | 3.72 | 3.63 | +0.09032 |
-|  | F146 | 3,917 | 4.91 | 2.54 | 2.76 | +0.04698 |
 |  | F158 | 3,925 | 6.28 | 3.62 | 3.59 | +0.02527 |
 |  | F184 | 3,927 | 10.39 | 4.66 | 5.02 | -0.01078 |
+|  | F146 | 3,917 | 4.91 | 2.54 | 2.76 | +0.04698 |
 |  | F213 | 3,923 | 13.54 | 6.40 | 5.80 | +0.14364 |
 | WFI18 | F062 | 3,575 | 11.59 | 6.66 | 5.89 | +0.12350 |
 |  | F087 | 3,573 | 28.10 | 4.74 | 4.04 | +0.12586 |
 |  | F106 | 3,572 | 5.73 | 3.89 | 3.76 | +0.04383 |
 |  | F129 | 3,562 | 9.68 | 3.72 | 3.45 | +0.07433 |
-|  | F146 | 3,558 | 3.76 | 2.52 | 2.55 | +0.07534 |
 |  | F158 | 3,557 | 8.53 | 3.50 | 3.39 | +0.03106 |
 |  | F184 | 3,557 | 6.62 | 4.47 | 4.84 | +0.00116 |
+|  | F146 | 3,558 | 3.76 | 2.52 | 2.55 | +0.07534 |
 |  | F213 | 3,551 | 11.47 | 6.36 | 5.63 | +0.13788 |
 
 **Table A1. CAR201 residual metrics by detector and filter.** Detector labels
@@ -1503,3 +1549,11 @@ $\chi^2$/group columns are production-weighted values for the RCS-only fit and
 the joint fit. $\Delta\bar{\ell}_{J-R}$ is the joint minus RCS-only fit log
 likelihood per group, equal to half the RCS-only fit minus joint-fit weighted
 $\chi^2$ per group; positive favors the joint fit.
+
+Although WFI18's CAR201 NMADs are comparable to the array (Table A1), its RCS
+residuals are elevated across all six LEDs (Table A2). Its median valid-pair
+count is 49,198 per tile/group, compared with 64,900 for the median of the other
+17 detectors, which may increase group-mean noise. The unweighted RMS of its
+tile/group mean residuals rises from 1.32 millilog before elapsed day 60 to 4.41
+millilog thereafter, indicating an additional late-run mismatch; the diagnostics
+do not identify a specific hardware defect.
