@@ -548,20 +548,38 @@ def plot_rcs_model_data() -> tuple[Path, Path]:
         return mdates.date2num(Time(reference + np.asarray(days), format="mjd", scale="utc").to_datetime())
 
     colors = {"warm": "#cb78a5", "rcs_only": "#177db5", "joint": "#db5b00"}
-    figure, axes = plt.subplots(2, 3, figsize=(FIGURE_WIDTH_IN, 4.2), sharex=True, sharey=True,
-                                gridspec_kw={"hspace": 0.35, "wspace": 0.20})
+    figure, axes = plt.subplots(
+        4, 3, figsize=(FIGURE_WIDTH_IN, 6.2), sharex="col",
+        gridspec_kw={"height_ratios": [2.0, 0.85, 2.0, 0.85],
+                     "hspace": 0.38, "wspace": 0.20},
+    )
+    main_axes = [*axes[0], *axes[2]]
+    residual_axes = [*axes[1], *axes[3]]
     coverage_start = float(warm_days.min())
     coverage_end = float(warm_days.max())
     values = np.concatenate([observed, warm_prediction, rcs_only["model_log_change"].to_numpy(float), joint_prediction]) * 1000.0
     low, high = float(values.min()), float(values.max())
     margin = 0.05 * max(high-low, 1.0)
-    for led, axis in enumerate(axes.flat, start=1):
+    rcs_prediction_all = rcs_only["model_log_change"].to_numpy(float)
+    rcs_residual_all = (observed - rcs_prediction_all) * 1000.0
+    joint_residual_all = (observed - joint_prediction) * 1000.0
+    residual_limit = max(
+        1.5,
+        1.1 * float(np.percentile(
+            np.abs(np.concatenate([rcs_residual_all, joint_residual_all])), 99.5
+        )),
+    )
+    for led, (axis, residual_axis) in enumerate(
+        zip(main_axes, residual_axes, strict=True), start=1
+    ):
         use = rcs_only["led"].to_numpy(int) == led
         days = warm_days[use]
         axis.errorbar(dates(days), observed[use]*1000, yerr=sigma[use]*1000,
-                      fmt="none", ecolor="0.18", elinewidth=0.55,
+                      fmt="none", ecolor="0.18", elinewidth=0.45,
                       capsize=0.35, zorder=8,
-                      label="Corrected RCS group means (error bars)" if led == 1 else None)
+                      label="Corrected RCS group means" if led == 1 else None)
+        axis.scatter(dates(days), observed[use]*1000, s=5.0, color="0.12",
+                     edgecolors="none", zorder=9)
         masks = [days < RESET_DAYS[0], (days >= RESET_DAYS[0]) & (days < RESET_DAYS[1]), days >= RESET_DAYS[1]]
         for segment, mask in enumerate(masks):
             if not np.any(mask):
@@ -579,28 +597,62 @@ def plot_rcs_model_data() -> tuple[Path, Path]:
         for reset_index, reset in enumerate(RESET_DAYS):
             style = ":" if reset_index == 0 else "-."
             axis.axvline(dates([reset])[0], color="#263c63", linestyle=style, linewidth=0.8)
+            residual_axis.axvline(
+                dates([reset])[0], color="#263c63", linestyle=style, linewidth=0.75
+            )
+        residual_axis.axhline(0.0, color="0.25", linewidth=0.65, zorder=1)
+        residual_x = dates(days)
+        for residual_values, x_offset, color, marker, label in (
+            (rcs_residual_all[use], -0.035, colors["rcs_only"], "o", "RCS-only residual"),
+            (joint_residual_all[use], 0.035, colors["joint"], "s", "Joint-fit residual"),
+        ):
+            inside = np.abs(residual_values) <= residual_limit
+            residual_axis.scatter(
+                residual_x[inside]+x_offset, residual_values[inside], s=5.0,
+                marker=marker, color=color, alpha=0.75, edgecolors="none", zorder=3,
+                label=label if led == 1 else None,
+            )
+            for sign, clip_marker in ((1, "^"), (-1, "v")):
+                outside = residual_values*sign > residual_limit
+                if np.any(outside):
+                    residual_axis.scatter(
+                        residual_x[outside]+x_offset,
+                        np.full(int(np.sum(outside)), sign*residual_limit),
+                        s=12.0, marker=clip_marker, color=color, edgecolors="none",
+                        zorder=5,
+                    )
         axis.set_title(f"LED {led} ({LED_FILTERS[led-1]})")
-        axis.set_ylim(low-margin,high+margin)
+        axis.set_ylim(low-margin, high+margin)
         axis.grid(color="#d5dfeb",linewidth=0.8)
-    figure.supylabel(r"Relative log response ($10^{-3}$)", fontsize=PLOT_FONT_SIZE)
+        residual_axis.set_ylim(-1.12*residual_limit, 1.12*residual_limit)
+        residual_axis.grid(axis="y", color="#d5dfeb", linewidth=0.65)
+    figure.supylabel("Response / residual (millilog)", fontsize=PLOT_FONT_SIZE)
+    for row in axes:
+        for axis in row[1:]:
+            axis.tick_params(labelleft=False)
     figure.supxlabel("UTC date", fontsize=PLOT_FONT_SIZE, y=0.035)
     date_limits = dates([coverage_start - 1.0, coverage_end + 1.0])
     for axis in axes.flat:
         axis.set_xlim(date_limits[0], date_limits[-1])
-        set_utc_date_axis(axis, monthly_day=15)
         axis.tick_params(labelsize=TICK_FONT_SIZE)
+    for axis in axes[3]:
+        set_utc_date_axis(axis, monthly_day=15)
     coverage_dates = Time(reference + np.asarray([coverage_start, coverage_end]), format="mjd", scale="utc").to_datetime()
     print(f"Figure 4 corrected RCS/fits coverage (UTC): {coverage_dates[0]} to {coverage_dates[1]}")
-    handles,labels=axes[0,0].get_legend_handles_labels()
+    handles, labels = main_axes[0].get_legend_handles_labels()
+    residual_handles, residual_labels = residual_axes[0].get_legend_handles_labels()
+    handles.extend(residual_handles)
+    labels.extend(residual_labels)
     handles.extend([
         Line2D([0], [0], color="#263c63", linestyle=":", linewidth=0.8, label="Decon2 reset"),
         Line2D([0], [0], color="#263c63", linestyle="-.", linewidth=0.8, label="Decon3 reset"),
     ])
     labels.extend(["Decon2 reset", "Decon3 reset"])
-    figure.legend(handles,labels,loc="upper center",bbox_to_anchor=(0.5,0.995),
-                  ncol=3,frameon=False,fontsize=LEGEND_FONT_SIZE,
-                  columnspacing=0.8,handlelength=1.6)
-    figure.subplots_adjust(left=0.12,right=0.99,top=0.84,bottom=0.14,hspace=0.35,wspace=0.20)
+    figure.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.995),
+                  ncol=4, frameon=False, fontsize=LEGEND_FONT_SIZE,
+                  columnspacing=0.7, handlelength=1.45)
+    figure.subplots_adjust(left=0.15, right=0.99, top=0.81, bottom=0.13,
+                           hspace=0.38, wspace=0.20)
     return save_figure(figure,"wfi02_tile135_rcs_model_data")
 
 
@@ -1170,6 +1222,7 @@ def plot_complex_reflectance() -> tuple[Path, Path]:
 
 
 def plot_focal_plane_ice_thickness() -> tuple[Path, Path]:
+    from matplotlib import patheffects
     from matplotlib.patches import Rectangle
 
     sys.path[:0] = [
@@ -1255,7 +1308,8 @@ def plot_focal_plane_ice_thickness() -> tuple[Path, Path]:
                           fill=False, edgecolor="black", linewidth=0.65)
             )
             axis.text(x + focal.SCA_SIZE / 2, y + focal.SCA_SIZE / 2, detector,
-                      ha="center", va="center", fontsize=5.2, color="white")
+                      ha="center", va="center", fontsize=5.2, color="white",
+                      path_effects=[patheffects.withStroke(linewidth=0.7, foreground="black")])
             grid_size = values.shape[0]
             for tile_index in range(1, grid_size):
                 position = focal.SCA_SIZE * tile_index / grid_size
@@ -1277,10 +1331,8 @@ def plot_focal_plane_ice_thickness() -> tuple[Path, Path]:
         center_y = focal.SCA_PITCH * 2 + focal.COLUMN_Y_OFFSET[2] + 1.2
         axis.plot(center_x, center_y, marker="x", color="#d62728",
                   markersize=5, markeredgewidth=1.0)
-        axis.text(center_x + 0.3, center_y + 0.5, "WFI_CEN", color="#d62728",
-                  fontsize=5, va="bottom")
 
-    colorbar = figure.colorbar(image, ax=axes, fraction=0.035, pad=0.025)
+    colorbar = figure.colorbar(image, ax=axes, fraction=0.035, pad=0.025, extend="both")
     colorbar.set_label("Fitted ice thickness (nm)", fontsize=PLOT_FONT_SIZE)
     colorbar.ax.tick_params(labelsize=TICK_FONT_SIZE)
     origin = datetime.fromisoformat(RCS_ORIGIN_UTC)
