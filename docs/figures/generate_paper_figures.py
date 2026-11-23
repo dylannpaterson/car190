@@ -392,10 +392,22 @@ def plot_ice_history() -> tuple[Path, Path]:
         axis.grid(color="#d5dfeb", linewidth=0.6)
         set_utc_date_axis(axis)
     axes[0].set_ylabel("Thickness (nm)")
-    axes[0].set_ylim(-5, 255)
+    all_thickness = np.concatenate((warm_d, rcs_only_d, joint_d))
+    thickness_span = np.nanmax(all_thickness) - np.nanmin(all_thickness)
+    thickness_margin = max(5.0, 0.03 * thickness_span)
+    axes[0].set_ylim(
+        min(-5.0, np.nanmin(all_thickness) - thickness_margin),
+        max(300.0, np.nanmax(all_thickness) + thickness_margin),
+    )
     axes[1].set_ylabel("Rate (nm/day)")
     axes[1].set_xlabel("UTC date")
-    axes[1].set_ylim(6, max(warm_r.max(), rcs_only_r.max(), joint_r.max()) + 1)
+    all_rates = np.concatenate((warm_r, rcs_only_r, joint_r))
+    rate_span = np.nanmax(all_rates) - np.nanmin(all_rates)
+    rate_margin = max(1.0, 0.05 * rate_span)
+    axes[1].set_ylim(
+        np.nanmin(all_rates) - rate_margin,
+        np.nanmax(all_rates) + rate_margin,
+    )
     handles, legend_labels = axes[0].get_legend_handles_labels()
     handles.extend([
         Line2D([0], [0], color="#263c63", linestyle=":", linewidth=0.9, label="Decon2 reset"),
