@@ -7,6 +7,8 @@ header-includes:
   - \usepackage{titling}
   - \pretitle{\begin{center}\Large\bfseries}
   - \posttitle{\end{center}}
+  - \renewcommand{\[}{\begin{equation}}
+  - \renewcommand{\]}{\end{equation}}
 ---
 
 \begin{center}
@@ -589,7 +591,7 @@ re-evaluating the transfer matrix at every time node.
 | Ice real-index scale | Positive, wavelength-independent scale per tile; zero-centered normal prior in log scale, standard deviation `0.01` |
 | Ice absorption $k$ and incidence | Ice $k=0$; normal incidence |
 | Initial and ordinary reset-segment starting ice thickness | Positive per tile; lognormal prior median `10 nm` and log standard deviation `1.5` (pre-Decon3 starts) |
-| Post-Decon3 starting ice thickness in the validated cached fit | Positive per tile; lognormal prior median set to that tile's fitted post-Decon3 thickness from the independent constant-rate warm-up; log standard deviation `0.10` |
+| Post-Decon3 starting ice thickness in the Stage 1 MAP fit | Positive per tile; lognormal prior median set from that tile's independent constant-rate warm-up fit; log standard deviation `0.10` |
 | Ice deposition rate | Positive per-tile log-rate at every RCS repeat node; independent lognormal priors with median `12 nm/day` and log standard deviation `1.5`; no temporal smoothness penalty |
 | Post-reset response offset $\gamma_{k,s}$ | One wavelength-independent log correction per tile and reset; zero-centered normal prior, standard deviation `0.1` |
 | Per-LED log offset | Fixed at zero |
@@ -952,11 +954,10 @@ $\lambda_{\mathrm{curvature}}=0.01$, and $\lambda_{\mathrm{phase}}=200$. A
 curvature-weight sweep on WFI01 across $10^{-4}$--$10^{-2}$ shifted CAR201
 predictions by less than 1.4 mmag at the 95th percentile while leaving CAR190
 weighted $\chi^2$ virtually unchanged; we adopt $0.01$ across all detectors.
-The entropy calibration matches the inverse-wavelength integral to the existing
-coefficient-wise MaxEnt cost at the WFI01 warm-start modulation: the unweighted
-integral there is $1.5423\times10^{-3}$ and the coefficient-wise cost is
-$2.91585$, giving $\lambda_{\mathrm{entropy}}=1890.6$. At zero modulation,
-$g_D(u)=0$ and the entropy integral vanishes.
+For calibration, the WFI01 warm-start modulation is assigned an entropy penalty
+of $2.91585$. Its unweighted inverse-wavelength integral is
+$1.5423\times10^{-3}$, giving $\lambda_{\mathrm{entropy}}=1890.6$. At zero
+modulation, $g_D(u)=0$ and the entropy integral vanishes.
 
 We minimize the joint objective directly as a scalar function using bounded
 L-BFGS-B.
