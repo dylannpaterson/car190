@@ -42,18 +42,24 @@ test the reconstruction.
 
 ## 1. Introduction
 
-Ice accumulating on the Nancy Grace Roman Space Telescope Wide Field Instrument
-(WFI) detectors during commissioning changes their wavelength-dependent response
-through thin-film interference. Tracking ice thickness and deposition rate
-requires measurements with both temporal cadence and spectral coverage.
+Water ice accumulating on the Nancy Grace Roman Space Telescope Wide Field Instrument
+(WFI) detectors during commissioning alters their wavelength-dependent response
+through thin-film interference. Left uncorrected, this evolving response introduces
+time- and color-dependent photometric errors across the focal plane, and monitoring
+ice thickness relative to the nominal 300 nm operational limit is essential for
+scheduling spacecraft decontamination events. Tracking both ice thickness and
+deposition rate therefore requires measurements with high temporal cadence and
+broad spectral coverage.
 
-The Relative Calibration System (RCS) repeatedly illuminates the detectors in
+The Relative Calibration System (RCS) repeatedly illuminates the 18 WFI detectors in
 six narrow LED bands, providing a high-cadence flat-field record of the evolving
-optical stack and its sensitivity to ice. The RCS observations analyzed here
-come from Commissioning Activity Requests (CARs) 190 and 216. CAR201 stellar
-photometry measures sources through eight broad WFI filters, providing
-complementary wavelength information between and around the LED bands. Together,
-these data constrain ice evolution and the detector's broader spectral response.
+optical stack and its sensitivity to ice across three intervals separated by
+spacecraft decontamination events between September and November 2026. The RCS
+observations analyzed here come from Commissioning Activity Requests (CARs) 190
+and 216. CAR201 stellar photometry measures field stars through eight broad WFI
+filters, providing complementary wavelength information between and beyond the
+LED bands. Together, these data constrain spatially resolved ice evolution and the
+detectors' broader spectral response.
 
 This paper describes the observations and reduction (Section 2), develops the
 transfer-matrix method (TMM) optical stack and ice-deposition model (Section 3),
@@ -65,8 +71,8 @@ independent validation test using slitless-prism spectroscopy from CAR192
 
 ## 2. Observational Data and Reduction
 
-Elapsed days throughout this paper are measured from the reference epoch
-$t_0=\text{2026-09-12T01:25:50.714 UTC}$, immediately after Decon1. The first modeled
+Elapsed days are measured from the reference epoch $t_0$ at
+`2026-09-12T01:25:50.714 UTC`, immediately after Decon1. The first modeled
 segment therefore begins just after the first spacecraft decontamination and
 ends at Decon2. Decon2 and Decon3 denote the second and third spacecraft
 decontamination events; they reset the ice-history segments at
@@ -108,14 +114,14 @@ reconstructed from its posterior-median stellar parameters and normalized to its
 peak. The vertical markers show the six LED centers. Independent peak
 normalization in each panel emphasizes the relative wavelength coverage.
 
-### Shared RCS pixel-pair reduction
+### 2.1 Shared RCS Pixel-Pair Reduction
 
 Both programs use the six RCS light-emitting diodes (LED1--LED6), with spectral
 peaks at 623.521, 852.803, 1038.585, 1269.758, 1481.241, and 1670.169 nm. The
 measured spectra use band-specific scan windows. After applying the 5%-of-peak
 cutoff used in the RCS integrals, the retained LED support spans
 approximately 605--1744 nm (Figure 1); the wider 480--2700 nm interval is the
-TMM calculation grid (Section 3). The following pair selection, corrections,
+TMM calculation grid (Section 3.1). The following pair selection, corrections,
 and tile summaries apply to both programs.
 
 For each detector and LED, measurements are referenced to that LED's first
@@ -128,7 +134,7 @@ changes, so unflagged defects remain in the sample.
 We divide each 4096-by-4096 detector image into a 16-by-16 grid of 256-by-256-pixel
 tiles, each covering up to 65,536 native pixel pairs. For each tile, LED, and
 exposure, we summarize retained pairwise log changes with the quantities below
-and fit an independent ice-thickness history.
+(Eqs. 1--4) and fit an independent ice-thickness history.
 
 For each retained pair, the uncorrected change is
 
@@ -204,8 +210,6 @@ scope and timing.
 
 Figure 2 illustrates the net effect of these corrections for WFI02 tile 135.
 
-\pagebreak
-
 ![Figure 2. Raw and corrected RCS responses for WFI02 tile 135, marked by program.](./figures/wfi02_tile135_raw_vs_corrected.png)
 
 **Figure 2. Net effect of the RCS count-space correction sequence.** Each panel
@@ -217,7 +221,7 @@ separation of the colored series shows the net change introduced by the
 preprocessing sequence. Dotted and dash-dot vertical lines mark the Decon2 and
 Decon3 ice resets, respectively.
 
-### CAR201 WFI Photometry and Source Matching
+### 2.2 CAR201 WFI Photometry and Source Matching
 
 CAR201 WFI photometry is derived from MAST Level-2 calibrated images in Program
 1043. Stellar fluxes are measured with forced apertures at known source
@@ -280,7 +284,7 @@ For photometric weighting, we tabulate each detector's Roman WFI v8
 effective-area curve (see Data Availability) on a 5 nm grid over its full nonzero
 support.
 
-### Stellar SED Estimation
+### 2.3 Stellar SED Estimation
 
 Each star is fit with a grid of PHOENIX/BT-Settl stellar-atmosphere spectra
 (Husser et al. 2013; Allard et al. 2012) to
@@ -350,7 +354,7 @@ wavelength. The TMM represents this layered optical system; the
 ice-thickness-history model describes how the film thickness changes between
 observations and resets.
 
-### TMM Optical Stack and Response
+### 3.1 TMM Optical Stack and Response
 
 For each tile, the optical stack is
 
@@ -431,7 +435,7 @@ real refractive index. The bounds are:
   $n_{j-1}\le n_j\le4$.
 - Absorption index: $k_j=0$ for all three layers.
 
-The coating prior is centered on a three-layer starting design at `1050 nm`,
+The coating prior is centered on a three-layer starting design at 1050 nm,
 with optical thickness near one quarter of that wavelength and a geometric
 sequence of indices based on nominal HgCdTe $n=3.6$. Thicknesses and indices
 are mapped to bounded fit coordinates.
@@ -461,10 +465,10 @@ n_{\mathrm{AR},j}(\lambda)=n_{\mathrm{AR},j,0}
 \exp[\delta_{n,\mathrm{AR},j}(\lambda)],\qquad j=1,2,3.
 $$
 
-Each AR-layer modulation and each HgCdTe modulation is a sum of six broad
-Gaussian curves centered on the LED wavelengths listed in Section 2, with width
-`500 nm`. Subtracting the value at `1050 nm` makes each adjustment zero at the AR
-design wavelength.
+Each AR-layer modulation (Eq. 9) and each HgCdTe modulation (Eq. 8) is a sum of
+six broad Gaussian curves centered on the LED wavelengths listed in Section 2.1,
+with width 500 nm. Subtracting the value at 1050 nm makes each adjustment zero
+at the AR design wavelength.
 
 #### Ice Optical Index and Incidence
 
@@ -472,7 +476,7 @@ We model the ice film as lossless ($k=0$) at normal incidence with a baseline
 refractive index of $n=1.25$, fitting one positive, wavelength-independent
 scale factor per tile in the RCS-only fit.
 
-### Tile Ice-Deposition Rate and Thickness-History Model
+### 3.2 Tile Ice-Deposition Rate and Thickness-History Model
 
 Each detector tile has an independent ice-thickness history. Ice deposits onto
 the detector surface at a positive instantaneous ice-deposition rate. At each
@@ -510,10 +514,10 @@ The third decontamination was brief, so the model does not assume that all ice
 was removed. A nonzero post-event ice thickness can represent residual ice that
 remained on the detector or ice deposited again soon after the event.
 
-### RCS Sufficient Statistics and Likelihood
+### 3.3 RCS Sufficient Statistics and Likelihood
 
 The RCS-only fit uses per-tile sufficient statistics after the fixed
-count-space corrections; decontamination boundaries define the ice-history
+count-space corrections (Eq. 4); decontamination boundaries define the ice-history
 segments. For each tile, LED, and observation group, the reduction retains:
 
 - $N$: valid pixel-pair count;
@@ -524,7 +528,7 @@ These sums are sufficient to reconstruct the exact Gaussian squared error for
 any model prediction for that tile, LED, and observation group.
 
 The observed group mean is $y=S'/N$. Let $m^0_{kg}$ denote the predicted
-reference-relative log change from the band-integrated TMM response. The fitted
+reference-relative log change from the band-integrated TMM response (Eq. 7). The fitted
 $\gamma_{k,s}$ is the wavelength-independent grey log-response correction for
 segment $s$, added to the observed group mean and set to zero in the reference
 segment. The within-group residual sum of squares is
@@ -533,7 +537,7 @@ $$
 \mathrm{SSE}=Q'-\frac{(S')^2}{N}+N(m^0-y-\gamma_{k,s})^2.
 $$
 
-The exact SSE separates into the data-only within-group scatter
+The exact SSE (Eq. 12) separates into the data-only within-group scatter
 $Q'-(S')^2/N$ and the model-dependent residual term above. The first group for
 each LED is the reference, and the forward model compares each current response
 with that LED's first observation.
@@ -558,7 +562,8 @@ $\widetilde N_k=\operatorname{median}_g(N_{kg})$ be its median valid-pixel
 count. The per-tile normalization $w_{kg}=1/\widetilde N_k$ weights each group
 by its valid-pixel count relative to the tile median.
 
-The RCS-only fit's MAP objective adds Gaussian prior penalties:
+The RCS-only fit's MAP objective combines the RCS loss (Eq. 13) with Gaussian
+prior penalties:
 
 $$
 \mathcal{J}_{\mathrm{RCS-only}}(\theta)=
@@ -575,30 +580,30 @@ Using the six LED time series, the RCS-only fit estimates the full optical stack
 and independent per-tile ice histories, including AR and HgCdTe properties,
 ice-index scales, spectral adjustments, and deposition trajectories.
 
-The full-stack transfer matrix is evaluated while the optical state is being
+The full-stack transfer matrix (Eqs. 5--7) is evaluated while the optical state is being
 fit. Once an optical state is fixed, trajectory evaluation interpolates
 precomputed per-LED TMM response curves over ice thickness rather than
 re-evaluating the transfer matrix at every time node.
 
-### RCS-only Fit Priors and Bounds
+### 4.1 RCS-only Fit Priors and Bounds
 
 | Quantity | Parameterization, prior, or fixed convention |
 | --- | --- |
-| AR thickness and real $n$ | Fit per tile within the physical bounds above; broad Gaussian around the 1050 nm quarter-wave design, standard deviation `10` in bounded coordinates |
+| AR thickness and real $n$ | Fit per tile within the physical bounds above; broad Gaussian around the 1050 nm quarter-wave design, standard deviation 10 in bounded coordinates |
 | AR absorption $k$ | Fixed at zero |
-| HgCdTe $n$ and $k$ scales | Independent positive scales per tile; zero-centered normal priors in log scale, standard deviation `0.25` |
-| AR $n$ (independent for each layer) and HgCdTe $n,k$ spectral adjustments | Six broad Gaussian wavelength modes anchored at 1050 nm; separate mode coefficients per AR layer; zero-centered normal priors in log scale, standard deviation `0.10` |
-| Ice real-index scale | Positive, wavelength-independent scale per tile; zero-centered normal prior in log scale, standard deviation `0.01` |
+| HgCdTe $n$ and $k$ scales | Independent positive scales per tile; zero-centered normal priors in log scale, standard deviation 0.25 |
+| AR $n$ (independent for each layer) and HgCdTe $n,k$ spectral adjustments | Six broad Gaussian wavelength modes anchored at 1050 nm; separate mode coefficients per AR layer; zero-centered normal priors in log scale, standard deviation 0.10 |
+| Ice real-index scale | Positive, wavelength-independent scale per tile; zero-centered normal prior in log scale, standard deviation 0.01 |
 | Ice absorption $k$ and incidence | Ice $k=0$; normal incidence |
-| Initial and ordinary reset-segment starting ice thickness | Positive per tile; lognormal prior median `10 nm` and log standard deviation `1.5` (pre-Decon3 starts) |
-| Post-Decon3 starting ice thickness in the Stage 1 MAP fit | Positive per tile; lognormal prior median set from that tile's independent constant-rate warm-up fit; log standard deviation `0.10` |
-| Ice deposition rate | Positive per-tile log-rate at every RCS repeat node; independent lognormal priors with median `12 nm/day` and log standard deviation `1.5`; no temporal smoothness penalty |
-| Post-reset response offset $\gamma_{k,s}$ | One wavelength-independent log correction per tile and reset; zero-centered normal prior, standard deviation `0.1` |
+| Initial and ordinary reset-segment starting ice thickness | Positive per tile; lognormal prior median 10 nm and log standard deviation 1.5 (pre-Decon3 starts) |
+| Post-Decon3 starting ice thickness in the Stage 1 MAP fit | Positive per tile; lognormal prior median set from that tile's independent constant-rate warm-up fit; log standard deviation 0.10 |
+| Ice deposition rate | Positive per-tile log-rate at every RCS repeat node; independent lognormal priors with median 12 nm/day and log standard deviation 1.5; no temporal smoothness penalty |
+| Post-reset response offset $\gamma_{k,s}$ | One wavelength-independent log correction per tile and reset; zero-centered normal prior, standard deviation 0.1 |
 | Per-LED log offset | Fixed at zero |
 
 **Table 3. RCS-only fit parameterization, priors, and fixed conventions.**
 
-### emcee Search and MAP Optimization
+### 4.2 emcee Search and MAP Optimization
 
 The `emcee` ensemble search (Foreman-Mackey et al. 2013) begins with a
 constant-in-time ice-deposition rate,
@@ -617,7 +622,7 @@ Convergence is assessed from objective-change and parameter-step criteria.
 
 ## 5. Joint RCS + Stellar Photometry Model
 
-### Motivation
+### 5.1 Motivation
 
 The RCS measurements provide high-cadence constraints on ice evolution, but
 their spectral coverage is limited to six LED bands. Stellar photometry from
@@ -629,7 +634,7 @@ complex reflection and refines the ice histories jointly against both data sets.
 The modulation is propagated through the ice layer when predicting measured
 counts.
 
-### Joint forward model
+### 5.2 Joint Forward Model
 
 For detector $D$, tile $k$, and wavelength $\lambda$, the modulated ice-free
 reflection is
@@ -737,63 +742,64 @@ detector-specific support edge, taper to zero at the nearest LED, and remain
 at one outside the support:
 
 $$
-H_0(\lambda)=
+\begin{aligned}
+H_0(\lambda)&=
 \begin{cases}
 1,&\lambda\le\kappa_0,\\
 \dfrac{1}{2}\left[1+\cos\!\left(\pi\dfrac{\lambda-\kappa_0}
 {\kappa_1-\kappa_0}\right)\right],&\kappa_0<\lambda<\kappa_1,\\
 0,&\lambda\ge\kappa_1,
 \end{cases}
-\qquad
-H_7(\lambda)=
+\\[6pt]
+H_7(\lambda)&=
 \begin{cases}
 0,&\lambda\le\kappa_6,\\
 \dfrac{1}{2}\left[1-\cos\!\left(\pi\dfrac{\lambda-\kappa_6}
 {\kappa_7-\kappa_6}\right)\right],&\kappa_6<\lambda<\kappa_7,\\
 1,&\lambda\ge\kappa_7.
 \end{cases}
+\end{aligned}
 $$
 
-The 15 functions in the modulation equation are ordered as
+The 15 functions in Eq. (15) are ordered from Eqs. (19)--(22) as
 $B_j=G_j$ for $j=1,\ldots,7$, $B_8=H_0$ (blue endpoint), $B_9=H_7$
 (red endpoint), and $B_{9+i}=H_i$ for LED $i=1,\ldots,6$. Thus the
 LED-centered coefficient directly sets $g_D$ or $\phi_D$ at that LED center;
 the gap modes add independent smooth variation between knots. The LED centers
-are those listed in Section 2.
+are those listed in Section 2.1.
 
 All modes join continuously with zero slope at their knots. Log-amplitude
-coefficients are bounded by +/-0.30 for gap and LED modes and +/-0.60 at the
-endpoints. Phase coefficients are bounded by +/-1 radian.
+coefficients are bounded by $\pm 0.30$ for gap and LED modes and $\pm 0.60$ at the
+endpoints. Phase coefficients are bounded by $\pm 1$ rad.
 
 The amplitude relative-entropy and amplitude/phase curvature penalties
 regularize wavelength-dependent spectral structure. The phase-coefficient term
 applies quadratic shrinkage to each phase coefficient. Their numerical
-definitions and weights are given with the joint objective below.
+definitions and weights are given in Section 5.4 (Eqs. 30--32).
 
 #### RCS and Stellar Photometry Data Terms
 
 For CAR190 (Program 1039) and CAR216 (Program 1063), the model predicts an
 energy-weighted response for each tile, LED, and observation. Predicted changes
-are compared with the corrected sufficient statistics in the RCS Sufficient
-Statistics and Likelihood section, with valid-pixel counts setting the Gaussian
-weights.
+are compared with the corrected sufficient statistics in Section 3.3 (Eq. 13),
+with valid-pixel counts setting the Gaussian weights.
 
 To prevent roll-induced spatial-response steps from being misattributed to ice
 evolution, a per-filter post-roll log-response offset $\zeta_f$ captures the
 aggregate flux shift as stars sample new detector positions. The reference group
 has $\zeta_{f,0}=0$; offsets apply to EP4 passes 2--5, after the EP3 passes and
-EP4 pass 1 reference group. Each is fitted within bounds `+/-0.25`.
+EP4 pass 1 reference group. Each is fitted within bounds $\pm 0.25$.
 This filter-wide offset absorbs only the mean roll step; it cannot correct
 star-to-star spatial-response differences as sources move across the detector's
 L-flat.
 
-Photometric residuals use a Student-$t$ likelihood with four degrees of freedom.
-The reported measurement uncertainty and one detector-level excess scatter term
-are combined as defined in the joint objective below. The heavy-tailed
+Photometric residuals use a Student-$t$ likelihood with four degrees of freedom
+(Eq. 27). The reported measurement uncertainty and one detector-level excess
+scatter term are combined in quadrature (Eq. 26). The heavy-tailed
 likelihood downweights large residuals while retaining the reported uncertainty
 for well-fitting observations.
 
-#### Ice-history refinement
+#### Ice-History Refinement
 
 Each tile starts from its RCS-only ice-thickness history, interpolated to the
 union of RCS and CAR201 observation times within each reset segment. The joint
@@ -808,25 +814,25 @@ adjustments are centered on the starting RCS-only history, with priors and bound
 given in Table 4.
 Because the brief Decon3 leaves a weakly constrained, nonzero starting thickness
 that trades off against early post-reset growth, Stage 2 keeps that boundary
-close to the RCS-only estimate (log-prior width `0.10`) while allowing the
-subsequent rate controls to adjust (log-prior width `1.5`).
+close to the RCS-only estimate (log-prior width 0.10) while allowing the
+subsequent rate controls to adjust (log-prior width 1.5).
 
-#### Joint-fit Priors and Bounds
+### 5.3 Joint-Fit Priors and Bounds
 
 | Quantity | Parameterization | Prior, bounds, or fixed convention |
 | --- | --- | --- |
-| Log-amplitude coefficients $a_{D,j}$ | Shared by tiles on a detector; gap/LED and endpoint coefficients | Bounds `+/-0.30` and `+/-0.60`, respectively; relative-entropy and curvature penalties below |
-| Phase coefficients $p_{D,j}$ | Shared by tiles on a detector | Bounds `+/-1 rad`; coefficient-shrinkage penalty below |
-| Segment-start thickness adjustments $\delta d_{0,k,s}$ | Log adjustments about the starting RCS-derived ice-thickness history, per tile and segment | Zero-centered normal prior; standard deviation `1.5`, except `0.10` after the third decontamination; optimizer bounds $\pm\ln(4)$ |
-| Rate multipliers $\delta q_{k,s,j}$ | Per-tile log multipliers on baseline deposition, with at-most-two-day knot spacing | Zero-centered normal prior, standard deviation `1.5`; optimizer bounds $\pm\ln(4)$ |
+| Log-amplitude coefficients $a_{D,j}$ | Shared by tiles on a detector; gap/LED and endpoint coefficients | Bounds $\pm 0.30$ and $\pm 0.60$, respectively; relative-entropy and curvature penalties (Eqs. 30--31) |
+| Phase coefficients $p_{D,j}$ | Shared by tiles on a detector | Bounds $\pm 1$ rad; coefficient-shrinkage penalty (Eq. 32) |
+| Segment-start thickness adjustments $\delta d_{0,k,s}$ | Log adjustments about the starting RCS-derived ice-thickness history, per tile and segment | Zero-centered normal prior; standard deviation 1.5, except 0.10 after the third decontamination; optimizer bounds $\pm\ln(4)$ |
+| Rate multipliers $\delta q_{k,s,j}$ | Per-tile log multipliers on baseline deposition, with at-most-two-day knot spacing | Zero-centered normal prior, standard deviation 1.5; optimizer bounds $\pm\ln(4)$ |
 | Post-reset response offsets | Fixed from the starting RCS-derived ice-thickness history; one per tile and reset | Retained at their RCS-only MAP values |
-| Post-roll offset $\zeta_f$ | One log-response offset per filter to absorb the aggregate position-dependent response step; zero in the pre-roll group | Fitted within bounds `+/-0.25` |
+| Post-roll offset $\zeta_f$ | One log-response offset per filter to absorb the aggregate position-dependent response step; zero in the pre-roll group | Fitted within bounds $\pm 0.25$ |
 | Star/filter baseline magnitude $b_{sf}$ | Constant star/filter brightness term in the median-centered data | Profiled under the Student-$t$ likelihood |
 | Detector-level excess photometric scatter $\sigma_{\mathrm{det},D}$ | One positive scatter term per detector, added in quadrature to reported photometric uncertainty | Fitted within bounds $10^{-4}$--$100$ mmag |
 
 **Table 4. Joint-fit parameterization, priors, and fixed conventions.**
 
-#### Joint objective
+### 5.4 Joint Objective
 
 The joint objective combines the RCS and stellar-photometry likelihoods with its
 regularization penalties:
@@ -841,9 +847,8 @@ $$
 \mathcal{P}_{\mathrm{phase}}.
 $$
 
-The joint fit uses the same group-mean Gaussian RCS loss defined in the RCS
-Sufficient Statistics and Likelihood section, with weight
-$w_{kg}=1/\widetilde N_k$ and
+The joint fit uses the same group-mean Gaussian RCS loss defined in Section 3.3
+(Eq. 13), with weight $w_{kg}=1/\widetilde N_k$ and
 $\widetilde N_k=\operatorname{median}_g(N_{kg})$ for each tile. Thus each
 group's residual is weighted by its valid-pixel count relative to that tile's
 median.
@@ -917,11 +922,11 @@ u_D(\lambda)=
 +u\left(\lambda_{\min,D}^{-1}-\lambda_{\max,D}^{-1}\right)\right]^{-1}.
 $$
 
-Thus $u=0$ is the red support edge and $u=1$ is the blue edge. In the two
-regularization integrals below, $g_D(u)$ and $\phi_D(u)$ are the wavelength-
-domain curves evaluated at $\lambda_D(u)$; the basis knots and functions are
-unchanged. The phase-coefficient penalty acts directly on the fitted
-coefficients.
+Thus $u=0$ is the red support edge and $u=1$ is the blue edge (Eq. 29). In the
+two regularization integrals below (Eqs. 30--31), $g_D(u)$ and $\phi_D(u)$ are
+the wavelength-domain curves evaluated at $\lambda_D(u)$; the basis knots
+and functions are unchanged. The phase-coefficient penalty (Eq. 32) acts
+directly on the fitted coefficients.
 
 $$
 \mathcal{P}_{\mathrm{entropy}}=
@@ -959,8 +964,8 @@ of $2.91585$. Its unweighted inverse-wavelength integral is
 $1.5423\times10^{-3}$, giving $\lambda_{\mathrm{entropy}}=1890.6$. At zero
 modulation, $g_D(u)=0$ and the entropy integral vanishes.
 
-We minimize the joint objective directly as a scalar function using bounded
-L-BFGS-B.
+We minimize the joint objective (Eq. 23) directly as a scalar function using
+bounded L-BFGS-B.
 
 ## 6. Results and Discussion
 
@@ -974,7 +979,7 @@ measurements enter both fits, and CAR201 measurements enter the joint fit. The
 no-ice-correction reference assumes zero modeled ice response while physical ice
 remains on the detector.
 
-### RCS ice-thickness histories and fit agreement
+### 6.1 RCS Ice-Thickness Histories and Fit Agreement
 
 Figure 3 shows the fitted ice-thickness histories and deposition rates for
 representative WFI02 tile 135.
@@ -1007,24 +1012,17 @@ enough to estimate the segment-average rates in Table 5.
 
 \pagebreak
 
-\begin{center}
-\begin{tabular}{@{}p{3.2cm}p{6.7cm}rr@{}}
-\hline
-\textbf{Summary} & \textbf{Interval / time} & \textbf{Rate} & \textbf{Detector spread} \\
-\hline
-Segment average & Post-Decon1--Decon2 (12.9 days) & 9.9 & 9.0--10.8 \\
- & Decon2--Decon3 & 9.0 & 8.2--9.8 \\
- & Decon3--final RCS observation & 8.1 & 7.2--9.2 \\
-\hline
-Post-reset median & Decon2, 0.5 days after reset & 15.1 & 9.8--18.1 \\
- & Decon2, 7 days after reset & 10.1 & 9.1--10.8 \\
- & Decon2, 20 days after reset & 8.0 & 7.2--8.6 \\
- & Decon3, 0.5 days after reset & 12.7 & 10.7--14.8 \\
- & Decon3, 7 days after reset & 8.7 & 7.6--9.4 \\
- & Decon3, 20 days after reset & 6.7 & 6.0--7.3 \\
-\hline
-\end{tabular}
-\end{center}
+| Summary | Interval / time | Rate | Detector spread |
+| --- | --- | ---: | ---: |
+| Segment average | Post-Decon1--Decon2 (12.9 days) | 9.9 | 9.0--10.8 |
+|  | Decon2--Decon3 | 9.0 | 8.2--9.8 |
+|  | Decon3--final RCS observation | 8.1 | 7.2--9.2 |
+| Post-reset median | Decon2, 0.5 days after reset | 15.1 | 9.8--18.1 |
+|  | Decon2, 7 days after reset | 10.1 | 9.1--10.8 |
+|  | Decon2, 20 days after reset | 8.0 | 7.2--8.6 |
+|  | Decon3, 0.5 days after reset | 12.7 | 10.7--14.8 |
+|  | Decon3, 7 days after reset | 8.7 | 7.6--9.4 |
+|  | Decon3, 20 days after reset | 6.7 | 6.0--7.3 |
 
 **Table 5. Segment-average and post-reset ice-deposition rates from the final
 joint model.** Each detector's segment-average rate is the mean of its 256
@@ -1049,8 +1047,6 @@ indicating that a substantial residual ice layer remains in the model.
 Figure 4 compares the corrected RCS group means with the RCS-only and joint fits;
 its lower panels show the corresponding residuals.
 
-\pagebreak
-
 ![Figure 4. Corrected RCS data and the RCS-only and joint fits for WFI02 tile 135.](./figures/wfi02_tile135_rcs_model_data.png)
 
 **Figure 4. RCS data and fits for WFI02 tile 135.** Each LED panel shows
@@ -1063,9 +1059,7 @@ millilog for the RCS-only and joint fits; unconnected points are slightly offset
 in time for visibility, with a horizontal zero line. Residual axes show the
 central 99.5\% range, with triangles marking off-scale points.
 
-\pagebreak
-
-### Focal-plane ice-thickness pattern
+### 6.2 Focal-Plane Ice-Thickness Pattern
 
 Figure 5 shows the fitted per-tile ice thickness from the joint RCS and
 stellar-photometry model across the full WFI, at the last fitted node in segment
@@ -1083,13 +1077,13 @@ shows the last fitted node in segment 2 before Decon3 (2026-10-19 15:33:38 UTC);
 panel (b) shows the final segment-3 node (2026-11-17 23:33:34 UTC). The maps use
 the detector science-frame tile orientation. The color scale is clipped to the
 1st--99th percentiles of mapped tile values; colorbar end caps indicate clipped
-values. The red cross marks WFI_CEN, the focal-plane center.
+values. The red cross marks `WFI_CEN`, the focal-plane center.
 
-### RCS likelihood scale and residual correlation
+### 6.3 RCS Likelihood Scale and Residual Correlation
 
 Figure 4 illustrates the temporal residual structure summarized below. The fixed
 scale $\sigma_{\log}=0.005$ (5.0 millilog units) is a conservative effective
-width for the count-weighted likelihood. In the corrected RCS statistics, the
+width for the count-weighted likelihood (Eq. 13). In the corrected RCS statistics, the
 median within-group pixel standard deviation is $6.17\times10^{-3}$ in log
 response (10th--90th percentile: $5.66\times10^{-3}$--$7.27\times10^{-3}$),
 with a median of 64,753 valid pixel pairs per group. Treating those pairs as
@@ -1118,9 +1112,7 @@ WFI18 is the clearest detector-level exception: its tile/group residual RMS rise
 from 1.32 millilog before day 60 to 4.41 millilog afterward, with fewer valid
 pairs than the other detectors (Appendix A, Table A2).
 
-\pagebreak
-
-### CAR201 data and predictions
+### 6.4 CAR201 Data and Predictions
 
 Figure 6 shows CAR201 data in the joint fit's model-conditioned zero-ice frame.
 
@@ -1257,7 +1249,7 @@ error. The two largest scales occur on WFI01 and WFI10, which also have the
 thickest modeled ice; this correspondence is descriptive and does not establish
 a causal link.
 
-### Summary and Operational Implications
+### 6.5 Summary and Operational Implications
 
 The two-stage analysis combines high-cadence RCS constraints on ice evolution
 with broad-band stellar constraints on detector response between and beyond the
@@ -1282,8 +1274,8 @@ LED bands. The commissioning results have four main implications:
    LED anchors.
 4. **Limitations and independent validation.** Stellar predictions use
    posterior-median SEDs without propagating the full spectral-parameter
-    covariance, and the remaining millimagnitude residuals are not calibrated
-    prediction intervals. CAR192 (Program 1042) WFI slitless prism
+   covariance, and the remaining millimagnitude residuals are not calibrated
+   prediction intervals. CAR192 (Program 1042) WFI slitless prism
    spectrophotometry, covering roughly 750--1800 nm, is a natural held-out test
    of the inter-LED spectral modulation and reconstructed ice histories when
    those data are reduced; it does not enter the fits presented here.
@@ -1293,7 +1285,7 @@ LED bands. The commissioning results have four main implications:
 - Roman WFI calibrated image products and observation metadata: [MAST](https://mast.stsci.edu/).
 - Updated pre-Decon2 CAR190 calibrated exposures are available from the public Roman CAR190 S3 data collection: `s3://roman-s3-romcom/activities/CAR190/`.
 - Decon2-and-later calibrated RCS exposures: Level-2 products listed in the MAST exposure catalogue.
-- CAR201/Program 1043 Level-2 WFI images and forced-aperture photometry inputs.
+- CAR201/Program 1043 Level-2 WFI images are available from [MAST](https://mast.stsci.edu/); the commissioning forced-aperture photometry catalogs and stellar SED grids used in the joint fit are available from the authors upon request.
 - Detector-specific WFI effective areas: [Roman Space Telescope technical-information repository, revision `14a9b0c98b0da723d0f2e4c6277956183c1fdd06`](https://github.com/RomanSpaceTelescope/roman-technical-information/tree/14a9b0c98b0da723d0f2e4c6277956183c1fdd06).
 - RCS LED spectral-energy distributions: relative output measurements transcribed from the 2024-Oct-25 `sRCS_PersonalityTable.xlsx`, “LED Spectrum” sheet, into the [public Roman WFI technical-information ECSV](https://github.com/RomanSpaceTelescope/roman-technical-information/blob/ff3bcfea58b5693169d7c30fa71dc90fc8346ea3/roman_technical_information/data/WideFieldInstrument/RelativeCalibrationSystem/WFI_RCS_LEDP_spectral_energy_distribution.ecsv) ([data review PR #93](https://github.com/RomanSpaceTelescope/roman-technical-information/pull/93)).
 

@@ -175,8 +175,8 @@ def plot_spectral_coverage() -> tuple[Path, Path]:
     labels = ("a", "b", "c")
     ylabels = ("LED output / peak", "Effective area / filter peak", "Photon SED / peak")
     for axis, label, ylabel in zip(axes, labels, ylabels, strict=True):
-        axis.text(-0.07, 1.02, label, transform=axis.transAxes,
-                  fontsize=10, fontweight="bold")
+        axis.text(0.0, 1.03, label, transform=axis.transAxes,
+                  fontsize=9, fontweight="bold", ha="left", va="bottom")
         axis.set_ylabel(ylabel)
         axis.set_xlim(470, 2700)
         axis.grid(alpha=0.2)
@@ -512,11 +512,11 @@ def plot_rcs_model_data() -> tuple[Path, Path]:
             joint_prediction = rows["predicted"].to_numpy(float)
             rcs_chi2 += float(np.sum(((rcs_prediction - observed_groups) / errors) ** 2))
             joint_model_chi2 += float(np.sum(((joint_prediction - observed_groups) / errors) ** 2))
-            group_count += len(days)
+            group_count += len(days) - 1
         likelihood_rows.append({
             "led": led_number,
             "filter": LED_FILTERS[led_number - 1],
-            "n_tile_groups": group_count,
+            "n_nonreference_tile_groups": group_count,
             "rcs_only_weighted_chi2_per_group": rcs_chi2 / group_count,
             "joint_weighted_chi2_per_group": joint_model_chi2 / group_count,
             "delta_mean_log_likelihood_joint_minus_rcs_only_per_group": (
@@ -524,14 +524,17 @@ def plot_rcs_model_data() -> tuple[Path, Path]:
             ),
         })
     np.testing.assert_allclose(
-        sum(row["joint_weighted_chi2_per_group"] * row["n_tile_groups"] for row in likelihood_rows),
+        sum(
+            row["joint_weighted_chi2_per_group"] * row["n_nonreference_tile_groups"]
+            for row in likelihood_rows
+        ),
         saved_joint_chi2, rtol=2e-7, atol=2e-4,
     )
     likelihood_frame = pd.DataFrame(likelihood_rows)
     likelihood_path = FIGURES / "wfi02_rcs_likelihood_by_led.csv"
     likelihood_frame.to_csv(likelihood_path, index=False, float_format="%.8g")
     rcs_only_total_chi2 = float(sum(
-        row["rcs_only_weighted_chi2_per_group"] * row["n_tile_groups"]
+        row["rcs_only_weighted_chi2_per_group"] * row["n_nonreference_tile_groups"]
         for row in likelihood_rows
     ))
     print(
@@ -1295,14 +1298,23 @@ def plot_focal_plane_ice_thickness() -> tuple[Path, Path]:
     if not color_min < color_max:
         raise ValueError("Focal-plane thickness maps have degenerate color limits")
 
-    figure, axes = plt.subplots(1, 2, figsize=(FIGURE_WIDTH_IN, 3.25))
-    figure.subplots_adjust(left=0.015, right=0.91, top=0.96, bottom=0.12, wspace=0.04)
+    origin = datetime.fromisoformat(RCS_ORIGIN_UTC)
+    segment2_date = origin + timedelta(days=float(days[segment2_index]))
+    segment3_date = origin + timedelta(days=float(days[segment3_index]))
+    panel_titles = (
+        f"Pre-Decon3 ({segment2_date.strftime('%Y-%m-%d')} UTC)",
+        f"Final epoch ({segment3_date.strftime('%Y-%m-%d')} UTC)",
+    )
+
+    figure, axes = plt.subplots(1, 2, figsize=(FIGURE_WIDTH_IN, 2.95))
+    figure.subplots_adjust(left=0.015, right=0.91, top=0.90, bottom=0.10, wspace=0.04)
     image = None
-    for axis, (panel, (map_name, _time_index)) in zip(
-        axes, zip(("a", "b"), endpoint_specs, strict=True), strict=True
+    for axis, (panel, panel_title, (map_name, _time_index)) in zip(
+        axes, zip(("a", "b"), panel_titles, endpoint_specs, strict=True), strict=True
     ):
-        axis.text(-0.025, 1.015, panel, transform=axis.transAxes,
-                  fontsize=9, fontweight="bold", va="bottom")
+        axis.text(0.0, 1.025, panel, transform=axis.transAxes,
+                  fontsize=9, fontweight="bold", ha="left", va="bottom")
+        axis.set_title(panel_title, fontsize=PLOT_FONT_SIZE, pad=4)
         for detector in focal.SCAS:
             x, y = focal.sca_position(detector)
             values = maps[map_name][detector]["ice_thickness_nm"]
@@ -1338,18 +1350,18 @@ def plot_focal_plane_ice_thickness() -> tuple[Path, Path]:
         )
         axis.set_xticks([])
         axis.set_yticks([])
-        axis.set_xlabel("Roman WFI focal-plane mosaic", fontsize=TICK_FONT_SIZE)
         center_x = focal.SCA_PITCH * 3 - 0.5
         center_y = focal.SCA_PITCH * 2 + focal.COLUMN_Y_OFFSET[2] + 1.2
         axis.plot(center_x, center_y, marker="x", color="#d62728",
                   markersize=5, markeredgewidth=1.0)
 
+    figure.text(
+        0.445, 0.025, "Roman WFI focal-plane mosaic",
+        ha="center", va="bottom", fontsize=PLOT_FONT_SIZE,
+    )
     colorbar = figure.colorbar(image, ax=axes, fraction=0.035, pad=0.025, extend="both")
     colorbar.set_label("Fitted ice thickness (nm)", fontsize=PLOT_FONT_SIZE)
     colorbar.ax.tick_params(labelsize=TICK_FONT_SIZE)
-    origin = datetime.fromisoformat(RCS_ORIGIN_UTC)
-    segment2_date = origin + timedelta(days=float(days[segment2_index]))
-    segment3_date = origin + timedelta(days=float(days[segment3_index]))
     print("Focal-plane thickness-map times (UTC):", segment2_date, segment3_date)
 
     detector_mean_rates = []
