@@ -72,14 +72,14 @@ independent validation test using slitless-prism spectroscopy from CAR192
 ## 2. Observational Data and Reduction
 
 Elapsed days are measured from the reference epoch $t_0$ at
-`2026-09-12T01:25:50.714 UTC`, immediately after Decon1. The first modeled
-segment therefore begins just after the first spacecraft decontamination and
-ends at Decon2. Decon2 and Decon3 denote the second and third spacecraft
-decontamination events; they reset the ice-history segments at
+`2026-09-12T01:25:50.714 UTC`, immediately after the first spacecraft
+decontamination event (Decon1). The first modeled segment therefore begins just
+after Decon1 and ends at Decon2. Decon2 and Decon3 denote the second and third
+spacecraft decontamination events; they reset the ice-history segments at
 `2026-09-24T23:12:29.895 UTC` and `2026-10-20T20:34:44.531 UTC`, respectively
 (elapsed days 12.90740 and 38.79785). The final analyzed RCS observation was
-`2026-11-17T23:33:33.773 UTC`. The 10-day Decon4 dryout began on `2026-11-18` and
-falls outside this analysis.
+`2026-11-17T23:33:33.773 UTC`. The 10-day fourth decontamination dryout (Decon4)
+began on `2026-11-18` and falls outside this analysis.
 
 The analysis combines three observational data sets: two RCS flat-field programs
 (CAR190 and CAR216) and broad-band stellar photometry from CAR201 (Table 1).
@@ -608,7 +608,7 @@ re-evaluating the transfer matrix at every time node.
 | AR $n$ (independent for each layer) and HgCdTe $n,k$ spectral adjustments | Six broad Gaussian wavelength modes anchored at 1050 nm; separate mode coefficients per AR layer; zero-centered normal priors in log scale, standard deviation 0.10 |
 | Ice real-index scale | Positive, wavelength-independent scale per tile; zero-centered normal prior in log scale, standard deviation 0.01 |
 | Ice absorption $k$ and incidence | Ice $k=0$; normal incidence |
-| Initial and ordinary reset-segment starting ice thickness | Positive per tile; lognormal prior median 10 nm and log standard deviation 1.5 (pre-Decon3 starts) |
+| Initial and post-Decon2 starting ice thickness | Positive per tile; lognormal prior median 10 nm and log standard deviation 1.5 |
 | Post-Decon3 starting ice thickness in the Stage 1 MAP fit | Positive per tile; lognormal prior median set from that tile's independent constant-rate warm-up fit; log standard deviation 0.10 |
 | Ice deposition rate | Positive per-tile log-rate at every RCS repeat node; independent lognormal priors with median 12 nm/day and log standard deviation 1.5; no temporal smoothness penalty |
 | Post-reset response offset $\gamma_{k,s}$ | One wavelength-independent log correction per tile and reset; zero-centered normal prior, standard deviation 0.1 |
