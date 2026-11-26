@@ -142,6 +142,14 @@ $$
 x_i^{\mathrm{raw}}(t) = \ln C_i(t) - \ln C_i(t_{\mathrm{ref}}).
 $$
 
+The RCS integrating sphere houses dual-redundant Side A and Side B hardware
+paths, each with independent LED banks across the six wavelength bands and
+internal monitoring photodiodes (Schlieder et al. 2024; Cromey et al. 2025).
+Because the two sides use physically distinct LEDs, photodiodes, and
+illumination coupling inside the sphere, switching between them (an RCS side
+swap) introduces LED-dependent steps in both the detector counts and the
+photodiode readings that are unrelated to ice growth and would otherwise bias
+the inferred ice history.
 Photodiode scaling removes changes in LED output, while separate image-count
 and photodiode factors correct the RCS side swap. Both corrections are
 multiplicative count factors (additive offsets in log response); for each
@@ -167,8 +175,13 @@ non-warm-up photodiode reference is used across Programs 1039 (CAR190) and
 1063 (CAR216).
 
 The reduction also corrects count changes for detector temperature and for
-step changes in the overall signal level associated with the Alignment
-Compensation Mechanism (ACM).
+step changes in the overall signal level associated with moves of the Alignment
+Compensation Mechanism (ACM), a six-degree-of-freedom hexapod that positions
+the 18-detector focal plane assembly for on-orbit focus and alignment control
+(Schlieder et al. 2024; Cromey et al. 2025). Repositioning the focal plane
+alters the RCS illumination geometry and optical coupling onto the detectors,
+introducing discrete count-level steps that must be removed before modeling
+the thin-film ice response.
 The temperature predictor is the detector electronics strap temperature,
 averaged over five-minute intervals (telemetry channel
 `WFI_MCE_ADC_WTSM00`). A fixed quadratic in log-count space is used for each
@@ -1304,12 +1317,14 @@ CAR201 stellar photometry for comparison.
 
 - Allard, F., Homeier, D., Freytag, B., & Sharp, C. M. 2012, “Atmospheres From Very Low-Mass Stars to Extrasolar Planets,” *EAS Publications Series*, 57, 3 ([doi:10.1051/eas/1257001](https://doi.org/10.1051/eas/1257001)).
 - Bohlin, R. C., Mészáros, S., Fleming, S. W., Gordon, K. D., Koekemoer, A. M., & Kovács, J. 2017, “A New Stellar Atmosphere Grid and Comparisons with HST/STIS CALSPEC Flux Distributions,” *The Astronomical Journal*, 153, 234 ([doi:10.3847/1538-3881/aa6ba9](https://doi.org/10.3847/1538-3881/aa6ba9)).
+- Cromey, B. M., Sabatke, D. S., Finch, T., et al. 2025, “Roman Wide Field Instrument Optomechanical Assembly Performance Summary,” *Journal of Astronomical Telescopes, Instruments, and Systems*, 11, 044001 ([doi:10.1117/1.JATIS.11.4.044001](https://doi.org/10.1117/1.JATIS.11.4.044001)).
 - Fitzpatrick, E. L. 1999, “Correcting for the Effects of Interstellar Extinction,” *Publications of the Astronomical Society of the Pacific*, 111, 63 ([doi:10.1086/316293](https://doi.org/10.1086/316293)).
 - Flewelling, H. A., Magnier, E. A., Chambers, K. C., et al. 2020, “The Pan-STARRS1 Database and Data Products,” *The Astrophysical Journal Supplement Series*, 251, 7 ([doi:10.3847/1538-4365/abb82d](https://doi.org/10.3847/1538-4365/abb82d)).
 - Foreman-Mackey, D., Hogg, D. W., Lang, D., & Goodman, J. 2013, “emcee: The MCMC Hammer,” *Publications of the Astronomical Society of the Pacific*, 125, 306 ([doi:10.1086/670067](https://doi.org/10.1086/670067)).
 - Gaia Collaboration, Brown, A. G. A., Vallenari, A., et al. 2021, “Gaia Early Data Release 3: Summary of the Contents and Survey Properties,” *Astronomy & Astrophysics*, 649, A1 ([doi:10.1051/0004-6361/202039657](https://doi.org/10.1051/0004-6361/202039657)).
 - Gaia Collaboration, Vallenari, A., Brown, A. G. A., et al. 2023, “Gaia Data Release 3: Summary of the Content and Survey Properties,” *Astronomy & Astrophysics*, 674, A1 ([doi:10.1051/0004-6361/202243940](https://doi.org/10.1051/0004-6361/202243940)).
 - Husser, T.-O., Wende-von Berg, S., Dreizler, S., Homeier, D., Reiners, A., Barman, T., & Hauschildt, P. H. 2013, “A New Extensive Library of PHOENIX Stellar Atmospheres and Synthetic Spectra,” *Astronomy & Astrophysics*, 553, A6 ([doi:10.1051/0004-6361/201219058](https://doi.org/10.1051/0004-6361/201219058)).
+- Schlieder, J. E., Barclay, T., Barnes, A., et al. 2024, “Survey Science with the Nancy Grace Roman Space Telescope Wide Field Instrument,” *Proceedings of SPIE*, 13092, 130920S ([doi:10.1117/12.3020622](https://doi.org/10.1117/12.3020622)).
 - Skrutskie, M. F., Cutri, R. M., Stiening, R., et al. 2006, “The Two Micron All Sky Survey (2MASS),” *The Astronomical Journal*, 131, 1163 ([doi:10.1086/498708](https://doi.org/10.1086/498708)).
 - Speagle, J. S. 2020, “dynesty: A Dynamic Nested Sampling Package for Estimating Bayesian Posteriors and Evidences,” *Monthly Notices of the Royal Astronomical Society*, 493, 3132 ([doi:10.1093/mnras/staa278](https://doi.org/10.1093/mnras/staa278)).
 
