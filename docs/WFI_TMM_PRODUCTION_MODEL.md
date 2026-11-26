@@ -22,30 +22,22 @@ Wide Field Instrument (WFI) detectors alters their wavelength-dependent response
 through thin-film interference. We combine high-cadence Relative Calibration
 System (RCS) flat fields in six LED bands (624--1670 nm) with multi-epoch stellar
 photometry in eight broad filters (470--2335 nm). A thin-film optical model
-infers spatially resolved ice thickness from the flats; joint fitting with the
-stellar data refines the histories and detector response between and beyond the
-LED bands. Observations cover 12 September--17 November 2026, from just after
-the first of three spacecraft decontamination events through the next two; the
-model allows residual ice after each event. Mean deposition rates declined
-across the three intervals: 9.9 nm/day before the second decontamination, 9.0
-between the second and third, and 8.1 after the third. Half a day after the
-second and third decontaminations, median rates were 15.1 and 12.7 nm/day; by
-day 20 they had fallen to 8.0 and 6.7 nm/day. Early peaks may reflect uncertain
-starting thickness or residual detector cooling. At the final observation,
-modeled ice thickness reached 306.1 nm in one WFI01 tile, above the nominal
-300 nm operational limit; a 10-day dryout began the next day. In all 144
-detector/filter combinations, the RCS-only fit lowers the normalized median
-absolute deviation of stellar residuals relative to a reference with zero
-predicted ice response. Joint fitting gives the largest further improvements in
-the bluest and reddest filters. For the Galactic Bulge Time-Domain Survey
-(GBTDS), remaining below 300 nm across a 72-day season without a mid-season
-decontamination would require deposition rates near 4 nm/day, well below the
-commissioning rates measured here, though the 10-day dryout may reduce future
-deposition. Correcting thin-film ice in microlensing photometry is further
-complicated by time-varying composite spectral energy distributions from
-blended magnified and unmagnified stars [Placeholder: summary of microlensing
-event ice-correction findings to be added]. Slitless-prism spectroscopy could
-independently test the reconstruction.
+infers spatially resolved ice thickness from the flats, and joint fitting with
+the stellar data refines the histories and detector response between and beyond
+the LED bands. Across 12 September--17 November 2026 (three intervals separated
+by spacecraft decontaminations, allowing residual ice after each reset), mean
+deposition rates declined from 9.9 to 9.0 and 8.1 nm/day. At the final
+observation, modeled ice reached 306.1 nm in WFI01, above the nominal 300 nm
+limit, just before a 10-day dryout began. Relative to zero modeled ice, the
+RCS-only fit lowers stellar residual scatter in all 144 detector/filter
+combinations, with joint fitting giving the largest further gains in the bluest
+and reddest filters. For the Galactic Bulge Time-Domain Survey (GBTDS), avoiding
+mid-season decontaminations across 70.5-day seasons requires rates near 4 nm/day,
+unless extended dryouts deplete the local volatile reservoir. Correcting ice in
+microlensing light curves is further complicated by time-varying composite
+spectral energy distributions from blended magnified and unmagnified stars
+[Placeholder: summary of microlensing event ice-correction findings to be added].
+Slitless-prism spectroscopy can independently test the reconstruction.
 
 ## 1. Introduction
 
@@ -1299,10 +1291,11 @@ The Galactic Bulge Time-Domain Survey (GBTDS) is one of Roman's Core Community
 Surveys, designed to conduct a census of cold bound exoplanets and
 free-floating planets through gravitational microlensing (Penny et al. 2019;
 Johnson et al. 2020; Roman Observations Time Allocation Committee & Core
-Community Survey Definition Committees 2025). In the nominal survey design,
-Roman monitors Galactic bulge fields across multiple observing seasons of
-approximately 72 days (roughly 70.5 days of high-cadence imaging per season),
-combining roughly 12-minute monitoring in the wide F146 filter with lower-cadence
+Community Survey Definition Committees 2025). In the approved ROTAC survey
+design, Roman monitors Galactic bulge fields across six high-cadence seasons of
+70.5 days each (68.5 days in the first season, within the roughly 72-day bulge
+visibility windows), combining roughly 12-minute monitoring in the wide F146
+filter with lower-cadence
 color observations in F087 and F213, with expected yields of roughly 1,400
 bound exoplanets (Penny et al. 2019) alongside hundreds of free-floating planet
 detections (Johnson et al. 2020). The commissioning ice-deposition results
@@ -1351,18 +1344,18 @@ metrics, and supporting figures to be added here.]*
 ### 7.2 Mid-Season Decontamination Scheduling and Survey Yields
 
 The measured commissioning deposition rates also place tight constraints on
-season-long GBTDS operations. Because each bulge viewing window lasts
-approximately 72 days, keeping every detector tile below the nominal 300 nm
-operational limit over a full season without a mid-season decontamination would
-require a mean deposition rate below roughly $300\,\mathrm{nm}/72\,\mathrm{days}
-\approx 4.2\,\mathrm{nm/day}$ (about 4 nm/day) even if the focal plane starts
-free of ice, and lower still if residual ice remains after the pre-season
-decontamination (for comparison, Decon3 left a median starting thickness of
-33.2 nm). At the commissioning rates measured here (segment averages of
-8.1--9.9 nm/day and 20-day post-reset medians of 6.7--8.0 nm/day; Table 5), the
-thickest detectors would cross the 300 nm operational limit roughly halfway
-through a 72-day season, requiring at least one mid-season decontamination
-event.
+season-long GBTDS operations. Because each standard high-cadence bulge season
+lasts 70.5 days (68.5 days in the first season), keeping every detector tile
+below the nominal 300 nm operational limit over a full season without a
+mid-season decontamination would require a mean deposition rate below roughly
+$300\,\mathrm{nm}/70.5\,\mathrm{days} \approx 4.3\,\mathrm{nm/day}$ (near
+4 nm/day) even if the focal plane starts free of ice, and lower still if
+residual ice remains after the pre-season decontamination (for comparison,
+Decon3 left a median starting thickness of 33.2 nm). At the commissioning rates
+measured here (segment averages of 8.1--9.9 nm/day and 20-day post-reset
+medians of 6.7--8.0 nm/day; Table 5), the thickest detectors would cross the
+300 nm operational limit roughly halfway through a 70.5-day season, requiring
+at least one mid-season decontamination event.
 
 Interrupting a GBTDS season for a decontamination event, together with the
 associated thermal settling and re-cooling period, would create a multi-day gap
@@ -1379,8 +1372,8 @@ detector surfaces without fully exhausting the nearby resident volatile
 population inside the instrument, allowing part of that water to redeposit once
 the focal plane cools. If the longer 10-day dryout clears a substantial
 fraction of this resident ice reservoir, post-Decon4 deposition rates could
-decline further toward the roughly 4 nm/day threshold needed to observe full 72-day
-GBTDS seasons without mid-season interruptions.
+decline further toward the roughly 4 nm/day threshold needed to observe full
+70.5-day GBTDS seasons without mid-season interruptions.
 
 ## 8. Conclusions
 
@@ -1406,7 +1399,7 @@ LED bands. The commissioning results have five main implications:
    F062 (21.2%) and F213 (16.8%), whose bandpasses extend beyond the blue and red
    LED anchors.
 4. **Galactic Bulge Time-Domain Survey impacts.** At the measured commissioning
-   deposition rates, staying below the 300 nm operational limit across a 72-day
+   deposition rates, staying below the 300 nm operational limit across a 70.5-day
    GBTDS season would require a mid-season decontamination (avoiding one
    requires mean rates near 4 nm/day), with unquantified impacts on exoplanet
    yields unless extended dryouts such as the 10-day Decon4 substantially
