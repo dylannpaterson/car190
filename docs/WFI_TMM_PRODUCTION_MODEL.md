@@ -37,8 +37,15 @@ modeled ice thickness reached 306.1 nm in one WFI01 tile, above the nominal
 detector/filter combinations, the RCS-only fit lowers the normalized median
 absolute deviation of stellar residuals relative to a reference with zero
 predicted ice response. Joint fitting gives the largest further improvements in
-the bluest and reddest filters. Slitless-prism spectroscopy could independently
-test the reconstruction.
+the bluest and reddest filters. For the Galactic Bulge Time-Domain Survey
+(GBTDS), remaining below 300 nm across a 72-day season without a mid-season
+decontamination would require deposition rates near 4 nm/day, well below the
+commissioning rates measured here, though the 10-day dryout may reduce future
+deposition. Correcting thin-film ice in microlensing photometry is further
+complicated by time-varying composite spectral energy distributions from
+blended magnified and unmagnified stars [Placeholder: summary of microlensing
+event ice-correction findings to be added]. Slitless-prism spectroscopy could
+independently test the reconstruction.
 
 ## 1. Introduction
 
@@ -65,9 +72,12 @@ This paper describes the observations and reduction (Section 2), develops the
 transfer-matrix method (TMM) optical stack and ice-deposition model (Section 3),
 and presents two modeling stages: the RCS-only fit (Stage 1, Section 4) and the
 joint fit incorporating CAR201 stellar photometry (Stage 2, Section 5). Section
-6 compares their reconstructions, discusses limitations, and outlines an
-independent validation test using slitless-prism spectroscopy from CAR192
-(Program 1042).
+6 compares their reconstructions and residuals. Section 7 discusses the
+implications of WFI ice deposition for the Galactic Bulge Time-Domain Survey
+(GBTDS), including microlensing light-curve modeling and mid-season
+decontamination scheduling. Section 8 summarizes our conclusions, discusses
+limitations, and outlines an independent validation test using slitless-prism
+spectroscopy from CAR192 (Program 1042).
 
 ## 2. Observational Data and Reduction
 
@@ -222,6 +232,13 @@ scope and timing.
 **Table 2. Scope and timing of count-space corrections applied before forming the RCS statistics.**
 
 Figure 2 illustrates the net effect of these corrections for WFI02 tile 135.
+In the uncorrected series, discrete instrumental steps are prominent within the
+ice-growth segments, including the early shared-grey ACM offset in mid-September
+and the large LED-dependent RCS side-swap jump on 6 October (exceeding 0.1 in
+log response in LED 1). Applying photodiode scaling, side-swap factors,
+temperature correction, and ACM offsets removes these discontinuities and
+recovers smooth, repeatable interference curves within each decontamination
+interval, with CAR190 and CAR216 aligning consistently across all six LEDs.
 
 ![Figure 2. Raw and corrected RCS responses for WFI02 tile 135, marked by program.](./figures/wfi02_tile135_raw_vs_corrected.png)
 
@@ -599,6 +616,12 @@ precomputed per-LED TMM response curves over ice thickness rather than
 re-evaluating the transfer matrix at every time node.
 
 ### 4.1 RCS-only Fit Priors and Bounds
+
+Table 3 summarizes the parameterizations, fixed conventions, and prior centers
+and widths entering the Stage 1 MAP objective (Eq. 14). Broad priors regularize
+weakly constrained optical and trajectory parameters, whereas the post-Decon3
+starting thickness is anchored to each tile's independent constant-rate warm-up
+fit to stabilize the brief third decontamination boundary.
 
 | Quantity | Parameterization, prior, or fixed convention |
 | --- | --- |
@@ -980,7 +1003,7 @@ modulation, $g_D(u)=0$ and the entropy integral vanishes.
 We minimize the joint objective (Eq. 23) directly as a scalar function using
 bounded L-BFGS-B.
 
-## 6. Results and Discussion
+## 6. Results
 
 We illustrate the model in detail with detector WFI02 and representative tile
 135, then summarize performance across all 18 WFI detectors in Appendix A. On
@@ -1128,6 +1151,14 @@ pairs than the other detectors (Appendix A, Table A2).
 ### 6.4 CAR201 Data and Predictions
 
 Figure 6 shows CAR201 data in the joint fit's model-conditioned zero-ice frame.
+Across the six filters overlapping the RCS LEDs (F087, F106, F129, F158, F184,
+and broad F146), the RCS-only and joint predictions are nearly identical and
+closely track the observed multi-epoch magnitude changes, including the roughly
+50--60 mmag excursions in F087 and F129 and the muted response in broad F146.
+The clearest differences appear in the edge filters extending beyond the LED
+anchors: in F062 the RCS-only model underpredicts the brightening peak, and in
+F213 it overpredicts the dimming slope, whereas the joint fit's spectral
+modulation brings both filters into close agreement with the observations.
 
 ![Figure 6. Amber CAR201 data and fitted ice-induced magnitude response relative to a zero-ice stack for WFI02.](./figures/wfi02_full_car201_model_data.png)
 
@@ -1262,11 +1293,100 @@ error. The two largest scales occur on WFI01 and WFI10, which also have the
 thickest modeled ice; this correspondence is descriptive and does not establish
 a causal link.
 
-### 6.5 Summary and Operational Implications
+## 7. Discussion: Impacts on the Galactic Bulge Time-Domain Survey
+
+The Galactic Bulge Time-Domain Survey (GBTDS) is one of Roman's Core Community
+Surveys, designed to conduct a census of cold bound exoplanets and
+free-floating planets through gravitational microlensing (Penny et al. 2019;
+Johnson et al. 2020; Roman Observations Time Allocation Committee & Core
+Community Survey Definition Committees 2025). In the nominal survey design,
+Roman monitors Galactic bulge fields across multiple observing seasons of
+approximately 72 days (roughly 70.5 days of high-cadence imaging per season),
+combining roughly 12-minute monitoring in the wide F146 filter with lower-cadence
+color observations in F087 and F213, with expected yields of roughly 1,400
+bound exoplanets (Penny et al. 2019) alongside hundreds of free-floating planet
+detections (Johnson et al. 2020). The commissioning ice-deposition results
+presented here affect the GBTDS on two fronts: photometric modeling of
+individual microlensing events and mid-season decontamination scheduling.
+
+### 7.1 Microlensing Photometry and Time-Varying Composite SEDs
+
+Accurate microlensing light-curve analysis requires modeling or removing the
+thin-film ice response across both the primary wide band and the interleaved
+color bands. Although broad F146 averages over multiple interference fringes
+and shows a smaller median ice-induced excursion than narrower filters (roughly
+10 mmag on WFI02; Figure 6, Table 6), millimagnitude time-dependent trends can
+still distort subtle planetary anomalies or long-timescale parallax signals.
+Meanwhile, the GBTDS color filters F087 and F213 exhibit substantially larger
+ice-induced magnitude shifts (tens of millimagnitudes; Figure 6), directly
+affecting the multi-band color measurements used to characterize the source
+star and infer the angular Einstein radius.
+
+Correcting thin-film ice on a microlensing event is fundamentally more complex
+than correcting an isolated, constant-brightness star. As demonstrated by the
+F062 counterfactual comparison in Section 6.4, the integrated ice response
+depends strongly on the target's spectral energy distribution (SED). In crowded
+Galactic bulge fields, however, the measured flux of a microlensing target is
+generally a blend of multiple light sources: the magnified background source
+star together with unmagnified blend light from the lens itself, possible
+companions to the source or lens, and unrelated neighboring stars. Because only
+the source star is magnified by the time-varying magnification $A(t)$, the
+relative contribution of the source and blend components changes continuously
+over the course of the event. Whenever the source and blend have different
+colors or extinctions, the target's effective composite SED evolves with time.
+A static, single-star ice correction therefore cannot accurately remove the
+thin-film response from a blended microlensing light curve; instead, the
+wavelength-dependent ice transmission must be applied separately to the
+unmagnified and magnified spectral components, or incorporated directly into
+the microlensing forward model.
+
+#### Application to a Microlensing Event (In Preparation)
+
+*[Placeholder (Amber Malpas): Forward-modeling and correction of the
+reconstructed WFI thin-film ice response on a microlensing event, quantifying
+the impact of time-varying source-plus-blend SEDs in F146, F087, and F213 and
+the recovery of microlensing parameters with and without ice modeling. Text,
+metrics, and supporting figures to be added here.]*
+
+### 7.2 Mid-Season Decontamination Scheduling and Survey Yields
+
+The measured commissioning deposition rates also place tight constraints on
+season-long GBTDS operations. Because each bulge viewing window lasts
+approximately 72 days, keeping every detector tile below the nominal 300 nm
+operational limit over a full season without a mid-season decontamination would
+require a mean deposition rate below roughly $300\,\mathrm{nm}/72\,\mathrm{days}
+\approx 4.2\,\mathrm{nm/day}$ (about 4 nm/day) even if the focal plane starts
+free of ice, and lower still if residual ice remains after the pre-season
+decontamination (for comparison, Decon3 left a median starting thickness of
+33.2 nm). At the commissioning rates measured here (segment averages of
+8.1--9.9 nm/day and 20-day post-reset medians of 6.7--8.0 nm/day; Table 5), the
+thickest detectors would cross the 300 nm operational limit roughly halfway
+through a 72-day season, requiring at least one mid-season decontamination
+event.
+
+Interrupting a GBTDS season for a decontamination event, together with the
+associated thermal settling and re-cooling period, would create a multi-day gap
+in high-cadence bulge monitoring. Such gaps reduce sensitivity to
+short-duration planetary signals and free-floating planet events and can
+disrupt coverage near the peaks of ongoing microlensing events, directly
+affecting the survey's exoplanet yields (Penny et al. 2019; Johnson et al.
+2020) in a manner that has not yet been quantified.
+
+A key open operational question is how strongly the extended 10-day Decon4
+dryout (begun 18 November 2026, outside our analyzed data) reduces subsequent
+deposition rates. Brief decontaminations may liberate water ice from the cold
+detector surfaces without fully exhausting the nearby resident volatile
+population inside the instrument, allowing part of that water to redeposit once
+the focal plane cools. If the longer 10-day dryout clears a substantial
+fraction of this resident ice reservoir, post-Decon4 deposition rates could
+decline further toward the roughly 4 nm/day threshold needed to observe full 72-day
+GBTDS seasons without mid-season interruptions.
+
+## 8. Conclusions
 
 The two-stage analysis combines high-cadence RCS constraints on ice evolution
 with broad-band stellar constraints on detector response between and beyond the
-LED bands. The commissioning results have four main implications:
+LED bands. The commissioning results have five main implications:
 
 1. **Spatially varying deposition and operational margin.** Segment-average
    deposition declines across the analyzed intervals (Table 5), while fitted ice
@@ -1285,7 +1405,17 @@ LED bands. The commissioning results have four main implications:
    95 of 108 detector/LED groups. The largest median NMAD reductions are in
    F062 (21.2%) and F213 (16.8%), whose bandpasses extend beyond the blue and red
    LED anchors.
-4. **Limitations and independent validation.** Stellar predictions use
+4. **Galactic Bulge Time-Domain Survey impacts.** At the measured commissioning
+   deposition rates, staying below the 300 nm operational limit across a 72-day
+   GBTDS season would require a mid-season decontamination (avoiding one
+   requires mean rates near 4 nm/day), with unquantified impacts on exoplanet
+   yields unless extended dryouts such as the 10-day Decon4 substantially
+   deplete the resident volatile reservoir. In microlensing light curves,
+   blending of magnified source and unmagnified background or lens light creates
+   a time-varying composite SED that requires component-level or joint ice
+   modeling rather than a static single-star correction. *[Placeholder: summary
+   of Amber Malpas's microlensing event ice-correction findings to be added.]*
+5. **Limitations and independent validation.** Stellar predictions use
    posterior-median SEDs without propagating the full spectral-parameter
    covariance, and the remaining millimagnitude residuals are not calibrated
    prediction intervals. CAR192 (Program 1042) WFI slitless prism
@@ -1324,6 +1454,9 @@ CAR201 stellar photometry for comparison.
 - Gaia Collaboration, Brown, A. G. A., Vallenari, A., et al. 2021, “Gaia Early Data Release 3: Summary of the Contents and Survey Properties,” *Astronomy & Astrophysics*, 649, A1 ([doi:10.1051/0004-6361/202039657](https://doi.org/10.1051/0004-6361/202039657)).
 - Gaia Collaboration, Vallenari, A., Brown, A. G. A., et al. 2023, “Gaia Data Release 3: Summary of the Content and Survey Properties,” *Astronomy & Astrophysics*, 674, A1 ([doi:10.1051/0004-6361/202243940](https://doi.org/10.1051/0004-6361/202243940)).
 - Husser, T.-O., Wende-von Berg, S., Dreizler, S., Homeier, D., Reiners, A., Barman, T., & Hauschildt, P. H. 2013, “A New Extensive Library of PHOENIX Stellar Atmospheres and Synthetic Spectra,” *Astronomy & Astrophysics*, 553, A6 ([doi:10.1051/0004-6361/201219058](https://doi.org/10.1051/0004-6361/201219058)).
+- Johnson, S. A., Penny, M., Gaudi, B. S., et al. 2020, “Predictions of the Nancy Grace Roman Space Telescope Galactic Exoplanet Survey. II. Free-Floating Planet Detection Rates,” *The Astronomical Journal*, 160, 123 ([doi:10.3847/1538-3881/aba75b](https://doi.org/10.3847/1538-3881/aba75b)).
+- Penny, M. T., Gaudi, B. S., Kerins, E., et al. 2019, “Predictions of the WFIRST Microlensing Survey. I. Bound Planet Detection Rates,” *The Astrophysical Journal Supplement Series*, 241, 3 ([doi:10.3847/1538-4365/aafb69](https://doi.org/10.3847/1538-4365/aafb69)).
+- Roman Observations Time Allocation Committee & Core Community Survey Definition Committees 2025, “Roman Observations Time Allocation Committee: Final Report and Recommendations,” arXiv:2505.10574 ([doi:10.48550/arXiv.2505.10574](https://doi.org/10.48550/arXiv.2505.10574)).
 - Schlieder, J. E., Barclay, T., Barnes, A., et al. 2024, “Survey Science with the Nancy Grace Roman Space Telescope Wide Field Instrument,” *Proceedings of SPIE*, 13092, 130920S ([doi:10.1117/12.3020622](https://doi.org/10.1117/12.3020622)).
 - Skrutskie, M. F., Cutri, R. M., Stiening, R., et al. 2006, “The Two Micron All Sky Survey (2MASS),” *The Astronomical Journal*, 131, 1163 ([doi:10.1086/498708](https://doi.org/10.1086/498708)).
 - Speagle, J. S. 2020, “dynesty: A Dynamic Nested Sampling Package for Estimating Bayesian Posteriors and Evidences,” *Monthly Notices of the Royal Astronomical Society*, 493, 3132 ([doi:10.1093/mnras/staa278](https://doi.org/10.1093/mnras/staa278)).
