@@ -143,7 +143,7 @@ x_i^{\mathrm{raw}}(t) = \ln C_i(t) - \ln C_i(t_{\mathrm{ref}}).
 $$
 
 Photodiode scaling removes changes in LED output, while separate image-count
-and photodiode factors correct the readout-side swap. Both corrections are
+and photodiode factors correct the RCS side swap. Both corrections are
 multiplicative count factors (additive offsets in log response); for each
 detector and LED, we fit continuous splines with a log-step at the side-swap
 boundary. Each factor is one before the event. Let $f_{\mathrm{img}}(t)$ and
@@ -202,7 +202,7 @@ scope and timing.
 | Correction | Scope | Timing or event times (UTC) |
 | --- | --- | --- |
 | Photodiode scaling | Per LED; first non-warm-up PD2 reading is the reference | Applied exposure by exposure |
-| Readout-side swap | Separate image-count and photodiode factors per detector and LED | Fitted boundaries span 2026-10-06 08:07–08:18 across LEDs |
+| RCS side swap | Separate image-count and photodiode factors per detector and LED | Fitted boundaries span 2026-10-06 08:07–08:18 across LEDs |
 | Temperature-dependent sensitivity | Per-tile quadratic, applied equally to all six LEDs | Applied per exposure when five-minute `WFI_MCE_ADC_WTSM00` telemetry is available |
 | ACM signal-level steps | Shared-grey or LED-specific log offsets | Shared-grey: 2026-09-14 23:52, 2026-09-23 08:49, and 2026-10-09 04:49; per LED: 2026-09-27 15:10 and 2026-10-04 04:54 |
 
